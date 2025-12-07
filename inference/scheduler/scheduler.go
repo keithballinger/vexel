@@ -33,6 +33,11 @@ func NewScheduler(rt *runtime.ModelRuntime, config Config) (*Scheduler, error) {
 	}, nil
 }
 
+// AddSequence registers a new sequence with the scheduler.
+func (s *Scheduler) AddSequence(seq *Sequence) {
+	s.sequences[seq.ID()] = seq
+}
+
 // Run starts the scheduler's main loop.
 // It blocks until the context is canceled or a fatal error occurs.
 func (s *Scheduler) Run(ctx context.Context) error {
@@ -69,6 +74,11 @@ func (s *Scheduler) step(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// SequenceCount returns the number of active sequences.
+func (s *Scheduler) SequenceCount() int {
+	return len(s.sequences)
 }
 
 // collectReady identifies sequences that are eligible for execution.

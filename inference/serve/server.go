@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 	"vexel/inference/scheduler"
 )
 
@@ -89,12 +90,17 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Integrate with Scheduler
-	// For now, return a mock response to pass the test structure.
-	// Real implementation will:
 	// 1. Create Sequence
+	// TODO: UUID generation. For now, pseudo-random or counter.
+	// Since we don't have a shared counter yet, let's use a time-based ID for demo.
+	seqID := scheduler.SequenceID(time.Now().UnixNano())
+	seq := scheduler.NewSequence(seqID, req.Prompt)
+	
 	// 2. Add to Scheduler
-	// 3. Wait for completion (using a channel or future)
+	s.scheduler.AddSequence(seq)
+	
+	// 3. Wait for completion (stubbed: we just return immediately for non-streaming check)
+	// In a real system, we'd wait for a channel inside seq.
 	
 	resp := map[string]string{
 		"text": "Mock response for: " + req.Prompt,

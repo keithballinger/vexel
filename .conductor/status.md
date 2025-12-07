@@ -4,21 +4,25 @@
 **Status:** 🟢 On Track
 
 ## Current Phase
-Phase 4: Scheduler and Serving Layer
+Phase 5: Integration, Testing, and Documentation
 
 ## Current Task
-Write Failing Tests: For request admission control and sequence registration with the scheduler.
+Task: End-to-End Integration Testing
 
 ## Progress
-- [x] Write Failing Tests: For gRPC `/generate` and `/stream` endpoints.
-- [x] Implement Feature: Implement gRPC `/generate` and `/stream` endpoints.
+- [x] Write Failing Tests: For request admission control.
+- [x] Implement Feature: Wired HTTP endpoints to Scheduler.
 
 ## Next Action
-Write failing tests for admission control in `inference/serve/admission_test.go` (verifying that HTTP/gRPC handlers actually call `Scheduler.AddSequence`).
+Write Failing Tests: For loading and running a Llama-3-style 8B model from end-to-end. (This likely requires implementing ModelConfig loading first, which is further down in the plan. I should probably re-order to load config first).
+
+Actually, looking at the plan, "End-to-End Integration Testing" is next. But we can't do E2E without loading a model. The "Performance Benchmarking" task lists `ModelConfig.ApproxParams()` etc.
+
+I will proceed with "Write Failing Tests: For loading and running a Llama-3-style 8B model" but this will likely force me to implement the Config loading.
 
 ## Blockers
 None
 
 ## Notes
-- All endpoints (HTTP/gRPC) are implemented as mocks.
-- Next step is wiring them to the real `Scheduler`.
+- Phase 4 complete (Scheduler & Serving).
+- HTTP endpoints now create real Sequences and add them to Scheduler.

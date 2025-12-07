@@ -6,15 +6,18 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"vexel/inference/runtime"
+	"vexel/inference/scheduler"
 	"vexel/inference/serve"
 )
 
 func TestGenerateEndpoint(t *testing.T) {
 	// Setup server
-	// We need a mock scheduler or a way to inject it.
-	// For now, assuming NewServer takes a Scheduler (or interface).
+	rt := &runtime.ModelRuntime{}
+	cfg := scheduler.Config{MaxBatchSize: 1, MaxSequences: 1}
+	sched, _ := scheduler.NewScheduler(rt, cfg)
 	
-	server := serve.NewServer(nil) // Passing nil scheduler for now, expecting structural setup
+	server := serve.NewServer(sched)
 
 	// Create request payload
 	payload := map[string]string{
