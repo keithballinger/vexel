@@ -4,7 +4,6 @@ import (
 	"testing"
 	"vexel/inference/kv"
 	"vexel/inference/runtime"
-	"vexel/inference/tensor"
 )
 
 func TestBatchRuntimeInputs(t *testing.T) {

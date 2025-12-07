@@ -7,20 +7,20 @@
 Phase 2: Intermediate Representation and Runtime
 
 ## Current Task
-Implement Feature: Define `BatchRuntimeInputs` struct.
+Write Failing Tests: For the high-level `DecodeStep` function signature and its return types.
 
 ## Progress
-- [x] Write Failing Tests: For `ModelRuntime`.
-- [x] Implement Feature: Define `ModelRuntime`.
-- [x] Write Failing Tests: For `BatchRuntimeInputs` struct initialization.
-- [ ] Implement Feature: Define `BatchRuntimeInputs` struct.
+- [x] Write Failing Tests: For `BatchRuntimeInputs`.
+- [x] Implement Feature: Define `BatchRuntimeInputs`.
+- [ ] Write Failing Tests: For the high-level `DecodeStep` function signature and its return types.
+- [ ] Implement Feature: Implement `DecodeStep` function (high-level structure).
 
 ## Next Action
-Implement `BatchRuntimeInputs` in `inference/runtime/inputs.go`.
+Write failing test for `DecodeStep` in `inference/runtime/decode_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/runtime/inputs_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `BatchRuntimeInputs` struct.
+- Verified with passing tests.
