@@ -7,20 +7,20 @@
 Phase 2: Intermediate Representation and Runtime
 
 ## Current Task
-Implement Feature: Define `TensorID`, `OpKind`, and `OpNode`.
+Write Failing Tests: For `BlockIR` struct initialization, including inputs, outputs, and nodes.
 
 ## Progress
-- [x] Write Failing Tests: For `cpuBackend`.
-- [x] Implement Feature: Create `cpuBackend`.
 - [x] Write Failing Tests: For `OpKind` and `OpNode`.
-- [ ] Implement Feature: Define `TensorID`, `OpKind`, and `OpNode`.
+- [x] Implement Feature: Define `OpKind` and `OpNode`.
+- [ ] Write Failing Tests: For `BlockIR` struct initialization, including inputs, outputs, and nodes.
+- [ ] Implement Feature: Define `BlockIR` struct.
 
 ## Next Action
-Implement `OpNode` in `inference/ir/types.go`.
+Write failing test for `BlockIR` in `inference/ir/block_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/ir/ir_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `OpKind` and `OpNode`.
+- Verified with passing tests.
