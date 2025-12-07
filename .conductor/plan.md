@@ -34,7 +34,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Define `QuantizedTensor` struct. (Started: 2025-12-07 13:45, Completed: 2025-12-07 13:47)
 
 ### Task: Implement Paged KV Cache Core Structures (`inference/kv/`)
-- [ ] Write Failing Tests: For `KVConfig` struct and initialization.
+- [x] Write Failing Tests: For `KVConfig` struct and initialization. (Started: 2025-12-07 13:50, Completed: 2025-12-07 13:52)
 - [ ] Implement Feature: Define `KVConfig` struct.
 - [ ] Write Failing Tests: For `KVCache` struct initialization and basic page management (conceptual).
 - [ ] Implement Feature: Define `KVCache` struct.
