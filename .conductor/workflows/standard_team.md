@@ -17,7 +17,7 @@ All tasks follow a strict lifecycle:
 
 1. **Select Task:** Choose the next available task from `plan.md` in sequential order
 
-2. **Mark In Progress:** Before beginning work, edit `plan.md` and change the task from `[ ]` to `[~]`
+2. **Mark In Progress:** Before beginning work, edit `plan.md` and change the task from `[ ]` to `[~]`. **Crucially**, append the current date and time to the task line (e.g., `[~] Task Name (Started: 2025-12-07 10:00)`) to track the exact start time.
 
 3. **Write Failing Tests (Red Phase):**
    - Create a new test file for the feature or bug fix.
@@ -51,7 +51,11 @@ All tasks follow a strict lifecycle:
 
 8. **Attach Task Summary with Git Notes:**
    - **Step 8.1: Get Commit Hash:** Obtain the hash of the *just-completed commit* (`git log -1 --format="%H"`).
-   - **Step 8.2: Draft Note Content:** Create a detailed summary for the completed task. This should include the task name, a summary of changes, a list of all created/modified files, and the core "why" for the change.
+   - **Step 8.2: Draft Note Content:** Create an **incredibly thorough** summary for the completed task. **This note must be at least 2-3 times more detailed than a standard commit message.** It should serve as a comprehensive historical record, detailing:
+     - The full context of the task.
+     - A deep dive into *why* specific technical decisions were made.
+     - A detailed list of modified files and the nature of the changes in each.
+     - Any trade-offs considered or architectural implications.
    - **Step 8.3: Attach Note:** Use the `git notes` command to attach the summary to the commit.
      ```bash
      # The note content from the previous step is passed via the -m flag.
@@ -211,7 +215,7 @@ A task is complete when:
 4. Documentation complete (if applicable)
 5. Code passes all configured linting and static analysis checks
 6. Works beautifully on mobile (if applicable)
-7. Implementation notes added to `plan.md`
+7. `plan.md` updated: Task marked as `[x]` with the completion date and time recorded (e.g., `[x] Task Name (Started: ... Completed: 2025-12-07 14:00)`). Implementation notes added if necessary.
 8. `status.md` updated
 9. Changes committed with proper message
 10. Git note with task summary attached to the commit
