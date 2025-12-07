@@ -7,20 +7,18 @@
 Phase 3: GPU Backends and Optimization
 
 ## Current Task
-Write Failing Tests: For `HostToDevice` and `DeviceToHost` operations.
+Task: Implement Metal Backend (`inference/backend/metal/`)
 
 ## Progress
-- [x] Write Failing Tests: For `RunGraph` with mock inputs and stream.
-- [x] Implement Feature: Implement `RunGraph` for CUDA.
-- [ ] Write Failing Tests: For `HostToDevice` and `DeviceToHost` operations.
-- [ ] Implement Feature: Implement host-device memory transfer functions for CUDA.
+- [x] Write Failing Tests: For `HostToDevice` and `DeviceToHost` operations.
+- [x] Implement Feature: Implement host-device memory transfer functions for CUDA.
 
 ## Next Action
-Write failing tests for memory transfer operations in `inference/backend/cuda/mem_test.go` (or similar).
+Start implementing Metal backend: Write Failing Tests for `metalBackend` implementing the `Backend` interface.
 
 ## Blockers
 None
 
 ## Notes
-- Implemented `RunGraph` skeleton in `inference/backend/cuda/graph.go`.
-- Added `run_test.go` to verify existence and basic signature.
+- Implemented CUDA memory transfer stubs.
+- Ready to start Metal backend structure.

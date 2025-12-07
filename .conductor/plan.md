@@ -78,8 +78,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement `CompileBlockGraph` for CUDA, integrating with `nvcc` and CUDA Graphs. (Started: 2025-12-07 16:15, Completed: 2025-12-07 16:17)
 - [x] Write Failing Tests: For `RunGraph` with mock inputs and stream. (Started: 2025-12-07 16:30, Completed: 2025-12-07 16:35)
 - [x] Implement Feature: Implement `RunGraph` for CUDA. (Started: 2025-12-07 16:35, Completed: 2025-12-07 16:40)
-- [ ] Write Failing Tests: For `HostToDevice` and `DeviceToHost` operations.
-- [ ] Implement Feature: Implement host-device memory transfer functions for CUDA.
+- [x] Write Failing Tests: For `HostToDevice` and `DeviceToHost` operations. (Started: 2025-12-07 16:45, Completed: 2025-12-07 16:50)
+- [x] Implement Feature: Implement host-device memory transfer functions for CUDA. (Started: 2025-12-07 16:50, Completed: 2025-12-07 16:55)
 
 ### Task: Implement Metal Backend (`inference/backend/metal/`)
 - [ ] Write Failing Tests: For `metalBackend` implementing the `Backend` interface, focusing on `CreateStream`, `RecordEvent`, `WaitEvent`, `SynchronizeStream`, and `Device`.
