@@ -63,7 +63,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Write Failing Tests: For `BlockRuntime` struct initialization. (Started: 2025-12-07 15:20, Completed: 2025-12-07 15:22)
 - [x] Implement Feature: Define `BlockRuntime` struct. (Started: 2025-12-07 15:25, Completed: 2025-12-07 15:27)
 - [x] Write Failing Tests: For `ModelRuntime` struct initialization (requires `Backend`, `InferenceContext`, `KVCache`). (Started: 2025-12-07 15:30, Completed: 2025-12-07 15:32)
-- [ ] Implement Feature: Define `ModelRuntime` struct (initial structure).
+- [x] Implement Feature: Define `ModelRuntime` struct (initial structure). (Started: 2025-12-07 15:35, Completed: 2025-12-07 15:37)
 - [ ] Write Failing Tests: For `BatchRuntimeInputs` struct initialization.
 - [ ] Implement Feature: Define `BatchRuntimeInputs` struct.
 - [ ] Write Failing Tests: For the high-level `DecodeStep` function signature and its return types.

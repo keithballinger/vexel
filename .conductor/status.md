@@ -7,20 +7,20 @@
 Phase 2: Intermediate Representation and Runtime
 
 ## Current Task
-Implement Feature: Define `ModelRuntime` struct.
+Write Failing Tests: For `BatchRuntimeInputs` struct initialization.
 
 ## Progress
-- [x] Write Failing Tests: For `BlockRuntime`.
-- [x] Implement Feature: Define `BlockRuntime`.
-- [x] Write Failing Tests: For `ModelRuntime` struct initialization.
-- [ ] Implement Feature: Define `ModelRuntime` struct (initial structure).
+- [x] Write Failing Tests: For `ModelRuntime`.
+- [x] Implement Feature: Define `ModelRuntime`.
+- [ ] Write Failing Tests: For `BatchRuntimeInputs` struct initialization.
+- [ ] Implement Feature: Define `BatchRuntimeInputs` struct.
 
 ## Next Action
-Implement `ModelRuntime` in `inference/runtime/model.go`.
+Write failing test for `BatchRuntimeInputs` in `inference/runtime/inputs_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/runtime/model_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `ModelRuntime` struct.
+- Verified with passing tests.
