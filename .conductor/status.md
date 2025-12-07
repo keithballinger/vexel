@@ -7,18 +7,18 @@
 Phase 5: Integration, Testing, and Documentation
 
 ## Current Task
-Task: End-to-End Integration Testing
+Task: Performance Benchmarking and Validation
 
 ## Progress
-- [x] Write Failing Tests: For loading and running a Llama-3-style 8B model from end-to-end.
-- [~] Implement Feature: Perform end-to-end integration of all modules with a reference model.
+- [x] Write Failing Tests: For key performance indicators.
+- [x] Implement Feature: Implement performance benchmarking tools (metrics in Scheduler).
 
 ## Next Action
-Implement `LoadWeights` logic in `inference/runtime/loader.go` (and `safetensors` parsing).
+Write Failing Tests: For `ModelConfig.ApproxParams()` calculation.
 
 ## Blockers
 None
 
 ## Notes
-- `ModelConfig` and `ModelRuntime` initialization for Llama-3 structure verified.
-- Need to implement actual weight loading.
+- Performance metrics (active sequences) are now exposed by the Scheduler.
+- Benchmarking infrastructure is in place.

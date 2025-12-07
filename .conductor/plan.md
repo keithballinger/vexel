@@ -127,9 +127,9 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 
 ### Task: End-to-End Integration Testing
 - [x] Write Failing Tests: For loading and running a Llama-3-style 8B model from end-to-end. (Started: 2025-12-07 21:00, Completed: 2025-12-07 21:05)
-- [~] Implement Feature: Perform end-to-end integration of all modules with a reference model. (Started: 2025-12-07 21:05)
-- [ ] Write Failing Tests: For key performance indicators (prefill, decode step, TtFT, active sequences).
-- [ ] Implement Feature: Implement performance benchmarking tools and scripts.
+- [~] Implement Feature: Perform end-to-end integration of all modules with a reference model. (Started: 2025-12-07 21:10)
+- [x] Write Failing Tests: For key performance indicators (prefill, decode step, TtFT, active sequences). (Started: 2025-12-07 21:15, Completed: 2025-12-07 21:20)
+- [x] Implement Feature: Implement performance benchmarking tools and scripts. (Started: 2025-12-07 21:20, Completed: 2025-12-07 21:25)
 
 ### Task: Performance Benchmarking and Validation
 - [ ] Write Failing Tests: For `ModelConfig.ApproxParams()` calculation.

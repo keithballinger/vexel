@@ -13,11 +13,19 @@ type Config struct {
 	MaxSequences int
 }
 
+// SchedulerMetrics holds performance indicators.
+type SchedulerMetrics struct {
+	ActiveSequences int
+	CompletedSequences int
+	TotalTokens int
+}
+
 // Scheduler manages the execution of sequences.
 type Scheduler struct {
 	runtime   *runtime.ModelRuntime
 	config    Config
 	sequences map[SequenceID]*Sequence
+	metrics   SchedulerMetrics
 }
 
 // NewScheduler creates a new Scheduler instance.
@@ -31,11 +39,6 @@ func NewScheduler(rt *runtime.ModelRuntime, config Config) (*Scheduler, error) {
 		config:    config,
 		sequences: make(map[SequenceID]*Sequence),
 	}, nil
-}
-
-// AddSequence registers a new sequence with the scheduler.
-func (s *Scheduler) AddSequence(seq *Sequence) {
-	s.sequences[seq.ID()] = seq
 }
 
 // Run starts the scheduler's main loop.
@@ -62,6 +65,9 @@ func (s *Scheduler) step(ctx context.Context) error {
 	// 1. Collect ready sequences
 	ready := s.collectReady()
 	
+	// Update Active Sequences metric
+	s.metrics.ActiveSequences = len(s.sequences)
+	
 	// 2. Form batch
 	batch := s.formBatches(ready)
 	if len(batch) == 0 {
@@ -74,11 +80,6 @@ func (s *Scheduler) step(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-// SequenceCount returns the number of active sequences.
-func (s *Scheduler) SequenceCount() int {
-	return len(s.sequences)
 }
 
 // collectReady identifies sequences that are eligible for execution.
@@ -122,4 +123,19 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 	// We ignore the output tensor for now as we aren't processing logits yet.
 	_, err := s.runtime.DecodeStep(inputs)
 	return err
+}
+
+// AddSequence registers a new sequence with the scheduler.
+func (s *Scheduler) AddSequence(seq *Sequence) {
+	s.sequences[seq.ID()] = seq
+}
+
+// SequenceCount returns the number of active sequences.
+func (s *Scheduler) SequenceCount() int {
+	return len(s.sequences)
+}
+
+// Metrics returns the current performance metrics.
+func (s *Scheduler) Metrics() SchedulerMetrics {
+	return s.metrics
 }
