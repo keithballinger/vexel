@@ -7,20 +7,20 @@
 Phase 1: Foundation and Core Components
 
 ## Current Task
-Implement Feature: Define the `Backend` interface.
+Write Failing Tests: For a basic `cpuBackend` implementation.
 
 ## Progress
-- [x] Write Failing Tests: For `PageIndex` and `SeqKVHandle`.
-- [x] Implement Feature: Define `PageIndex` and `SeqKVHandle`.
 - [x] Write Failing Tests: For `Backend` interface.
-- [ ] Implement Feature: Define the `Backend` interface.
+- [x] Implement Feature: Define `Backend` interface.
+- [ ] Write Failing Tests: For a basic `cpuBackend` implementation (e.g., `CreateStream` returning a dummy stream, `Device` returning `DeviceCPU`).
+- [ ] Implement Feature: Create a placeholder `cpuBackend`.
 
 ## Next Action
-Implement `Backend` interface in `inference/backend/cpu/interface.go`.
+Write failing test for `cpuBackend` in `inference/backend/cpu/cpu_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/backend/cpu/interface_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `Backend` interface.
+- Verified with passing tests.
