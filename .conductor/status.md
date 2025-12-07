@@ -10,15 +10,15 @@ Phase 5: Integration, Testing, and Documentation
 Task: Performance Benchmarking and Validation
 
 ## Progress
-- [x] Write Failing Tests: For `ScratchBytes()`.
-- [x] Implement Feature: Implement `ScratchBytes()`.
+- [x] Write Failing Tests: For `ModelConfig.MemoryPlan()`.
+- [x] Implement Feature: Implement `ModelConfig.MemoryPlan()`.
 
 ## Next Action
-Write Failing Tests: For `ModelConfig.MemoryPlan()` aggregating all memory calculations.
+Implement Feature: Conduct comprehensive performance benchmarking against defined targets for throughput, latency, and VRAM usage on both CUDA and Metal.
 
 ## Blockers
 None
 
 ## Notes
-- `ScratchBytes` logic added.
-- All individual memory components (`Weights`, `KV`, `Scratch`) are now estimable.
+- All memory estimation tools are complete.
+- Ready to move to actual benchmarking or comprehensive documentation/refinement.

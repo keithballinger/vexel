@@ -16,6 +16,14 @@ type ModelConfig struct {
 	DType            tensor.DType
 }
 
+// MemoryPlan holds the estimated memory usage breakdown.
+type MemoryPlan struct {
+	Weights int64
+	KV      int64
+	Scratch int64
+	Total   int64
+}
+
 // Llama3_8B returns the configuration for the Llama 3 8B model.
 func Llama3_8B() ModelConfig {
 	return ModelConfig{
@@ -78,20 +86,13 @@ func (c ModelConfig) WeightsBytes(profile tensor.QuantProfile) int64 {
 	
 	switch profile {
 	case tensor.QuantNone:
-		// Use DType size (default BF16/FP16 = 2 bytes)
-		// Assuming DType SizeBytes method exists or we hardcode for now.
-		// tensor.DType usually has SizeBytes().
-		// BFloat16 is 2 bytes.
 		return params * 2
 	case tensor.Q8_0:
-		// 8 bits = 1 byte per param + small overhead for blocks
-		// Simplified: 1 byte
 		return params
 	case tensor.Q4_0:
-		// 4 bits = 0.5 bytes per param + overhead
 		return params / 2
 	default:
-		return params * 2 // Default to 16-bit
+		return params * 2
 	}
 }
 
@@ -112,19 +113,27 @@ func (c ModelConfig) KVBytes(activeSequences int, contextLen int, profile tensor
 
 // ScratchBytes calculates the peak scratch memory required for a given batch size.
 func (c ModelConfig) ScratchBytes(maxBatchSize int) int64 {
-	// Peak usage scenarios:
-	// 1. Logits calculation: [Batch, Vocab]
 	logits := int64(maxBatchSize) * int64(c.VocabSize)
-	
-	// 2. MLP Expansion: [Batch, Intermediate]
 	mlp := int64(maxBatchSize) * int64(c.IntermediateSize)
-	
-	// Bytes per element (assume high precision for activations)
 	bytesPerElem := int64(2)
 	
-	// Return the larger of the two peaks
 	if logits > mlp {
 		return logits * bytesPerElem
 	}
 	return mlp * bytesPerElem
+}
+
+// MemoryPlan aggregates memory usage estimates into a comprehensive plan.
+func (c ModelConfig) MemoryPlan(batchSize int, contextLen int, weightsProfile tensor.QuantProfile) MemoryPlan {
+	weights := c.WeightsBytes(weightsProfile)
+	// For KV cache, assuming standard precision (BF16) for now as we don't pass separate profile yet
+	kv := c.KVBytes(batchSize, contextLen, tensor.QuantNone)
+	scratch := c.ScratchBytes(batchSize)
+	
+	return MemoryPlan{
+		Weights: weights,
+		KV:      kv,
+		Scratch: scratch,
+		Total:   weights + kv + scratch,
+	}
 }
