@@ -10,15 +10,15 @@ Phase 5: Integration, Testing, and Documentation
 Task: Performance Benchmarking and Validation
 
 ## Progress
-- [x] Write Failing Tests: For key performance indicators.
-- [x] Implement Feature: Implement performance benchmarking tools (metrics in Scheduler).
+- [x] Write Failing Tests: For `ModelConfig.ApproxParams()`.
+- [x] Implement Feature: Implement `ModelConfig.ApproxParams()`.
 
 ## Next Action
-Write Failing Tests: For `ModelConfig.ApproxParams()` calculation.
+Write Failing Tests: For `ModelConfig.WeightsBytes()` calculation.
 
 ## Blockers
 None
 
 ## Notes
-- Performance metrics (active sequences) are now exposed by the Scheduler.
-- Benchmarking infrastructure is in place.
+- `ModelConfig` now supports parameter estimation.
+- Need to calculate memory usage next.

@@ -31,3 +31,43 @@ func Llama3_8B() ModelConfig {
 		DType:             tensor.BFloat16,
 	}
 }
+
+// ApproxParams estimates the total number of parameters in the model.
+func (c ModelConfig) ApproxParams() int64 {
+	// Embedding: Vocab * Hidden
+	embedding := int64(c.VocabSize) * int64(c.HiddenSize)
+
+	// Per Layer:
+	// Attention:
+	// Q, K, V, O projections
+	// Q: Hidden * Hidden
+	// K: Hidden * (Hidden * KV / Heads) -> Hidden * HeadDim * KV
+	// V: Hidden * HeadDim * KV
+	// O: Hidden * Hidden
+	
+	headDim := int64(c.HiddenSize) / int64(c.NumAttentionHeads)
+	kvSize := headDim * int64(c.NumKeyValueHeads)
+	
+	attn := int64(c.HiddenSize)*int64(c.HiddenSize) + // Q
+		int64(c.HiddenSize)*kvSize + // K
+		int64(c.HiddenSize)*kvSize + // V
+		int64(c.HiddenSize)*int64(c.HiddenSize)   // O
+
+	// MLP:
+	// Gate, Up, Down
+	// Gate: Hidden * Intermediate
+	// Up: Hidden * Intermediate
+	// Down: Intermediate * Hidden
+	mlp := int64(c.HiddenSize)*int64(c.IntermediateSize)*3
+
+	// Norms (RMSNorm is usually just Hidden size per layer x 2 for Attn/MLP norm)
+	// We ignore small params like norms for "Approx" usually, but let's add them for fun.
+	norms := int64(c.HiddenSize) * 2
+
+	layerParams := attn + mlp + norms
+
+	// Output Head: Vocab * Hidden
+	output := int64(c.VocabSize) * int64(c.HiddenSize)
+
+	return embedding + (layerParams * int64(c.NumHiddenLayers)) + output
+}
