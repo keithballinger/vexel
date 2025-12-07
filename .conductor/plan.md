@@ -110,8 +110,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement `collectReady()` method. (Started: 2025-12-07 19:20, Completed: 2025-12-07 19:25)
 - [x] Write Failing Tests: For `formBatches()` creating batches based on priority and configurable policies. (Started: 2025-12-07 19:30, Completed: 2025-12-07 19:35)
 - [x] Implement Feature: Implement `formBatches()` method. (Started: 2025-12-07 19:35, Completed: 2025-12-07 19:40)
-- [ ] Write Failing Tests: For `runDecodeStep()` orchestrating the `ModelRuntime.DecodeStep` and handling errors.
-- [ ] Implement Feature: Implement `runDecodeStep()` method.
+- [x] Write Failing Tests: For `runDecodeStep()` orchestrating the `ModelRuntime.DecodeStep` and handling errors. (Started: 2025-12-07 19:45, Completed: 2025-12-07 19:50)
+- [x] Implement Feature: Implement `runDecodeStep()` method. (Started: 2025-12-07 19:50, Completed: 2025-12-07 19:55)
 
 ### Task: Implement Serving Layer (`inference/serve/`)
 - [ ] Write Failing Tests: For HTTP `/generate` endpoint handling requests and returning non-streaming responses.

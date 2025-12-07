@@ -7,18 +7,18 @@
 Phase 4: Scheduler and Serving Layer
 
 ## Current Task
-Write Failing Tests: For `runDecodeStep()` orchestrating the `ModelRuntime.DecodeStep` and handling errors.
+Task: Implement Serving Layer (`inference/serve/`)
 
 ## Progress
-- [x] Write Failing Tests: For `formBatches()`.
-- [x] Implement Feature: Implement `formBatches()`.
+- [x] Write Failing Tests: For `runDecodeStep()`.
+- [x] Implement Feature: Implement `runDecodeStep()`.
 
 ## Next Action
-Write failing tests for `runDecodeStep()` in `inference/scheduler/exec_test.go`.
+Write Failing Tests: For HTTP `/generate` endpoint handling requests and returning non-streaming responses.
 
 ## Blockers
 None
 
 ## Notes
-- Scheduler now has `collectReady` and `formBatches` logic.
-- Next is linking these to the actual `ModelRuntime`.
+- Scheduler core loop and logic (`collect`, `batch`, `run`) are implemented and wired up.
+- Ready to expose this via an API layer.

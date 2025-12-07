@@ -55,12 +55,19 @@ func (s *Scheduler) Run(ctx context.Context) error {
 // step performs a single scheduling iteration.
 func (s *Scheduler) step(ctx context.Context) error {
 	// 1. Collect ready sequences
-	// ready := s.collectReady()
+	ready := s.collectReady()
 	
 	// 2. Form batch
-	// batch := s.formBatches(ready)
+	batch := s.formBatches(ready)
+	if len(batch) == 0 {
+		return nil
+	}
 	
-	// 3. Run DecodeStep (TODO)
+	// 3. Run DecodeStep
+	if err := s.runDecodeStep(ctx, batch); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -76,19 +83,33 @@ func (s *Scheduler) collectReady() []*Sequence {
 }
 
 // formBatches selects a subset of ready sequences to run in the next step.
-// It respects MaxBatchSize and scheduling policy (currently simple FIFO/priority).
 func (s *Scheduler) formBatches(ready []*Sequence) []*Sequence {
 	if len(ready) == 0 {
 		return nil
 	}
-
-	// Basic implementation: Take up to MaxBatchSize
-	// Priority: Decoding > Pending (Simple heuristic to finish tasks faster)
-	// For now, we just truncate.
 	
 	if len(ready) <= s.config.MaxBatchSize {
 		return ready
 	}
 	
 	return ready[:s.config.MaxBatchSize]
+}
+
+// runDecodeStep orchestrates the model execution for a batch of sequences.
+func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error {
+	if len(batch) == 0 {
+		return nil
+	}
+
+	// Prepare inputs for the runtime
+	// In a real implementation, we'd extract tokens/cache IDs from the sequences.
+	inputs := runtime.BatchRuntimeInputs{
+		// ... map batch to inputs ...
+	}
+
+	// Execute model
+	// Note: runtime.DecodeStep signature is (inputs BatchRuntimeInputs) (tensor.Tensor, error)
+	// We ignore the output tensor for now as we aren't processing logits yet.
+	_, err := s.runtime.DecodeStep(inputs)
+	return err
 }
