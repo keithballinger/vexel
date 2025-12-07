@@ -7,20 +7,22 @@
 Phase 1: Foundation and Core Components
 
 ## Current Task
-Implement Feature: Define `DevicePtr` and `Device` types.
+Write Failing Tests: For `Tensor` struct initialization and field access.
 
 ## Progress
 - [x] Write Failing Tests: For `Shape`.
 - [x] Implement Feature: Define `Shape`.
-- [x] Write Failing Tests: For `DevicePtr` structure and basic initialization.
-- [ ] Implement Feature: Define `DevicePtr` and `Device` types.
+- [x] Write Failing Tests: For `DevicePtr` and `Device`.
+- [x] Implement Feature: Define `DevicePtr` and `Device`.
+- [ ] Write Failing Tests: For `Tensor` struct initialization and field access.
+- [ ] Implement Feature: Define `Tensor` struct.
 
 ## Next Action
-Implement `DevicePtr` and `Device` in `inference/tensor/device.go`.
+Write failing test for `Tensor` struct.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/tensor/device_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `DevicePtr` and `Device` types.
+- Verified with passing tests.
