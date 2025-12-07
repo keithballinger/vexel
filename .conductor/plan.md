@@ -74,7 +74,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 ### Task: Implement CUDA Backend (`inference/backend/cuda/`)
 - [x] Write Failing Tests: For `cudaBackend` implementing the `Backend` interface, focusing on `CreateStream`, `RecordEvent`, `WaitEvent`, `SynchronizeStream`, and `Device`. (Started: 2025-12-07 16:00, Completed: 2025-12-07 16:02)
 - [x] Implement Feature: Implement `cudaBackend` struct and its core stream/event management methods. (Started: 2025-12-07 16:05, Completed: 2025-12-07 16:07)
-- [ ] Write Failing Tests: For `CompileBlockGraph` using mock IR and weights (checking return types and error handling).
+- [x] Write Failing Tests: For `CompileBlockGraph` using mock IR and weights (checking return types and error handling). (Started: 2025-12-07 16:10, Completed: 2025-12-07 16:12)
 - [ ] Implement Feature: Implement `CompileBlockGraph` for CUDA, integrating with `nvcc` and CUDA Graphs.
 - [ ] Write Failing Tests: For `RunGraph` with mock inputs and stream.
 - [ ] Implement Feature: Implement `RunGraph` for CUDA.
