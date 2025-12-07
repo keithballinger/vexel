@@ -15,7 +15,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Write Failing Tests: For `DType` and `Location` enumerations and their methods (e.g., `SizeBytes`, `BitSize`). (Started: 2025-12-07 12:20, Completed: 2025-12-07 12:22)
 - [x] Implement Feature: Define `DType` and `Location` types and associated methods. (Started: 2025-12-07 12:25, Completed: 2025-12-07 12:27)
 - [x] Write Failing Tests: For `Shape` creation, `NumElements`, `Rank`, `Equal`, and `StridesRowMajor`. (Started: 2025-12-07 12:30, Completed: 2025-12-07 12:32)
-- [ ] Implement Feature: Define `Shape` type and its methods.
+- [x] Implement Feature: Define `Shape` type and its methods. (Started: 2025-12-07 12:35, Completed: 2025-12-07 12:37)
 - [ ] Write Failing Tests: For `DevicePtr` structure and basic initialization.
 - [ ] Implement Feature: Define `DevicePtr` and `Device` types.
 - [ ] Write Failing Tests: For `Tensor` struct initialization and field access.
