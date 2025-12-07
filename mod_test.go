@@ -1,4 +1,4 @@
-package mod_test
+package vexel_test
 
 import (
 	"os"

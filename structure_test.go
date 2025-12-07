@@ -1,4 +1,4 @@
-package structure_test
+package vexel_test
 
 import (
 	"testing"
