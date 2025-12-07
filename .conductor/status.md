@@ -7,20 +7,20 @@
 Phase 2: Intermediate Representation and Runtime
 
 ## Current Task
-Implement Feature: Define `ModelConfig` struct.
+Write Failing Tests: For `BlockRuntime` struct initialization.
 
 ## Progress
-- [x] Write Failing Tests: For fusion pass.
-- [x] Implement Feature: Implement basic fusion pass mechanisms.
-- [x] Write Failing Tests: For `ModelConfig` struct.
-- [ ] Implement Feature: Define `ModelConfig` struct.
+- [x] Write Failing Tests: For `ModelConfig`.
+- [x] Implement Feature: Define `ModelConfig`.
+- [ ] Write Failing Tests: For `BlockRuntime` struct initialization.
+- [ ] Implement Feature: Define `BlockRuntime` struct.
 
 ## Next Action
-Implement `ModelConfig` in `inference/runtime/config.go`.
+Write failing test for `BlockRuntime` in `inference/runtime/block_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/runtime/config_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `ModelConfig` struct.
+- Verified with passing tests.

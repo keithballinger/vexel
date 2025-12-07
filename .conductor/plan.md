@@ -59,7 +59,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 
 ### Task: Implement Model Runtime Core (`inference/runtime/`)
 - [x] Write Failing Tests: For `ModelConfig` struct and initialization (e.g., `Llama3_8B` configuration). (Started: 2025-12-07 15:10, Completed: 2025-12-07 15:12)
-- [ ] Implement Feature: Define `ModelConfig` struct.
+- [x] Implement Feature: Define `ModelConfig` struct. (Started: 2025-12-07 15:15, Completed: 2025-12-07 15:17)
 - [ ] Write Failing Tests: For `BlockRuntime` struct initialization.
 - [ ] Implement Feature: Define `BlockRuntime` struct.
 - [ ] Write Failing Tests: For `ModelRuntime` struct initialization (requires `Backend`, `InferenceContext`, `KVCache`).
