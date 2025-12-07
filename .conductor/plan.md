@@ -138,8 +138,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement `ModelConfig.WeightsBytes()`. (Started: 2025-12-07 21:50, Completed: 2025-12-07 21:55)
 - [x] Write Failing Tests: For `KVBytes()` calculation based on model config, KV config, and active sequences. (Started: 2025-12-07 21:55, Completed: 2025-12-07 22:00)
 - [x] Implement Feature: Implement `KVBytes()`. (Started: 2025-12-07 22:00, Completed: 2025-12-07 22:05)
-- [ ] Write Failing Tests: For `ScratchBytes()` calculation based on model config and max batch.
-- [ ] Implement Feature: Implement `ScratchBytes()`.
+- [x] Write Failing Tests: For `ScratchBytes()` calculation based on model config and max batch. (Started: 2025-12-07 22:10, Completed: 2025-12-07 22:15)
+- [x] Implement Feature: Implement `ScratchBytes()`. (Started: 2025-12-07 22:15, Completed: 2025-12-07 22:20)
 - [ ] Write Failing Tests: For `ModelConfig.MemoryPlan()` aggregating all memory calculations.
 - [ ] Implement Feature: Implement `ModelConfig.MemoryPlan()`.
 - [ ] Implement Feature: Conduct comprehensive performance benchmarking against defined targets for throughput, latency, and VRAM usage on both CUDA and Metal.

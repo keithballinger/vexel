@@ -105,19 +105,26 @@ func (c ModelConfig) KVBytes(activeSequences int, contextLen int, profile tensor
 	
 	totalTokens := int64(activeSequences) * int64(contextLen)
 	
-	// Bytes per element
-	// KV cache is usually high precision (FP16/BF16) unless explicitly quantized (e.g. FP8)
-	// For now, we assume it matches the profile if it's explicitly set for KV,
-	// but usually "QuantProfile" passed here might be for weights.
-	// The prompt implies we pass a profile.
-	// If profile is QuantNone, use 2 bytes.
-	
 	var bytesPerElem int64 = 2 // Default BF16
 	
-	// If we support KV cache quantization:
-	// switch profile {
-	// case tensor.FP8: bytesPerElem = 1
-	// }
-	
 	return elementsPerToken * totalTokens * bytesPerElem
+}
+
+// ScratchBytes calculates the peak scratch memory required for a given batch size.
+func (c ModelConfig) ScratchBytes(maxBatchSize int) int64 {
+	// Peak usage scenarios:
+	// 1. Logits calculation: [Batch, Vocab]
+	logits := int64(maxBatchSize) * int64(c.VocabSize)
+	
+	// 2. MLP Expansion: [Batch, Intermediate]
+	mlp := int64(maxBatchSize) * int64(c.IntermediateSize)
+	
+	// Bytes per element (assume high precision for activations)
+	bytesPerElem := int64(2)
+	
+	// Return the larger of the two peaks
+	if logits > mlp {
+		return logits * bytesPerElem
+	}
+	return mlp * bytesPerElem
 }

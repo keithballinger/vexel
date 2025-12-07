@@ -10,14 +10,15 @@ Phase 5: Integration, Testing, and Documentation
 Task: Performance Benchmarking and Validation
 
 ## Progress
-- [x] Write Failing Tests: For `KVBytes()`.
-- [x] Implement Feature: Implement `KVBytes()`.
+- [x] Write Failing Tests: For `ScratchBytes()`.
+- [x] Implement Feature: Implement `ScratchBytes()`.
 
 ## Next Action
-Write Failing Tests: For `ScratchBytes()` calculation based on model config and max batch.
+Write Failing Tests: For `ModelConfig.MemoryPlan()` aggregating all memory calculations.
 
 ## Blockers
 None
 
 ## Notes
-- `KVBytes` calculation implemented.
+- `ScratchBytes` logic added.
+- All individual memory components (`Weights`, `KV`, `Scratch`) are now estimable.
