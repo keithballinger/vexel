@@ -54,7 +54,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Define `TensorID`, `OpKind`, and `OpNode`. (Started: 2025-12-07 14:45, Completed: 2025-12-07 14:47)
 - [x] Write Failing Tests: For `BlockIR` struct initialization, including inputs, outputs, and nodes. (Started: 2025-12-07 14:50, Completed: 2025-12-07 14:52)
 - [x] Implement Feature: Define `BlockIR` struct. (Started: 2025-12-07 14:55, Completed: 2025-12-07 14:57)
-- [ ] Write Failing Tests: For a conceptual fusion pass (e.g., a mock function that takes a `BlockIR` and returns a modified one, checking basic structure).
+- [x] Write Failing Tests: For a conceptual fusion pass (e.g., a mock function that takes a `BlockIR` and returns a modified one, checking basic structure). (Started: 2025-12-07 15:00, Completed: 2025-12-07 15:02)
 - [ ] Implement Feature: Implement basic fusion pass mechanisms (conceptual, to be detailed in Phase 3).
 
 ### Task: Implement Model Runtime Core (`inference/runtime/`)
