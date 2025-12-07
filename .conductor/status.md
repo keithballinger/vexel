@@ -7,22 +7,20 @@
 Phase 1: Foundation and Core Components
 
 ## Current Task
-Implement Feature: Define `DType` and `Location` types and associated methods.
+Write Failing Tests: For `Shape` creation, `NumElements`, `Rank`, `Equal`, and `StridesRowMajor`.
 
 ## Progress
-- [x] Write Failing Tests: For basic module structure and compilation.
-- [x] Implement Feature: Create `inference/tensor/`, ... directories.
-- [x] Write Failing Tests: For Go module initialization.
-- [x] Implement Feature: Initialize Go module (`go mod init`).
-- [x] Write Failing Tests: For `DType` and `Location` enumerations.
-- [ ] Implement Feature: Define `DType` and `Location` types and associated methods.
+- [x] Write Failing Tests: For `DType` and `Location`.
+- [x] Implement Feature: Define `DType` and `Location` types and associated methods.
+- [ ] Write Failing Tests: For `Shape` creation, `NumElements`, `Rank`, `Equal`, and `StridesRowMajor`.
+- [ ] Implement Feature: Define `Shape` type and its methods.
 
 ## Next Action
-Implement `DType` and `Location` in `inference/tensor/types.go`.
+Write failing test for `Shape` struct and methods.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/tensor/types_test.go`.
-- Verified compilation failure (Red Phase) due to missing types.
+- Implemented `DType` and `Location` enumerations.
+- Verified with passing tests.

@@ -13,7 +13,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 
 ### Task: Implement Tensor and Memory System (`inference/tensor/`, `inference/memory/`)
 - [x] Write Failing Tests: For `DType` and `Location` enumerations and their methods (e.g., `SizeBytes`, `BitSize`). (Started: 2025-12-07 12:20, Completed: 2025-12-07 12:22)
-- [ ] Implement Feature: Define `DType` and `Location` types and associated methods.
+- [x] Implement Feature: Define `DType` and `Location` types and associated methods. (Started: 2025-12-07 12:25, Completed: 2025-12-07 12:27)
 - [ ] Write Failing Tests: For `Shape` creation, `NumElements`, `Rank`, `Equal`, and `StridesRowMajor`.
 - [ ] Implement Feature: Define `Shape` type and its methods.
 - [ ] Write Failing Tests: For `DevicePtr` structure and basic initialization.
