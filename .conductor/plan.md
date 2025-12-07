@@ -39,7 +39,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Write Failing Tests: For `KVCache` struct initialization and basic page management (conceptual). (Started: 2025-12-07 14:00, Completed: 2025-12-07 14:02)
 - [x] Implement Feature: Define `KVCache` struct. (Started: 2025-12-07 14:05, Completed: 2025-12-07 14:07)
 - [x] Write Failing Tests: For `PageIndex` and `SeqKVHandle` structs. (Started: 2025-12-07 14:10, Completed: 2025-12-07 14:12)
-- [ ] Implement Feature: Define `PageIndex` and `SeqKVHandle` structs.
+- [x] Implement Feature: Define `PageIndex` and `SeqKVHandle` structs. (Started: 2025-12-07 14:15, Completed: 2025-12-07 14:17)
 
 ### Task: Implement Basic CPU Backend (`inference/backend/cpu/`)
 - [ ] Write Failing Tests: For the `Backend` interface definition (as an empty interface at this stage, focusing on structural correctness).

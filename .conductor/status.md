@@ -7,20 +7,20 @@
 Phase 1: Foundation and Core Components
 
 ## Current Task
-Implement Feature: Define `PageIndex` and `SeqKVHandle` structs.
+Write Failing Tests: For the `Backend` interface definition.
 
 ## Progress
-- [x] Write Failing Tests: For `KVCache`.
-- [x] Implement Feature: Define `KVCache`.
-- [x] Write Failing Tests: For `PageIndex` and `SeqKVHandle` structs.
-- [ ] Implement Feature: Define `PageIndex` and `SeqKVHandle` structs.
+- [x] Write Failing Tests: For `PageIndex` and `SeqKVHandle`.
+- [x] Implement Feature: Define `PageIndex` and `SeqKVHandle`.
+- [ ] Write Failing Tests: For the `Backend` interface definition (as an empty interface at this stage, focusing on structural correctness).
+- [ ] Implement Feature: Define the `Backend` interface.
 
 ## Next Action
-Implement `PageIndex` and `SeqKVHandle` in `inference/kv/handle.go`.
+Write failing test for `Backend` in `inference/backend/cpu/backend_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/kv/handle_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `SeqKVHandle` struct.
+- Verified with passing tests.
