@@ -7,20 +7,20 @@
 Phase 1: Foundation and Core Components
 
 ## Current Task
-Write Failing Tests: For `KVCache` struct initialization and basic page management.
+Implement Feature: Define `KVCache` struct.
 
 ## Progress
 - [x] Write Failing Tests: For `KVConfig`.
 - [x] Implement Feature: Define `KVConfig`.
-- [ ] Write Failing Tests: For `KVCache` struct initialization and basic page management (conceptual).
+- [x] Write Failing Tests: For `KVCache` struct initialization.
 - [ ] Implement Feature: Define `KVCache` struct.
 
 ## Next Action
-Write failing test for `KVCache` in `inference/kv/cache_test.go`.
+Implement `KVCache` in `inference/kv/cache.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Implemented `KVConfig` struct.
-- Verified with passing tests.
+- Created `inference/kv/cache_test.go`.
+- Test fails as expected (Red Phase).
