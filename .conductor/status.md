@@ -7,20 +7,20 @@
 Phase 2: Intermediate Representation and Runtime
 
 ## Current Task
-Implement Feature: Define `BlockIR` struct.
+Write Failing Tests: For a conceptual fusion pass.
 
 ## Progress
-- [x] Write Failing Tests: For `OpKind` and `OpNode`.
-- [x] Implement Feature: Define `OpKind` and `OpNode`.
-- [x] Write Failing Tests: For `BlockIR` struct initialization.
-- [ ] Implement Feature: Define `BlockIR` struct.
+- [x] Write Failing Tests: For `BlockIR`.
+- [x] Implement Feature: Define `BlockIR`.
+- [ ] Write Failing Tests: For a conceptual fusion pass (e.g., a mock function that takes a `BlockIR` and returns a modified one, checking basic structure).
+- [ ] Implement Feature: Implement basic fusion pass mechanisms.
 
 ## Next Action
-Implement `BlockIR` in `inference/ir/block.go`.
+Write failing test for fusion pass in `inference/ir/fusion_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/ir/block_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `BlockIR` struct.
+- Verified with passing tests.
