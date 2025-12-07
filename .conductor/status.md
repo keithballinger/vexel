@@ -7,20 +7,20 @@
 Phase 1: Foundation and Core Components
 
 ## Current Task
-Implement Feature: Define `Tensor` struct.
+Write Failing Tests: For `ArenaKind` enumerations.
 
 ## Progress
-- [x] Write Failing Tests: For `DevicePtr` and `Device`.
-- [x] Implement Feature: Define `DevicePtr` and `Device`.
-- [x] Write Failing Tests: For `Tensor` struct initialization and field access.
-- [ ] Implement Feature: Define `Tensor` struct.
+- [x] Write Failing Tests: For `Tensor`.
+- [x] Implement Feature: Define `Tensor`.
+- [ ] Write Failing Tests: For `ArenaKind` enumerations.
+- [ ] Implement Feature: Define `ArenaKind`.
 
 ## Next Action
-Implement `Tensor` struct in `inference/tensor/tensor.go`.
+Write failing test for `ArenaKind` in `inference/memory/memory_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/tensor/tensor_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `Tensor` struct.
+- Verified with passing tests.
