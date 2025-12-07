@@ -7,20 +7,20 @@
 Phase 1: Foundation and Core Components
 
 ## Current Task
-Implement Feature: Define `KVConfig` struct.
+Write Failing Tests: For `KVCache` struct initialization and basic page management.
 
 ## Progress
-- [x] Write Failing Tests: For `QuantizedTensor`.
-- [x] Implement Feature: Define `QuantizedTensor`.
-- [x] Write Failing Tests: For `KVConfig` struct and initialization.
-- [ ] Implement Feature: Define `KVConfig` struct.
+- [x] Write Failing Tests: For `KVConfig`.
+- [x] Implement Feature: Define `KVConfig`.
+- [ ] Write Failing Tests: For `KVCache` struct initialization and basic page management (conceptual).
+- [ ] Implement Feature: Define `KVCache` struct.
 
 ## Next Action
-Implement `KVConfig` in `inference/kv/config.go`.
+Write failing test for `KVCache` in `inference/kv/cache_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/kv/config_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `KVConfig` struct.
+- Verified with passing tests.
