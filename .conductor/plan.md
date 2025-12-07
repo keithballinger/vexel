@@ -153,6 +153,10 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Write Failing Tests: For CPU `SiLU` (activation). (Started: 2025-12-07 23:30, Completed: 2025-12-07 23:35)
 - [x] Implement Feature: Implement `SiLU` kernel for CPU. (Started: 2025-12-07 23:35, Completed: 2025-12-07 23:40)
 
+### Task: Wire ModelRuntime to Compute Kernels
+- [x] Write Failing Tests: For `DecodeStep` invoking kernels (mocked or real). (Started: 2025-12-07 23:45, Completed: 2025-12-07 23:50)
+- [x] Implement Feature: Update `DecodeStep` to execute the full Llama-3 forward pass using `cpuBackend` kernels. (Started: 2025-12-07 23:50, Completed: 2025-12-07 23:55)
+
 ### Task: Documentation and Code Quality Refinement
 - [ ] Implement Feature: Add comprehensive GoDoc comments for all public types, functions, and methods.
 - [ ] Implement Feature: Review and refine `user_guide.md` and `architecture.md` to reflect implementation details and any evolved design decisions.

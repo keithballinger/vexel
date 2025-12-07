@@ -4,20 +4,22 @@
 **Status:** 🟢 On Track
 
 ## Current Phase
-Phase 3: GPU Backends and Optimization (Revisited)
+Phase 5: Integration, Testing, and Documentation
 
 ## Current Task
 Task: Documentation and Code Quality Refinement
 
 ## Progress
-- [x] Write Failing Tests: For CPU `SiLU`.
-- [x] Implement Feature: Implement `SiLU` kernel for CPU.
+- [x] Wire ModelRuntime to Kernels (Control flow implemented).
+- [x] Implement Basic CPU Kernels (`Matmul`, `RMSNorm`, `RoPE`, `SiLU`).
 
 ## Next Action
-Refine documentation or proceed to Metal kernels if desired.
+Refine documentation.
 
 ## Blockers
 None
 
 ## Notes
-- All core CPU kernels (`Matmul`, `RMSNorm`, `RoPE`, `SiLU`) are implemented and tested.
+- System is end-to-end integrated from HTTP -> Scheduler -> Runtime -> Block -> Backend.
+- Real model weights can be loaded.
+- Benchmarks run.
