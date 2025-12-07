@@ -118,8 +118,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement HTTP `/generate` endpoint. (Started: 2025-12-07 20:05, Completed: 2025-12-07 20:10)
 - [x] Write Failing Tests: For HTTP `/stream` endpoint handling requests and providing token-by-token streaming. (Started: 2025-12-07 20:15, Completed: 2025-12-07 20:20)
 - [x] Implement Feature: Implement HTTP `/stream` endpoint. (Started: 2025-12-07 20:20, Completed: 2025-12-07 20:25)
-- [ ] Write Failing Tests: For gRPC `/generate` and `/stream` endpoints.
-- [ ] Implement Feature: Implement gRPC `/generate` and `/stream` endpoints.
+- [x] Write Failing Tests: For gRPC `/generate` and `/stream` endpoints. (Started: 2025-12-07 20:30, Completed: 2025-12-07 20:35)
+- [x] Implement Feature: Implement gRPC `/generate` and `/stream` endpoints. (Started: 2025-12-07 20:35, Completed: 2025-12-07 20:40)
 - [ ] Write Failing Tests: For request admission control and sequence registration with the scheduler.
 - [ ] Implement Feature: Implement request admission control and sequence registration.
 

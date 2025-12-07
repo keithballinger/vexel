@@ -7,22 +7,18 @@
 Phase 4: Scheduler and Serving Layer
 
 ## Current Task
-Write Failing Tests: For gRPC `/generate` and `/stream` endpoints.
+Write Failing Tests: For request admission control and sequence registration with the scheduler.
 
 ## Progress
-- [x] Write Failing Tests: For `/stream` endpoint.
-- [x] Implement Feature: Implement `/stream` endpoint (SSE).
+- [x] Write Failing Tests: For gRPC `/generate` and `/stream` endpoints.
+- [x] Implement Feature: Implement gRPC `/generate` and `/stream` endpoints.
 
 ## Next Action
-Write failing tests for request admission control and sequence registration with the scheduler. (Skipping gRPC for now to focus on wiring up HTTP to Scheduler first, unless strictly required by plan).
-
-Wait, strict adherence says I should follow plan. The plan lists gRPC next.
-However, I might want to prioritize "Request admission control" to actually make the HTTP endpoints functional before adding *another* protocol layer.
-
-Let's follow the plan order but acknowledge that gRPC might be a stub too.
+Write failing tests for admission control in `inference/serve/admission_test.go` (verifying that HTTP/gRPC handlers actually call `Scheduler.AddSequence`).
 
 ## Blockers
 None
 
 ## Notes
-- HTTP `/generate` and `/stream` are implemented (mocks).
+- All endpoints (HTTP/gRPC) are implemented as mocks.
+- Next step is wiring them to the real `Scheduler`.
