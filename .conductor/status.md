@@ -7,20 +7,20 @@
 Phase 1: Foundation and Core Components
 
 ## Current Task
-Implement Feature: Define `ArenaKind`.
+Write Failing Tests: For `Arena` creation (`NewArena`), allocation (`Alloc`), and reset (`Reset`).
 
 ## Progress
-- [x] Write Failing Tests: For `Tensor`.
-- [x] Implement Feature: Define `Tensor`.
-- [x] Write Failing Tests: For `ArenaKind` enumerations.
-- [ ] Implement Feature: Define `ArenaKind`.
+- [x] Write Failing Tests: For `ArenaKind`.
+- [x] Implement Feature: Define `ArenaKind`.
+- [ ] Write Failing Tests: For `Arena` creation (`NewArena`), allocation (`Alloc`), and reset (`Reset`).
+- [ ] Implement Feature: Implement `Arena` struct and methods for memory management.
 
 ## Next Action
-Implement `ArenaKind` in `inference/memory/kind.go`.
+Write failing test for `Arena` in `inference/memory/arena_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/memory/kind_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `ArenaKind` enumeration.
+- Verified with passing tests.
