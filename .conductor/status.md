@@ -7,21 +7,20 @@
 Phase 2: Intermediate Representation and Runtime
 
 ## Current Task
-Write Failing Tests: For `TensorID`, `OpKind` enumerations, and `OpNode` struct initialization.
+Implement Feature: Define `TensorID`, `OpKind`, and `OpNode`.
 
 ## Progress
 - [x] Write Failing Tests: For `cpuBackend`.
 - [x] Implement Feature: Create `cpuBackend`.
-- [ ] Write Failing Tests: For `TensorID`, `OpKind` enumerations, and `OpNode` struct initialization.
+- [x] Write Failing Tests: For `OpKind` and `OpNode`.
 - [ ] Implement Feature: Define `TensorID`, `OpKind`, and `OpNode`.
 
 ## Next Action
-Write failing test for `OpNode` in `inference/ir/ir_test.go`.
+Implement `OpNode` in `inference/ir/types.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Implemented `cpuBackend` struct.
-- Verified with passing tests.
-- Completed Phase 1: Foundation and Core Components.
+- Created `inference/ir/ir_test.go`.
+- Test fails as expected (Red Phase).

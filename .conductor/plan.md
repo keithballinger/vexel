@@ -50,7 +50,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 ## Phase 2: Intermediate Representation and Runtime
 
 ### Task: Implement Block IR (`inference/ir/`)
-- [ ] Write Failing Tests: For `TensorID`, `OpKind` enumerations, and `OpNode` struct initialization.
+- [x] Write Failing Tests: For `TensorID`, `OpKind` enumerations, and `OpNode` struct initialization. (Started: 2025-12-07 14:40, Completed: 2025-12-07 14:42)
 - [ ] Implement Feature: Define `TensorID`, `OpKind`, and `OpNode`.
 - [ ] Write Failing Tests: For `BlockIR` struct initialization, including inputs, outputs, and nodes.
 - [ ] Implement Feature: Define `BlockIR` struct.
