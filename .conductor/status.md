@@ -7,21 +7,18 @@
 Phase 3: GPU Backends and Optimization
 
 ## Current Task
-Write Failing Tests: For `cudaBackend` implementing the `Backend` interface.
+Implement Feature: Implement `cudaBackend` struct.
 
 ## Progress
-- [x] Write Failing Tests: For `DecodeStep`.
-- [x] Implement Feature: Implement `DecodeStep`.
-- [ ] Write Failing Tests: For `cudaBackend` implementing the `Backend` interface, focusing on `CreateStream`, `RecordEvent`, `WaitEvent`, `SynchronizeStream`, and `Device`.
+- [x] Write Failing Tests: For `cudaBackend`.
 - [ ] Implement Feature: Implement `cudaBackend` struct and its core stream/event management methods.
 
 ## Next Action
-Write failing test for `cudaBackend` in `inference/backend/cuda/cuda_test.go`.
+Implement `cudaBackend` in `inference/backend/cuda/backend.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Implemented `DecodeStep` skeleton.
-- Verified with passing tests.
-- Completed Phase 2: Intermediate Representation and Runtime.
+- Created `inference/backend/cuda/cuda_test.go` with build tags.
+- Test fails as expected (Red Phase).
