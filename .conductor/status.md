@@ -7,17 +7,17 @@
 Phase 3: GPU Backends and Optimization
 
 ## Current Task
-Write Failing Tests: For `RunGraph` with mock inputs and stream (Metal).
+Write Failing Tests: For `HostToDevice` and `DeviceToHost` operations (Metal).
 
 ## Progress
-- [x] Write Failing Tests: For `CompileBlockGraph` (Metal).
-- [x] Implement Feature: Implement `CompileBlockGraph` for Metal.
+- [x] Write Failing Tests: For `RunGraph` with mock inputs and stream (Metal).
+- [x] Implement Feature: Implement `RunGraph` for Metal.
 
 ## Next Action
-Write failing tests for `RunGraph` in `inference/backend/metal/run_test.go`.
+Write failing tests for memory transfer operations in `inference/backend/metal/mem_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Implemented `CompileBlockGraph` stub for Metal.
+- Implemented `RunGraph` stub for Metal.

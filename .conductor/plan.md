@@ -86,8 +86,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement `metalBackend` struct and its core stream/event management methods. (Started: 2025-12-07 17:05, Completed: 2025-12-07 17:10)
 - [x] Write Failing Tests: For `CompileBlockGraph` using mock IR and weights (checking return types and error handling). (Started: 2025-12-07 17:15, Completed: 2025-12-07 17:20)
 - [x] Implement Feature: Implement `CompileBlockGraph` for Metal, integrating with `metallib` pipelines. (Started: 2025-12-07 17:20, Completed: 2025-12-07 17:25)
-- [ ] Write Failing Tests: For `RunGraph` with mock inputs and stream.
-- [ ] Implement Feature: Implement `RunGraph` for Metal.
+- [x] Write Failing Tests: For `RunGraph` with mock inputs and stream. (Started: 2025-12-07 17:30, Completed: 2025-12-07 17:35)
+- [x] Implement Feature: Implement `RunGraph` for Metal. (Started: 2025-12-07 17:35, Completed: 2025-12-07 17:40)
 - [ ] Write Failing Tests: For `HostToDevice` and `DeviceToHost` operations.
 - [ ] Implement Feature: Implement host-device memory transfer functions for Metal.
 

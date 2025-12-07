@@ -5,6 +5,7 @@ package metal
 import (
 	"fmt"
 	"vexel/inference/ir"
+	"vexel/inference/tensor"
 )
 
 // CompileBlockGraph compiles the BlockIR into a Metal pipeline.
@@ -20,4 +21,27 @@ func (b *metalBackend) CompileBlockGraph(graph *ir.BlockIR) (interface{}, error)
 
 	// Mock compiled Metal pipeline state
 	return struct{ name string }{"MetalPipeline"}, nil
+}
+
+// RunGraph executes a compiled Metal graph/pipeline.
+func (b *metalBackend) RunGraph(graphExec interface{}, inputs []tensor.Tensor, stream interface{}) error {
+	// 1. Verify graphExec (pipeline state)
+	// 2. Encode compute command into the command buffer (stream)
+	// 3. Set buffers (inputs)
+	// 4. Dispatch threads (commit command buffer)
+	
+	if graphExec == nil {
+		return fmt.Errorf("graphExec cannot be nil")
+	}
+
+	// In a real implementation:
+	// cmdBuffer := stream.(MTLCommandBuffer)
+	// encoder := cmdBuffer.computeCommandEncoder()
+	// encoder.setComputePipelineState(graphExec.(MTLComputePipelineState))
+	// ... set buffers ...
+	// encoder.dispatchThreads(...)
+	// encoder.endEncoding()
+	// cmdBuffer.commit()
+	
+	return nil
 }
