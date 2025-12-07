@@ -58,7 +58,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement basic fusion pass mechanisms (conceptual, to be detailed in Phase 3). (Started: 2025-12-07 15:05, Completed: 2025-12-07 15:07)
 
 ### Task: Implement Model Runtime Core (`inference/runtime/`)
-- [ ] Write Failing Tests: For `ModelConfig` struct and initialization (e.g., `Llama3_8B` configuration).
+- [x] Write Failing Tests: For `ModelConfig` struct and initialization (e.g., `Llama3_8B` configuration). (Started: 2025-12-07 15:10, Completed: 2025-12-07 15:12)
 - [ ] Implement Feature: Define `ModelConfig` struct.
 - [ ] Write Failing Tests: For `BlockRuntime` struct initialization.
 - [ ] Implement Feature: Define `BlockRuntime` struct.
