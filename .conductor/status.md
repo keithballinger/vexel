@@ -7,18 +7,18 @@
 Phase 4: Scheduler and Serving Layer
 
 ## Current Task
-Task: Implement Serving Layer (`inference/serve/`)
+Write Failing Tests: For HTTP `/stream` endpoint handling requests and providing token-by-token streaming.
 
 ## Progress
-- [x] Write Failing Tests: For `runDecodeStep()`.
-- [x] Implement Feature: Implement `runDecodeStep()`.
+- [x] Write Failing Tests: For HTTP `/generate` endpoint.
+- [x] Implement Feature: Implement HTTP `/generate` endpoint.
 
 ## Next Action
-Write Failing Tests: For HTTP `/generate` endpoint handling requests and returning non-streaming responses.
+Write failing tests for `/stream` endpoint in `inference/serve/stream_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Scheduler core loop and logic (`collect`, `batch`, `run`) are implemented and wired up.
-- Ready to expose this via an API layer.
+- Basic `/generate` endpoint implemented (mock response).
+- Need to implement `/stream` and then wire up the scheduler integration.

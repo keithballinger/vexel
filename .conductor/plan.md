@@ -114,8 +114,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement `runDecodeStep()` method. (Started: 2025-12-07 19:50, Completed: 2025-12-07 19:55)
 
 ### Task: Implement Serving Layer (`inference/serve/`)
-- [ ] Write Failing Tests: For HTTP `/generate` endpoint handling requests and returning non-streaming responses.
-- [ ] Implement Feature: Implement HTTP `/generate` endpoint.
+- [x] Write Failing Tests: For HTTP `/generate` endpoint handling requests and returning non-streaming responses. (Started: 2025-12-07 20:00, Completed: 2025-12-07 20:05)
+- [x] Implement Feature: Implement HTTP `/generate` endpoint. (Started: 2025-12-07 20:05, Completed: 2025-12-07 20:10)
 - [ ] Write Failing Tests: For HTTP `/stream` endpoint handling requests and providing token-by-token streaming.
 - [ ] Implement Feature: Implement HTTP `/stream` endpoint.
 - [ ] Write Failing Tests: For gRPC `/generate` and `/stream` endpoints.
