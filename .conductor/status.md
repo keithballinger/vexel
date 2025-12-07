@@ -4,23 +4,24 @@
 **Status:** 🟢 On Track
 
 ## Current Phase
-Phase 2: Intermediate Representation and Runtime
+Phase 3: GPU Backends and Optimization
 
 ## Current Task
-Implement Feature: Implement `DecodeStep` function (high-level structure).
+Write Failing Tests: For `cudaBackend` implementing the `Backend` interface.
 
 ## Progress
-- [x] Write Failing Tests: For `BatchRuntimeInputs`.
-- [x] Implement Feature: Define `BatchRuntimeInputs`.
 - [x] Write Failing Tests: For `DecodeStep`.
-- [ ] Implement Feature: Implement `DecodeStep` function (high-level structure, integrating with IR and backend conceptually).
+- [x] Implement Feature: Implement `DecodeStep`.
+- [ ] Write Failing Tests: For `cudaBackend` implementing the `Backend` interface, focusing on `CreateStream`, `RecordEvent`, `WaitEvent`, `SynchronizeStream`, and `Device`.
+- [ ] Implement Feature: Implement `cudaBackend` struct and its core stream/event management methods.
 
 ## Next Action
-Implement `DecodeStep` in `inference/runtime/decode.go`.
+Write failing test for `cudaBackend` in `inference/backend/cuda/cuda_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/runtime/decode_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `DecodeStep` skeleton.
+- Verified with passing tests.
+- Completed Phase 2: Intermediate Representation and Runtime.
