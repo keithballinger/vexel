@@ -7,18 +7,18 @@
 Phase 4: Scheduler and Serving Layer
 
 ## Current Task
-Task: Implement Scheduler Core (`inference/scheduler/`)
+Write Failing Tests: For `Scheduler` struct initialization.
 
 ## Progress
-- [x] Write Failing Tests: For compiled fused kernels executing correctly.
-- [x] Implement Feature: Implement optimized fused kernels (OpMatmulSiLU).
+- [x] Write Failing Tests: For `Sequence` struct initialization.
+- [x] Implement Feature: Define `Sequence` struct and state machine.
 
 ## Next Action
-Write Failing Tests: For `Sequence` struct initialization and state transitions.
+Write failing tests for `Scheduler` struct in `inference/scheduler/scheduler_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Completed Phase 3 (GPU Backends and Optimization) initial pass.
-- Fusion pass (`Matmul -> SiLU`) implemented and integrated into backend "compilers" (stubs).
+- `Sequence` struct and states (`Pending`, `Prefill`, `Decoding`, `Finished`) implemented.
+- Scheduler will manage these sequences.
