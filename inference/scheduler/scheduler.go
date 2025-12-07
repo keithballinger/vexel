@@ -122,7 +122,23 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 	// Note: runtime.DecodeStep signature is (inputs BatchRuntimeInputs) (tensor.Tensor, error)
 	// We ignore the output tensor for now as we aren't processing logits yet.
 	_, err := s.runtime.DecodeStep(inputs)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Update metrics and sequence state (Mocking token generation)
+	s.metrics.TotalTokens += len(batch)
+	for _, seq := range batch {
+		if seq.State() == StatePending {
+			seq.SetState(StateDecoding)
+		}
+		// In a real loop, we check for EOS or max len.
+		// For benchmark, let's just finish them fast so we see throughput.
+		// Or keep them running. To simulate completion, we can use a counter.
+		// Let's assume infinite decoding for the benchmark duration.
+	}
+
+	return nil
 }
 
 // AddSequence registers a new sequence with the scheduler.
