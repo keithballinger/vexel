@@ -30,7 +30,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 ### Task: Implement Quantization Profiles
 - [x] Write Failing Tests: For `QuantProfile` enumerations. (Started: 2025-12-07 13:30, Completed: 2025-12-07 13:32)
 - [x] Implement Feature: Define `QuantProfile`. (Started: 2025-12-07 13:35, Completed: 2025-12-07 13:37)
-- [ ] Write Failing Tests: For `QuantizedTensor` struct initialization.
+- [x] Write Failing Tests: For `QuantizedTensor` struct initialization. (Started: 2025-12-07 13:40, Completed: 2025-12-07 13:42)
 - [ ] Implement Feature: Define `QuantizedTensor` struct.
 
 ### Task: Implement Paged KV Cache Core Structures (`inference/kv/`)
