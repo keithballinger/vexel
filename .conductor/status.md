@@ -10,19 +10,15 @@ Phase 5: Integration, Testing, and Documentation
 Task: End-to-End Integration Testing
 
 ## Progress
-- [x] Write Failing Tests: For request admission control.
-- [x] Implement Feature: Wired HTTP endpoints to Scheduler.
+- [x] Write Failing Tests: For loading and running a Llama-3-style 8B model from end-to-end.
+- [~] Implement Feature: Perform end-to-end integration of all modules with a reference model.
 
 ## Next Action
-Write Failing Tests: For loading and running a Llama-3-style 8B model from end-to-end. (This likely requires implementing ModelConfig loading first, which is further down in the plan. I should probably re-order to load config first).
-
-Actually, looking at the plan, "End-to-End Integration Testing" is next. But we can't do E2E without loading a model. The "Performance Benchmarking" task lists `ModelConfig.ApproxParams()` etc.
-
-I will proceed with "Write Failing Tests: For loading and running a Llama-3-style 8B model" but this will likely force me to implement the Config loading.
+Implement `LoadWeights` logic in `inference/runtime/loader.go` (and `safetensors` parsing).
 
 ## Blockers
 None
 
 ## Notes
-- Phase 4 complete (Scheduler & Serving).
-- HTTP endpoints now create real Sequences and add them to Scheduler.
+- `ModelConfig` and `ModelRuntime` initialization for Llama-3 structure verified.
+- Need to implement actual weight loading.

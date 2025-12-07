@@ -27,6 +27,12 @@ func NewModelRuntime(backend cpu.Backend, ctx *memory.InferenceContext, cache *k
 	}, nil
 }
 
+// LoadWeights loads model weights from a file.
+func (m *ModelRuntime) LoadWeights(path string) error {
+	// TODO: Implement safetensors loading
+	return nil
+}
+
 // Config returns the model configuration.
 func (m *ModelRuntime) Config() ModelConfig {
 	return m.config
