@@ -7,20 +7,20 @@
 Phase 2: Intermediate Representation and Runtime
 
 ## Current Task
-Implement Feature: Define `BlockRuntime` struct.
+Write Failing Tests: For `ModelRuntime` struct initialization.
 
 ## Progress
-- [x] Write Failing Tests: For `ModelConfig`.
-- [x] Implement Feature: Define `ModelConfig`.
 - [x] Write Failing Tests: For `BlockRuntime`.
-- [ ] Implement Feature: Define `BlockRuntime` struct.
+- [x] Implement Feature: Define `BlockRuntime`.
+- [ ] Write Failing Tests: For `ModelRuntime` struct initialization (requires `Backend`, `InferenceContext`, `KVCache`).
+- [ ] Implement Feature: Define `ModelRuntime` struct (initial structure).
 
 ## Next Action
-Implement `BlockRuntime` in `inference/runtime/block.go`.
+Write failing test for `ModelRuntime` in `inference/runtime/model_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/runtime/block_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `BlockRuntime` struct.
+- Verified with passing tests.
