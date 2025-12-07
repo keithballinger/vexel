@@ -10,14 +10,14 @@ Phase 5: Integration, Testing, and Documentation
 Task: Performance Benchmarking and Validation
 
 ## Progress
-- [x] Write Failing Tests: For `ModelConfig.WeightsBytes()`.
-- [x] Implement Feature: Implement `ModelConfig.WeightsBytes()`.
+- [x] Write Failing Tests: For `KVBytes()`.
+- [x] Implement Feature: Implement `KVBytes()`.
 
 ## Next Action
-Write Failing Tests: For `KVBytes()` calculation.
+Write Failing Tests: For `ScratchBytes()` calculation based on model config and max batch.
 
 ## Blockers
 None
 
 ## Notes
-- `WeightsBytes` calculation implemented for unquantized, Q8, and Q4.
+- `KVBytes` calculation implemented.

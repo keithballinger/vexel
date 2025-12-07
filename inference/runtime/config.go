@@ -94,3 +94,30 @@ func (c ModelConfig) WeightsBytes(profile tensor.QuantProfile) int64 {
 		return params * 2 // Default to 16-bit
 	}
 }
+
+// KVBytes calculates the memory required for the KV cache.
+func (c ModelConfig) KVBytes(activeSequences int, contextLen int, profile tensor.QuantProfile) int64 {
+	// Head Dim = Hidden / Heads
+	headDim := int64(c.HiddenSize) / int64(c.NumAttentionHeads)
+	
+	// Elements per token = 2 (Key + Value) * Layers * KVHeads * HeadDim
+	elementsPerToken := 2 * int64(c.NumHiddenLayers) * int64(c.NumKeyValueHeads) * headDim
+	
+	totalTokens := int64(activeSequences) * int64(contextLen)
+	
+	// Bytes per element
+	// KV cache is usually high precision (FP16/BF16) unless explicitly quantized (e.g. FP8)
+	// For now, we assume it matches the profile if it's explicitly set for KV,
+	// but usually "QuantProfile" passed here might be for weights.
+	// The prompt implies we pass a profile.
+	// If profile is QuantNone, use 2 bytes.
+	
+	var bytesPerElem int64 = 2 // Default BF16
+	
+	// If we support KV cache quantization:
+	// switch profile {
+	// case tensor.FP8: bytesPerElem = 1
+	// }
+	
+	return elementsPerToken * totalTokens * bytesPerElem
+}

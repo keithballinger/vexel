@@ -136,8 +136,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement `ModelConfig.ApproxParams()`. (Started: 2025-12-07 21:35, Completed: 2025-12-07 21:40)
 - [x] Write Failing Tests: For `ModelConfig.WeightsBytes()` calculation across different quantization profiles. (Started: 2025-12-07 21:45, Completed: 2025-12-07 21:50)
 - [x] Implement Feature: Implement `ModelConfig.WeightsBytes()`. (Started: 2025-12-07 21:50, Completed: 2025-12-07 21:55)
-- [ ] Write Failing Tests: For `KVBytes()` calculation based on model config, KV config, and active sequences.
-- [ ] Implement Feature: Implement `KVBytes()`.
+- [x] Write Failing Tests: For `KVBytes()` calculation based on model config, KV config, and active sequences. (Started: 2025-12-07 21:55, Completed: 2025-12-07 22:00)
+- [x] Implement Feature: Implement `KVBytes()`. (Started: 2025-12-07 22:00, Completed: 2025-12-07 22:05)
 - [ ] Write Failing Tests: For `ScratchBytes()` calculation based on model config and max batch.
 - [ ] Implement Feature: Implement `ScratchBytes()`.
 - [ ] Write Failing Tests: For `ModelConfig.MemoryPlan()` aggregating all memory calculations.
