@@ -7,20 +7,20 @@
 Phase 1: Foundation and Core Components
 
 ## Current Task
-Implement Feature: Implement `Arena` struct and methods for memory management.
+Write Failing Tests: For `InferenceContext` initialization and field access.
 
 ## Progress
-- [x] Write Failing Tests: For `ArenaKind`.
-- [x] Implement Feature: Define `ArenaKind`.
-- [x] Write Failing Tests: For `Arena` creation and allocation.
-- [ ] Implement Feature: Implement `Arena` struct and methods for memory management.
+- [x] Write Failing Tests: For `Arena`.
+- [x] Implement Feature: Implement `Arena` struct and methods.
+- [ ] Write Failing Tests: For `InferenceContext` initialization and field access.
+- [ ] Implement Feature: Define `InferenceContext` struct.
 
 ## Next Action
-Implement `Arena` in `inference/memory/arena.go`.
+Write failing test for `InferenceContext` in `inference/memory/context_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/memory/arena_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `Arena` struct with basic bump allocation.
+- Verified with passing tests.
