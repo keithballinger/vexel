@@ -7,20 +7,20 @@
 Phase 1: Foundation and Core Components
 
 ## Current Task
-Implement Feature: Define `KVCache` struct.
+Write Failing Tests: For `PageIndex` and `SeqKVHandle` structs.
 
 ## Progress
-- [x] Write Failing Tests: For `KVConfig`.
-- [x] Implement Feature: Define `KVConfig`.
-- [x] Write Failing Tests: For `KVCache` struct initialization.
-- [ ] Implement Feature: Define `KVCache` struct.
+- [x] Write Failing Tests: For `KVCache`.
+- [x] Implement Feature: Define `KVCache`.
+- [ ] Write Failing Tests: For `PageIndex` and `SeqKVHandle` structs.
+- [ ] Implement Feature: Define `PageIndex` and `SeqKVHandle` structs.
 
 ## Next Action
-Implement `KVCache` in `inference/kv/cache.go`.
+Write failing test for handles in `inference/kv/handle_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/kv/cache_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `KVCache` with free stack management.
+- Verified with passing tests.
