@@ -88,8 +88,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement `CompileBlockGraph` for Metal, integrating with `metallib` pipelines. (Started: 2025-12-07 17:20, Completed: 2025-12-07 17:25)
 - [x] Write Failing Tests: For `RunGraph` with mock inputs and stream. (Started: 2025-12-07 17:30, Completed: 2025-12-07 17:35)
 - [x] Implement Feature: Implement `RunGraph` for Metal. (Started: 2025-12-07 17:35, Completed: 2025-12-07 17:40)
-- [ ] Write Failing Tests: For `HostToDevice` and `DeviceToHost` operations.
-- [ ] Implement Feature: Implement host-device memory transfer functions for Metal.
+- [x] Write Failing Tests: For `HostToDevice` and `DeviceToHost` operations. (Started: 2025-12-07 17:45, Completed: 2025-12-07 17:50)
+- [x] Implement Feature: Implement host-device memory transfer functions for Metal. (Started: 2025-12-07 17:50, Completed: 2025-12-07 17:55)
 
 ### Task: Develop and Integrate Optimized Fused Kernels
 - [ ] Write Failing Tests: For specific fusion pass identification (e.g., detecting Matmul→SiLU patterns).

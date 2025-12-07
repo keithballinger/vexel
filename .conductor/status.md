@@ -7,17 +7,18 @@
 Phase 3: GPU Backends and Optimization
 
 ## Current Task
-Write Failing Tests: For `HostToDevice` and `DeviceToHost` operations (Metal).
+Task: Develop and Integrate Optimized Fused Kernels
 
 ## Progress
-- [x] Write Failing Tests: For `RunGraph` with mock inputs and stream (Metal).
-- [x] Implement Feature: Implement `RunGraph` for Metal.
+- [x] Write Failing Tests: For `HostToDevice` and `DeviceToHost` operations (Metal).
+- [x] Implement Feature: Implement host-device memory transfer functions for Metal.
 
 ## Next Action
-Write failing tests for memory transfer operations in `inference/backend/metal/mem_test.go`.
+Write Failing Tests: For specific fusion pass identification (e.g., detecting Matmul→SiLU patterns).
 
 ## Blockers
 None
 
 ## Notes
-- Implemented `RunGraph` stub for Metal.
+- Completed Metal backend skeleton (Graph + Memory operations).
+- Tests passing for both CUDA and Metal (with tags).
