@@ -12,6 +12,7 @@ const (
 	OpSiLU
 	OpRoPE
 	OpRMSNorm
+	OpMatmulSiLU // Fused Matmul + SiLU
 )
 
 func (k OpKind) String() string {
@@ -26,6 +27,8 @@ func (k OpKind) String() string {
 		return "RoPE"
 	case OpRMSNorm:
 		return "RMSNorm"
+	case OpMatmulSiLU:
+		return "MatmulSiLU"
 	default:
 		return "Unknown"
 	}

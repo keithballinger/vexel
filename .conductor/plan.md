@@ -92,8 +92,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement host-device memory transfer functions for Metal. (Started: 2025-12-07 17:50, Completed: 2025-12-07 17:55)
 
 ### Task: Develop and Integrate Optimized Fused Kernels
-- [ ] Write Failing Tests: For specific fusion pass identification (e.g., detecting Matmul→SiLU patterns).
-- [ ] Implement Feature: Develop and integrate specific fusion passes within the IR (e.g., Matmul→SiLU→Matmul→Mul→Matmul → GatedMLP).
+- [x] Write Failing Tests: For specific fusion pass identification (e.g., detecting Matmul→SiLU patterns). (Started: 2025-12-07 18:00, Completed: 2025-12-07 18:05)
+- [x] Implement Feature: Develop and integrate specific fusion passes within the IR (e.g., Matmul→SiLU→Matmul→Mul→Matmul → GatedMLP). (Started: 2025-12-07 18:05, Completed: 2025-12-07 18:10)
 - [ ] Write Failing Tests: For compiled fused kernels executing correctly on CUDA and Metal backends.
 - [ ] Implement Feature: Implement optimized fused kernels for both CUDA and Metal backends.
 

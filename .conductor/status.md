@@ -7,18 +7,18 @@
 Phase 3: GPU Backends and Optimization
 
 ## Current Task
-Task: Develop and Integrate Optimized Fused Kernels
+Write Failing Tests: For compiled fused kernels executing correctly on CUDA and Metal backends.
 
 ## Progress
-- [x] Write Failing Tests: For `HostToDevice` and `DeviceToHost` operations (Metal).
-- [x] Implement Feature: Implement host-device memory transfer functions for Metal.
+- [x] Write Failing Tests: For specific fusion pass identification (Matmul→SiLU).
+- [x] Implement Feature: Integrate Matmul→SiLU fusion pass.
 
 ## Next Action
-Write Failing Tests: For specific fusion pass identification (e.g., detecting Matmul→SiLU patterns).
+Write failing tests for execution of `OpMatmulSiLU` on CUDA/Metal backends (requires verifying kernel selection).
 
 ## Blockers
 None
 
 ## Notes
-- Completed Metal backend skeleton (Graph + Memory operations).
-- Tests passing for both CUDA and Metal (with tags).
+- Implemented `OpMatmulSiLU` fusion in `inference/ir/fusion.go`.
+- Added `OpMatmulSiLU` to `OpKind`.

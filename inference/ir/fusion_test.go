@@ -37,3 +37,39 @@ func TestFusionPass(t *testing.T) {
 		t.Error("Optimized graph should not be empty")
 	}
 }
+
+func TestFusionMatmulSiLU(t *testing.T) {
+	// Pattern: Input -> Matmul -> SiLU -> Output
+	graph := ir.NewBlockIR()
+	in := ir.TensorID(1)
+	weight := ir.TensorID(2)
+	mid := ir.TensorID(3)
+	out := ir.TensorID(4)
+
+	graph.AddInput(in)
+	
+	// Matmul: in, weight -> mid
+	graph.AddNode(ir.NewOpNode(ir.OpMatmul, []ir.TensorID{in, weight}, []ir.TensorID{mid}))
+	// SiLU: mid -> out
+	graph.AddNode(ir.NewOpNode(ir.OpSiLU, []ir.TensorID{mid}, []ir.TensorID{out}))
+	
+	graph.AddOutput(out)
+
+	// Run Pass
+	pass := ir.NewFusionPass()
+	optimizedGraph := pass.Run(graph)
+
+	// Expectation:
+	// Nodes should be fused into a single OpMatmulSiLU node.
+	// Original nodes (Matmul, SiLU) should be removed (or replaced).
+	// For this test, we check that we have exactly 1 node of type OpMatmulSiLU.
+
+	nodes := optimizedGraph.Nodes()
+	if len(nodes) != 1 {
+		t.Fatalf("Expected 1 node after fusion, got %d", len(nodes))
+	}
+
+	if nodes[0].Kind() != ir.OpMatmulSiLU {
+		t.Errorf("Expected node kind %v, got %v", ir.OpMatmulSiLU, nodes[0].Kind())
+	}
+}
