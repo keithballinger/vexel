@@ -7,18 +7,18 @@
 Phase 4: Scheduler and Serving Layer
 
 ## Current Task
-Write Failing Tests: For the `Run` and `step` loop's basic execution flow and ticker management.
+Write Failing Tests: For `collectReady()` accurately identifying sequences in Pending/Decoding states.
 
 ## Progress
-- [x] Write Failing Tests: For `Scheduler` struct initialization.
-- [x] Implement Feature: Define `Scheduler` struct.
+- [x] Write Failing Tests: For `Scheduler.Run` loop.
+- [x] Implement Feature: Implement `Scheduler.Run` and `step` loop.
 
 ## Next Action
-Write failing tests for `Scheduler.Run` in `inference/scheduler/run_test.go`.
+Write failing tests for `collectReady()` in `inference/scheduler/collect_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Basic `Scheduler` struct defined.
-- `Sequence` management logic needs to be added next.
+- Basic scheduler loop is operational (but empty).
+- Need to implement internal sequence management logic (`collectReady`, `formBatches`).

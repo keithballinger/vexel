@@ -104,8 +104,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Define `Sequence` struct and state machine. (Started: 2025-12-07 18:35, Completed: 2025-12-07 18:40)
 - [x] Write Failing Tests: For `Scheduler` struct initialization. (Started: 2025-12-07 18:45, Completed: 2025-12-07 18:50)
 - [x] Implement Feature: Define `Scheduler` struct. (Started: 2025-12-07 18:50, Completed: 2025-12-07 18:55)
-- [ ] Write Failing Tests: For the `Run` and `step` loop's basic execution flow and ticker management.
-- [ ] Implement Feature: Implement `Run` and `step` methods for the scheduler's main loop.
+- [x] Write Failing Tests: For the `Run` and `step` loop's basic execution flow and ticker management. (Started: 2025-12-07 19:00, Completed: 2025-12-07 19:05)
+- [x] Implement Feature: Implement `Run` and `step` methods for the scheduler's main loop. (Started: 2025-12-07 19:05, Completed: 2025-12-07 19:10)
 - [ ] Write Failing Tests: For `collectReady()` accurately identifying sequences in Pending/Decoding states.
 - [ ] Implement Feature: Implement `collectReady()` method.
 - [ ] Write Failing Tests: For `formBatches()` creating batches based on priority and configurable policies.
