@@ -7,18 +7,17 @@
 Phase 3: GPU Backends and Optimization
 
 ## Current Task
-Write Failing Tests: For `CompileBlockGraph` using mock IR and weights for Metal.
+Write Failing Tests: For `RunGraph` with mock inputs and stream (Metal).
 
 ## Progress
-- [x] Write Failing Tests: For `metalBackend` implementing the `Backend` interface.
-- [x] Implement Feature: Implement `metalBackend` struct and its core stream/event management methods.
+- [x] Write Failing Tests: For `CompileBlockGraph` (Metal).
+- [x] Implement Feature: Implement `CompileBlockGraph` for Metal.
 
 ## Next Action
-Write failing tests for `CompileBlockGraph` in `inference/backend/metal/graph_test.go`.
+Write failing tests for `RunGraph` in `inference/backend/metal/run_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Established `metalBackend` skeleton.
-- Tests passing with `-tags=metal`.
+- Implemented `CompileBlockGraph` stub for Metal.

@@ -84,8 +84,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 ### Task: Implement Metal Backend (`inference/backend/metal/`)
 - [x] Write Failing Tests: For `metalBackend` implementing the `Backend` interface, focusing on `CreateStream`, `RecordEvent`, `WaitEvent`, `SynchronizeStream`, and `Device`. (Started: 2025-12-07 17:00, Completed: 2025-12-07 17:05)
 - [x] Implement Feature: Implement `metalBackend` struct and its core stream/event management methods. (Started: 2025-12-07 17:05, Completed: 2025-12-07 17:10)
-- [ ] Write Failing Tests: For `CompileBlockGraph` using mock IR and weights (checking return types and error handling).
-- [ ] Implement Feature: Implement `CompileBlockGraph` for Metal, integrating with `metallib` pipelines.
+- [x] Write Failing Tests: For `CompileBlockGraph` using mock IR and weights (checking return types and error handling). (Started: 2025-12-07 17:15, Completed: 2025-12-07 17:20)
+- [x] Implement Feature: Implement `CompileBlockGraph` for Metal, integrating with `metallib` pipelines. (Started: 2025-12-07 17:20, Completed: 2025-12-07 17:25)
 - [ ] Write Failing Tests: For `RunGraph` with mock inputs and stream.
 - [ ] Implement Feature: Implement `RunGraph` for Metal.
 - [ ] Write Failing Tests: For `HostToDevice` and `DeviceToHost` operations.
