@@ -146,8 +146,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 ### Task: Implement Compute Kernels
 - [x] Write Failing Tests: For CPU Matrix Multiplication (`Matmul`). (Started: 2025-12-07 23:00, Completed: 2025-12-07 23:05)
 - [x] Implement Feature: Implement `Matmul` kernel for CPU. (Started: 2025-12-07 23:05, Completed: 2025-12-07 23:10)
-- [ ] Write Failing Tests: For CPU `RMSNorm`.
-- [ ] Implement Feature: Implement `RMSNorm` kernel for CPU.
+- [x] Write Failing Tests: For CPU `RMSNorm`. (Started: 2025-12-07 23:10, Completed: 2025-12-07 23:15)
+- [x] Implement Feature: Implement `RMSNorm` kernel for CPU. (Started: 2025-12-07 23:15, Completed: 2025-12-07 23:20)
 - [ ] Write Failing Tests: For CPU `RoPE` (Rotary Positional Embeddings).
 - [ ] Implement Feature: Implement `RoPE` kernel for CPU.
 - [ ] Write Failing Tests: For CPU `SiLU` (activation).

@@ -10,15 +10,15 @@ Phase 3: GPU Backends and Optimization (Revisited)
 Task: Implement Compute Kernels
 
 ## Progress
-- [x] Write Failing Tests: For CPU `Matmul`.
-- [x] Implement Feature: Implement `Matmul` kernel for CPU.
+- [x] Write Failing Tests: For CPU `RMSNorm`.
+- [x] Implement Feature: Implement `RMSNorm` kernel for CPU.
 
 ## Next Action
-Write Failing Tests: For CPU `RMSNorm`.
+Write Failing Tests: For CPU `RoPE` (Rotary Positional Embeddings).
 
 ## Blockers
 None
 
 ## Notes
-- Basic CPU matrix multiplication is implemented (naive O(n^3)).
-- Ready to implement remaining kernels to support full inference.
+- `Matmul` and `RMSNorm` implemented for CPU.
+- `RoPE` and `SiLU` needed next to support Llama architecture.

@@ -1,6 +1,7 @@
 package cpu
 
 import (
+	"math"
 	"vexel/inference/tensor"
 )
 
@@ -23,16 +24,7 @@ func (b *cpuBackend) Device() tensor.Device {
 }
 
 // Matmul performs matrix multiplication: C = A * B
-// A: [m, k], B: [k, n], C: [m, n]
-// B is assumed to be in column-major or we handle indices carefully.
-// Standard naive implementation:
-// C[i, j] = sum(A[i, p] * B[p, j]) for p in 0..k
 func (b *cpuBackend) Matmul(a, bData, out []float32, m, n, k int) {
-	// A is Row-Major: A[i, p] -> a[i*k + p]
-	// B is Row-Major: B[p, j] -> b[p*n + j]
-	// C is Row-Major: C[i, j] -> out[i*n + j]
-
-	// Zero out output first (safe practice)
 	for i := range out {
 		out[i] = 0
 	}
@@ -44,6 +36,29 @@ func (b *cpuBackend) Matmul(a, bData, out []float32, m, n, k int) {
 				sum += a[i*k+p] * bData[p*n+j]
 			}
 			out[i*n+j] = sum
+		}
+	}
+}
+
+// RMSNorm performs Root Mean Square Normalization.
+// out = x * weight / sqrt(mean(x^2) + eps)
+func (b *cpuBackend) RMSNorm(x, weight, out []float32, rows, cols int, eps float32) {
+	for i := 0; i < rows; i++ {
+		// 1. Calculate sum of squares
+		var sumSquares float32
+		offset := i * cols
+		for j := 0; j < cols; j++ {
+			val := x[offset+j]
+			sumSquares += val * val
+		}
+
+		// 2. Calculate RMS
+		mean := sumSquares / float32(cols)
+		rms := float32(math.Sqrt(float64(mean + eps)))
+		
+		// 3. Normalize and scale
+		for j := 0; j < cols; j++ {
+			out[offset+j] = (x[offset+j] / rms) * weight[j]
 		}
 	}
 }
