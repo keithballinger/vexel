@@ -18,7 +18,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Define `Shape` type and its methods. (Started: 2025-12-07 12:35, Completed: 2025-12-07 12:37)
 - [x] Write Failing Tests: For `DevicePtr` structure and basic initialization. (Started: 2025-12-07 12:40, Completed: 2025-12-07 12:42)
 - [x] Implement Feature: Define `DevicePtr` and `Device` types. (Started: 2025-12-07 12:45, Completed: 2025-12-07 12:47)
-- [ ] Write Failing Tests: For `Tensor` struct initialization and field access.
+- [x] Write Failing Tests: For `Tensor` struct initialization and field access. (Started: 2025-12-07 12:50, Completed: 2025-12-07 12:52)
 - [ ] Implement Feature: Define `Tensor` struct.
 - [ ] Write Failing Tests: For `ArenaKind` enumerations.
 - [ ] Implement Feature: Define `ArenaKind`.
