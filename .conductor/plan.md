@@ -102,8 +102,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 ### Task: Implement Scheduler Core (`inference/scheduler/`)
 - [x] Write Failing Tests: For `Sequence` struct initialization and state transitions. (Started: 2025-12-07 18:30, Completed: 2025-12-07 18:35)
 - [x] Implement Feature: Define `Sequence` struct and state machine. (Started: 2025-12-07 18:35, Completed: 2025-12-07 18:40)
-- [ ] Write Failing Tests: For `Scheduler` struct initialization.
-- [ ] Implement Feature: Define `Scheduler` struct.
+- [x] Write Failing Tests: For `Scheduler` struct initialization. (Started: 2025-12-07 18:45, Completed: 2025-12-07 18:50)
+- [x] Implement Feature: Define `Scheduler` struct. (Started: 2025-12-07 18:50, Completed: 2025-12-07 18:55)
 - [ ] Write Failing Tests: For the `Run` and `step` loop's basic execution flow and ticker management.
 - [ ] Implement Feature: Implement `Run` and `step` methods for the scheduler's main loop.
 - [ ] Write Failing Tests: For `collectReady()` accurately identifying sequences in Pending/Decoding states.

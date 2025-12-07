@@ -7,18 +7,18 @@
 Phase 4: Scheduler and Serving Layer
 
 ## Current Task
-Write Failing Tests: For `Scheduler` struct initialization.
+Write Failing Tests: For the `Run` and `step` loop's basic execution flow and ticker management.
 
 ## Progress
-- [x] Write Failing Tests: For `Sequence` struct initialization.
-- [x] Implement Feature: Define `Sequence` struct and state machine.
+- [x] Write Failing Tests: For `Scheduler` struct initialization.
+- [x] Implement Feature: Define `Scheduler` struct.
 
 ## Next Action
-Write failing tests for `Scheduler` struct in `inference/scheduler/scheduler_test.go`.
+Write failing tests for `Scheduler.Run` in `inference/scheduler/run_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- `Sequence` struct and states (`Pending`, `Prefill`, `Decoding`, `Finished`) implemented.
-- Scheduler will manage these sequences.
+- Basic `Scheduler` struct defined.
+- `Sequence` management logic needs to be added next.
