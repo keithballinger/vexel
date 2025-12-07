@@ -15,9 +15,9 @@ type Config struct {
 
 // Scheduler manages the execution of sequences.
 type Scheduler struct {
-	runtime *runtime.ModelRuntime
-	config  Config
-	// sequences map[SequenceID]*Sequence // To be added
+	runtime   *runtime.ModelRuntime
+	config    Config
+	sequences map[SequenceID]*Sequence
 }
 
 // NewScheduler creates a new Scheduler instance.
@@ -27,8 +27,9 @@ func NewScheduler(rt *runtime.ModelRuntime, config Config) (*Scheduler, error) {
 	}
 	
 	return &Scheduler{
-		runtime: rt,
-		config:  config,
+		runtime:   rt,
+		config:    config,
+		sequences: make(map[SequenceID]*Sequence),
 	}, nil
 }
 
@@ -53,8 +54,22 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 // step performs a single scheduling iteration.
 func (s *Scheduler) step(ctx context.Context) error {
-	// 1. Collect ready sequences (TODO)
+	// 1. Collect ready sequences
+	// ready := s.collectReady()
+	
 	// 2. Form batch (TODO)
 	// 3. Run DecodeStep (TODO)
 	return nil
+}
+
+// collectReady identifies sequences that are eligible for execution.
+// A sequence is ready if it is in Pending (needs prefill) or Decoding (needs next token) state.
+func (s *Scheduler) collectReady() []*Sequence {
+	ready := make([]*Sequence, 0)
+	for _, seq := range s.sequences {
+		if seq.State() == StatePending || seq.State() == StateDecoding {
+			ready = append(ready, seq)
+		}
+	}
+	return ready
 }

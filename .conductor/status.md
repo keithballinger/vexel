@@ -7,18 +7,18 @@
 Phase 4: Scheduler and Serving Layer
 
 ## Current Task
-Write Failing Tests: For `collectReady()` accurately identifying sequences in Pending/Decoding states.
+Write Failing Tests: For `formBatches()` creating batches based on priority and configurable policies.
 
 ## Progress
-- [x] Write Failing Tests: For `Scheduler.Run` loop.
-- [x] Implement Feature: Implement `Scheduler.Run` and `step` loop.
+- [x] Write Failing Tests: For `collectReady()`.
+- [x] Implement Feature: Implement `collectReady()`.
 
 ## Next Action
-Write failing tests for `collectReady()` in `inference/scheduler/collect_test.go`.
+Write failing tests for `formBatches()` in `inference/scheduler/batch_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Basic scheduler loop is operational (but empty).
-- Need to implement internal sequence management logic (`collectReady`, `formBatches`).
+- `collectReady` logic implemented and tested.
+- Scheduler now tracks sequences in a map.
