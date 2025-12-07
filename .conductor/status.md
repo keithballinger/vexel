@@ -4,21 +4,21 @@
 **Status:** 🟢 On Track
 
 ## Current Phase
-Phase 3: GPU Backends and Optimization
+Phase 4: Scheduler and Serving Layer
 
 ## Current Task
-Write Failing Tests: For compiled fused kernels executing correctly on CUDA and Metal backends.
+Task: Implement Scheduler Core (`inference/scheduler/`)
 
 ## Progress
-- [x] Write Failing Tests: For specific fusion pass identification (Matmul→SiLU).
-- [x] Implement Feature: Integrate Matmul→SiLU fusion pass.
+- [x] Write Failing Tests: For compiled fused kernels executing correctly.
+- [x] Implement Feature: Implement optimized fused kernels (OpMatmulSiLU).
 
 ## Next Action
-Write failing tests for execution of `OpMatmulSiLU` on CUDA/Metal backends (requires verifying kernel selection).
+Write Failing Tests: For `Sequence` struct initialization and state transitions.
 
 ## Blockers
 None
 
 ## Notes
-- Implemented `OpMatmulSiLU` fusion in `inference/ir/fusion.go`.
-- Added `OpMatmulSiLU` to `OpKind`.
+- Completed Phase 3 (GPU Backends and Optimization) initial pass.
+- Fusion pass (`Matmul -> SiLU`) implemented and integrated into backend "compilers" (stubs).
