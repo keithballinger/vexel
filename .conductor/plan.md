@@ -143,6 +143,16 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Write Failing Tests: For `ModelConfig.MemoryPlan()` aggregating all memory calculations. (Started: 2025-12-07 22:20, Completed: 2025-12-07 22:25)
 - [x] Implement Feature: Implement `ModelConfig.MemoryPlan()`. (Started: 2025-12-07 22:25, Completed: 2025-12-07 22:30)
 - [x] Implement Feature: Conduct comprehensive performance benchmarking against defined targets for throughput, latency, and VRAM usage on both CUDA and Metal. (Started: 2025-12-07 22:30, Completed: 2025-12-07 22:35)
+### Task: Implement Compute Kernels
+- [x] Write Failing Tests: For CPU Matrix Multiplication (`Matmul`). (Started: 2025-12-07 23:00, Completed: 2025-12-07 23:05)
+- [x] Implement Feature: Implement `Matmul` kernel for CPU. (Started: 2025-12-07 23:05, Completed: 2025-12-07 23:10)
+- [ ] Write Failing Tests: For CPU `RMSNorm`.
+- [ ] Implement Feature: Implement `RMSNorm` kernel for CPU.
+- [ ] Write Failing Tests: For CPU `RoPE` (Rotary Positional Embeddings).
+- [ ] Implement Feature: Implement `RoPE` kernel for CPU.
+- [ ] Write Failing Tests: For CPU `SiLU` (activation).
+- [ ] Implement Feature: Implement `SiLU` kernel for CPU.
+
 ### Task: Documentation and Code Quality Refinement
 - [ ] Implement Feature: Add comprehensive GoDoc comments for all public types, functions, and methods.
 - [ ] Implement Feature: Review and refine `user_guide.md` and `architecture.md` to reflect implementation details and any evolved design decisions.

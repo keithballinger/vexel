@@ -4,21 +4,21 @@
 **Status:** 🟢 On Track
 
 ## Current Phase
-Phase 5: Integration, Testing, and Documentation
+Phase 3: GPU Backends and Optimization (Revisited)
 
 ## Current Task
-Task: Documentation and Code Quality Refinement
+Task: Implement Compute Kernels
 
 ## Progress
-- [x] Implement Feature: Conduct comprehensive performance benchmarking.
-- [x] Implement Feature: Perform end-to-end integration (Scheduler -> Runtime -> Safetensors).
+- [x] Write Failing Tests: For CPU `Matmul`.
+- [x] Implement Feature: Implement `Matmul` kernel for CPU.
 
 ## Next Action
-Add comprehensive GoDoc comments for all public types, functions, and methods.
+Write Failing Tests: For CPU `RMSNorm`.
 
 ## Blockers
 None
 
 ## Notes
-- Benchmarking tool (`inference/cmd/bench`) achieves ~32k tokens/sec throughput (scheduler-only).
-- Safetensors loader verified with TinyLlama-1.1B.
+- Basic CPU matrix multiplication is implemented (naive O(n^3)).
+- Ready to implement remaining kernels to support full inference.
