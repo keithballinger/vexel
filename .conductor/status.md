@@ -10,15 +10,15 @@ Phase 3: GPU Backends and Optimization (Revisited)
 Task: Implement Compute Kernels
 
 ## Progress
-- [x] Write Failing Tests: For CPU `RMSNorm`.
-- [x] Implement Feature: Implement `RMSNorm` kernel for CPU.
+- [x] Write Failing Tests: For CPU `RoPE`.
+- [x] Implement Feature: Implement `RoPE` kernel for CPU.
 
 ## Next Action
-Write Failing Tests: For CPU `RoPE` (Rotary Positional Embeddings).
+Write Failing Tests: For CPU `SiLU` (activation).
 
 ## Blockers
 None
 
 ## Notes
-- `Matmul` and `RMSNorm` implemented for CPU.
-- `RoPE` and `SiLU` needed next to support Llama architecture.
+- `Matmul`, `RMSNorm`, and `RoPE` implemented for CPU.
+- `SiLU` is the last core kernel required for Llama-3.

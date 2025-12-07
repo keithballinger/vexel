@@ -148,8 +148,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement `Matmul` kernel for CPU. (Started: 2025-12-07 23:05, Completed: 2025-12-07 23:10)
 - [x] Write Failing Tests: For CPU `RMSNorm`. (Started: 2025-12-07 23:10, Completed: 2025-12-07 23:15)
 - [x] Implement Feature: Implement `RMSNorm` kernel for CPU. (Started: 2025-12-07 23:15, Completed: 2025-12-07 23:20)
-- [ ] Write Failing Tests: For CPU `RoPE` (Rotary Positional Embeddings).
-- [ ] Implement Feature: Implement `RoPE` kernel for CPU.
+- [x] Write Failing Tests: For CPU `RoPE` (Rotary Positional Embeddings). (Started: 2025-12-07 23:20, Completed: 2025-12-07 23:25)
+- [x] Implement Feature: Implement `RoPE` kernel for CPU. (Started: 2025-12-07 23:25, Completed: 2025-12-07 23:30)
 - [ ] Write Failing Tests: For CPU `SiLU` (activation).
 - [ ] Implement Feature: Implement `SiLU` kernel for CPU.
 
