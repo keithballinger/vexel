@@ -7,20 +7,20 @@
 Phase 1: Foundation and Core Components
 
 ## Current Task
-Implement Feature: Define `QuantizedTensor` struct.
+Write Failing Tests: For `KVConfig` struct and initialization.
 
 ## Progress
-- [x] Write Failing Tests: For `QuantProfile`.
-- [x] Implement Feature: Define `QuantProfile`.
-- [x] Write Failing Tests: For `QuantizedTensor` struct initialization.
-- [ ] Implement Feature: Define `QuantizedTensor` struct.
+- [x] Write Failing Tests: For `QuantizedTensor`.
+- [x] Implement Feature: Define `QuantizedTensor`.
+- [ ] Write Failing Tests: For `KVConfig` struct and initialization.
+- [ ] Implement Feature: Define `KVConfig` struct.
 
 ## Next Action
-Implement `QuantizedTensor` in `inference/tensor/qtensor.go`.
+Write failing test for `KVConfig` in `inference/kv/config_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/tensor/qtensor_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `QuantizedTensor` struct.
+- Verified with passing tests.
