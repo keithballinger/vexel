@@ -7,21 +7,22 @@
 Phase 1: Foundation and Core Components
 
 ## Current Task
-Implement Tensor and Memory System (`inference/tensor/`, `inference/memory/`)
+Implement Feature: Define `DType` and `Location` types and associated methods.
 
 ## Progress
 - [x] Write Failing Tests: For basic module structure and compilation.
-- [x] Implement Feature: Create `inference/tensor/`, `inference/memory/`, `inference/kv/`, `inference/backend/cpu/`, `inference/ir/`, `inference/runtime/`, `inference/scheduler/`, `inference/serve/`, `inference/cmd/` directories.
+- [x] Implement Feature: Create `inference/tensor/`, ... directories.
 - [x] Write Failing Tests: For Go module initialization.
-- [x] Implement Feature: Initialize Go module and manage dependencies (`go mod init`, `go mod tidy`).
+- [x] Implement Feature: Initialize Go module (`go mod init`).
+- [x] Write Failing Tests: For `DType` and `Location` enumerations.
+- [ ] Implement Feature: Define `DType` and `Location` types and associated methods.
 
 ## Next Action
-Write Failing Tests: For `DType` and `Location` enumerations and their methods.
+Implement `DType` and `Location` in `inference/tensor/types.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Initialized Go module `vexel`.
-- Verified module structure with passing tests `mod_test.go` and `structure_test.go`.
-- Ready to begin implementing the Tensor system.
+- Created `inference/tensor/types_test.go`.
+- Verified compilation failure (Red Phase) due to missing types.
