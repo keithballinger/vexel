@@ -20,7 +20,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Define `DevicePtr` and `Device` types. (Started: 2025-12-07 12:45, Completed: 2025-12-07 12:47)
 - [x] Write Failing Tests: For `Tensor` struct initialization and field access. (Started: 2025-12-07 12:50, Completed: 2025-12-07 12:52)
 - [x] Implement Feature: Define `Tensor` struct. (Started: 2025-12-07 12:55, Completed: 2025-12-07 12:57)
-- [ ] Write Failing Tests: For `ArenaKind` enumerations.
+- [x] Write Failing Tests: For `ArenaKind` enumerations. (Started: 2025-12-07 13:00, Completed: 2025-12-07 13:02)
 - [ ] Implement Feature: Define `ArenaKind`.
 - [ ] Write Failing Tests: For `Arena` creation (`NewArena`), allocation (`Alloc`), and reset (`Reset`).
 - [ ] Implement Feature: Implement `Arena` struct and methods for memory management.
