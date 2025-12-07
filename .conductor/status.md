@@ -7,18 +7,17 @@
 Phase 5: Integration, Testing, and Documentation
 
 ## Current Task
-Task: Performance Benchmarking and Validation
+Task: Documentation and Code Quality Refinement
 
 ## Progress
-- [x] Write Failing Tests: For `ModelConfig.MemoryPlan()`.
-- [x] Implement Feature: Implement `ModelConfig.MemoryPlan()`.
+- [x] Implement Feature: Implement performance benchmarking tools (`inference/cmd/bench`).
 
 ## Next Action
-Implement Feature: Conduct comprehensive performance benchmarking against defined targets for throughput, latency, and VRAM usage on both CUDA and Metal.
+Download a real model (e.g., TinyLlama) and implement `LoadWeights` fully to allow `vexel` to actually run. (This is part of the "Refinement" and "Integration" wrap-up).
 
 ## Blockers
 None
 
 ## Notes
-- All memory estimation tools are complete.
-- Ready to move to actual benchmarking or comprehensive documentation/refinement.
+- Benchmark script confirms memory estimation works.
+- Scheduler loop runs but hits "DecodeStep not implemented".
