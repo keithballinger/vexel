@@ -7,18 +7,18 @@
 Phase 3: GPU Backends and Optimization
 
 ## Current Task
-Task: Implement Metal Backend (`inference/backend/metal/`)
+Write Failing Tests: For `CompileBlockGraph` using mock IR and weights for Metal.
 
 ## Progress
-- [x] Write Failing Tests: For `HostToDevice` and `DeviceToHost` operations.
-- [x] Implement Feature: Implement host-device memory transfer functions for CUDA.
+- [x] Write Failing Tests: For `metalBackend` implementing the `Backend` interface.
+- [x] Implement Feature: Implement `metalBackend` struct and its core stream/event management methods.
 
 ## Next Action
-Start implementing Metal backend: Write Failing Tests for `metalBackend` implementing the `Backend` interface.
+Write failing tests for `CompileBlockGraph` in `inference/backend/metal/graph_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Implemented CUDA memory transfer stubs.
-- Ready to start Metal backend structure.
+- Established `metalBackend` skeleton.
+- Tests passing with `-tags=metal`.

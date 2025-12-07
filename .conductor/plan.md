@@ -82,8 +82,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement host-device memory transfer functions for CUDA. (Started: 2025-12-07 16:50, Completed: 2025-12-07 16:55)
 
 ### Task: Implement Metal Backend (`inference/backend/metal/`)
-- [ ] Write Failing Tests: For `metalBackend` implementing the `Backend` interface, focusing on `CreateStream`, `RecordEvent`, `WaitEvent`, `SynchronizeStream`, and `Device`.
-- [ ] Implement Feature: Implement `metalBackend` struct and its core stream/event management methods.
+- [x] Write Failing Tests: For `metalBackend` implementing the `Backend` interface, focusing on `CreateStream`, `RecordEvent`, `WaitEvent`, `SynchronizeStream`, and `Device`. (Started: 2025-12-07 17:00, Completed: 2025-12-07 17:05)
+- [x] Implement Feature: Implement `metalBackend` struct and its core stream/event management methods. (Started: 2025-12-07 17:05, Completed: 2025-12-07 17:10)
 - [ ] Write Failing Tests: For `CompileBlockGraph` using mock IR and weights (checking return types and error handling).
 - [ ] Implement Feature: Implement `CompileBlockGraph` for Metal, integrating with `metallib` pipelines.
 - [ ] Write Failing Tests: For `RunGraph` with mock inputs and stream.
