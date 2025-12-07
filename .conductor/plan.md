@@ -150,8 +150,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement `RMSNorm` kernel for CPU. (Started: 2025-12-07 23:15, Completed: 2025-12-07 23:20)
 - [x] Write Failing Tests: For CPU `RoPE` (Rotary Positional Embeddings). (Started: 2025-12-07 23:20, Completed: 2025-12-07 23:25)
 - [x] Implement Feature: Implement `RoPE` kernel for CPU. (Started: 2025-12-07 23:25, Completed: 2025-12-07 23:30)
-- [ ] Write Failing Tests: For CPU `SiLU` (activation).
-- [ ] Implement Feature: Implement `SiLU` kernel for CPU.
+- [x] Write Failing Tests: For CPU `SiLU` (activation). (Started: 2025-12-07 23:30, Completed: 2025-12-07 23:35)
+- [x] Implement Feature: Implement `SiLU` kernel for CPU. (Started: 2025-12-07 23:35, Completed: 2025-12-07 23:40)
 
 ### Task: Documentation and Code Quality Refinement
 - [ ] Implement Feature: Add comprehensive GoDoc comments for all public types, functions, and methods.
