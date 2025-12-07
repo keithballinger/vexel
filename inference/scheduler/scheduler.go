@@ -57,13 +57,14 @@ func (s *Scheduler) step(ctx context.Context) error {
 	// 1. Collect ready sequences
 	// ready := s.collectReady()
 	
-	// 2. Form batch (TODO)
+	// 2. Form batch
+	// batch := s.formBatches(ready)
+	
 	// 3. Run DecodeStep (TODO)
 	return nil
 }
 
 // collectReady identifies sequences that are eligible for execution.
-// A sequence is ready if it is in Pending (needs prefill) or Decoding (needs next token) state.
 func (s *Scheduler) collectReady() []*Sequence {
 	ready := make([]*Sequence, 0)
 	for _, seq := range s.sequences {
@@ -72,4 +73,22 @@ func (s *Scheduler) collectReady() []*Sequence {
 		}
 	}
 	return ready
+}
+
+// formBatches selects a subset of ready sequences to run in the next step.
+// It respects MaxBatchSize and scheduling policy (currently simple FIFO/priority).
+func (s *Scheduler) formBatches(ready []*Sequence) []*Sequence {
+	if len(ready) == 0 {
+		return nil
+	}
+
+	// Basic implementation: Take up to MaxBatchSize
+	// Priority: Decoding > Pending (Simple heuristic to finish tasks faster)
+	// For now, we just truncate.
+	
+	if len(ready) <= s.config.MaxBatchSize {
+		return ready
+	}
+	
+	return ready[:s.config.MaxBatchSize]
 }
