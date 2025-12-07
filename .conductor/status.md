@@ -7,20 +7,20 @@
 Phase 1: Foundation and Core Components
 
 ## Current Task
-Write Failing Tests: For the `Backend` interface definition.
+Implement Feature: Define the `Backend` interface.
 
 ## Progress
 - [x] Write Failing Tests: For `PageIndex` and `SeqKVHandle`.
 - [x] Implement Feature: Define `PageIndex` and `SeqKVHandle`.
-- [ ] Write Failing Tests: For the `Backend` interface definition (as an empty interface at this stage, focusing on structural correctness).
+- [x] Write Failing Tests: For `Backend` interface.
 - [ ] Implement Feature: Define the `Backend` interface.
 
 ## Next Action
-Write failing test for `Backend` in `inference/backend/cpu/backend_test.go`.
+Implement `Backend` interface in `inference/backend/cpu/interface.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Implemented `SeqKVHandle` struct.
-- Verified with passing tests.
+- Created `inference/backend/cpu/interface_test.go`.
+- Test fails as expected (Red Phase).
