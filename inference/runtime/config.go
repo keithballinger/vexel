@@ -71,3 +71,26 @@ func (c ModelConfig) ApproxParams() int64 {
 
 	return embedding + (layerParams * int64(c.NumHiddenLayers)) + output
 }
+
+// WeightsBytes calculates the memory required for weights given a quantization profile.
+func (c ModelConfig) WeightsBytes(profile tensor.QuantProfile) int64 {
+	params := c.ApproxParams()
+	
+	switch profile {
+	case tensor.QuantNone:
+		// Use DType size (default BF16/FP16 = 2 bytes)
+		// Assuming DType SizeBytes method exists or we hardcode for now.
+		// tensor.DType usually has SizeBytes().
+		// BFloat16 is 2 bytes.
+		return params * 2
+	case tensor.Q8_0:
+		// 8 bits = 1 byte per param + small overhead for blocks
+		// Simplified: 1 byte
+		return params
+	case tensor.Q4_0:
+		// 4 bits = 0.5 bytes per param + overhead
+		return params / 2
+	default:
+		return params * 2 // Default to 16-bit
+	}
+}

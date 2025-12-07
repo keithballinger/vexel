@@ -134,8 +134,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 ### Task: Performance Benchmarking and Validation
 - [x] Write Failing Tests: For `ModelConfig.ApproxParams()` calculation. (Started: 2025-12-07 21:30, Completed: 2025-12-07 21:35)
 - [x] Implement Feature: Implement `ModelConfig.ApproxParams()`. (Started: 2025-12-07 21:35, Completed: 2025-12-07 21:40)
-- [ ] Write Failing Tests: For `ModelConfig.WeightsBytes()` calculation across different quantization profiles.
-- [ ] Implement Feature: Implement `ModelConfig.WeightsBytes()`.
+- [x] Write Failing Tests: For `ModelConfig.WeightsBytes()` calculation across different quantization profiles. (Started: 2025-12-07 21:45, Completed: 2025-12-07 21:50)
+- [x] Implement Feature: Implement `ModelConfig.WeightsBytes()`. (Started: 2025-12-07 21:50, Completed: 2025-12-07 21:55)
 - [ ] Write Failing Tests: For `KVBytes()` calculation based on model config, KV config, and active sequences.
 - [ ] Implement Feature: Implement `KVBytes()`.
 - [ ] Write Failing Tests: For `ScratchBytes()` calculation based on model config and max batch.

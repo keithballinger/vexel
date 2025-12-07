@@ -10,15 +10,14 @@ Phase 5: Integration, Testing, and Documentation
 Task: Performance Benchmarking and Validation
 
 ## Progress
-- [x] Write Failing Tests: For `ModelConfig.ApproxParams()`.
-- [x] Implement Feature: Implement `ModelConfig.ApproxParams()`.
+- [x] Write Failing Tests: For `ModelConfig.WeightsBytes()`.
+- [x] Implement Feature: Implement `ModelConfig.WeightsBytes()`.
 
 ## Next Action
-Write Failing Tests: For `ModelConfig.WeightsBytes()` calculation.
+Write Failing Tests: For `KVBytes()` calculation.
 
 ## Blockers
 None
 
 ## Notes
-- `ModelConfig` now supports parameter estimation.
-- Need to calculate memory usage next.
+- `WeightsBytes` calculation implemented for unquantized, Q8, and Q4.
