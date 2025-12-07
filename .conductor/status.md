@@ -7,20 +7,20 @@
 Phase 2: Intermediate Representation and Runtime
 
 ## Current Task
-Implement Feature: Implement basic fusion pass mechanisms.
+Write Failing Tests: For `ModelConfig` struct and initialization.
 
 ## Progress
-- [x] Write Failing Tests: For `BlockIR`.
-- [x] Implement Feature: Define `BlockIR`.
 - [x] Write Failing Tests: For fusion pass.
-- [ ] Implement Feature: Implement basic fusion pass mechanisms.
+- [x] Implement Feature: Implement basic fusion pass mechanisms.
+- [ ] Write Failing Tests: For `ModelConfig` struct and initialization (e.g., `Llama3_8B` configuration).
+- [ ] Implement Feature: Define `ModelConfig` struct.
 
 ## Next Action
-Implement `FusionPass` in `inference/ir/fusion.go`.
+Write failing test for `ModelConfig` in `inference/runtime/config_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/ir/fusion_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `FusionPass` (skeleton).
+- Verified with passing tests.
