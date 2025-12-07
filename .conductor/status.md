@@ -4,23 +4,24 @@
 **Status:** 🟢 On Track
 
 ## Current Phase
-Phase 1: Foundation and Core Components
+Phase 2: Intermediate Representation and Runtime
 
 ## Current Task
-Implement Feature: Create a placeholder `cpuBackend`.
+Write Failing Tests: For `TensorID`, `OpKind` enumerations, and `OpNode` struct initialization.
 
 ## Progress
-- [x] Write Failing Tests: For `Backend` interface.
-- [x] Implement Feature: Define `Backend` interface.
 - [x] Write Failing Tests: For `cpuBackend`.
-- [ ] Implement Feature: Create a placeholder `cpuBackend`.
+- [x] Implement Feature: Create `cpuBackend`.
+- [ ] Write Failing Tests: For `TensorID`, `OpKind` enumerations, and `OpNode` struct initialization.
+- [ ] Implement Feature: Define `TensorID`, `OpKind`, and `OpNode`.
 
 ## Next Action
-Implement `cpuBackend` in `inference/backend/cpu/backend.go`.
+Write failing test for `OpNode` in `inference/ir/ir_test.go`.
 
 ## Blockers
 None
 
 ## Notes
-- Created `inference/backend/cpu/cpu_test.go`.
-- Test fails as expected (Red Phase).
+- Implemented `cpuBackend` struct.
+- Verified with passing tests.
+- Completed Phase 1: Foundation and Core Components.
