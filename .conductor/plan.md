@@ -66,7 +66,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Define `ModelRuntime` struct (initial structure). (Started: 2025-12-07 15:35, Completed: 2025-12-07 15:37)
 - [x] Write Failing Tests: For `BatchRuntimeInputs` struct initialization. (Started: 2025-12-07 15:40, Completed: 2025-12-07 15:42)
 - [x] Implement Feature: Define `BatchRuntimeInputs` struct. (Started: 2025-12-07 15:45, Completed: 2025-12-07 15:47)
-- [ ] Write Failing Tests: For the high-level `DecodeStep` function signature and its return types.
+- [x] Write Failing Tests: For the high-level `DecodeStep` function signature and its return types. (Started: 2025-12-07 15:50, Completed: 2025-12-07 15:52)
 - [ ] Implement Feature: Implement `DecodeStep` function (high-level structure, integrating with IR and backend conceptually).
 
 ## Phase 3: GPU Backends and Optimization
