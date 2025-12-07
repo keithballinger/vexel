@@ -116,8 +116,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 ### Task: Implement Serving Layer (`inference/serve/`)
 - [x] Write Failing Tests: For HTTP `/generate` endpoint handling requests and returning non-streaming responses. (Started: 2025-12-07 20:00, Completed: 2025-12-07 20:05)
 - [x] Implement Feature: Implement HTTP `/generate` endpoint. (Started: 2025-12-07 20:05, Completed: 2025-12-07 20:10)
-- [ ] Write Failing Tests: For HTTP `/stream` endpoint handling requests and providing token-by-token streaming.
-- [ ] Implement Feature: Implement HTTP `/stream` endpoint.
+- [x] Write Failing Tests: For HTTP `/stream` endpoint handling requests and providing token-by-token streaming. (Started: 2025-12-07 20:15, Completed: 2025-12-07 20:20)
+- [x] Implement Feature: Implement HTTP `/stream` endpoint. (Started: 2025-12-07 20:20, Completed: 2025-12-07 20:25)
 - [ ] Write Failing Tests: For gRPC `/generate` and `/stream` endpoints.
 - [ ] Implement Feature: Implement gRPC `/generate` and `/stream` endpoints.
 - [ ] Write Failing Tests: For request admission control and sequence registration with the scheduler.
