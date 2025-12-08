@@ -177,8 +177,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 ### Task: Real Inference Support (Data Path)
 - [x] Write Failing Tests: For verifying weight data is populated from safetensors. (Started: 2025-12-08 00:55, Completed: 2025-12-08 01:00)
 - [x] Implement Feature: Map safetensors offsets to `BlockRuntime` tensors. (Started: 2025-12-08 01:00, Completed: 2025-12-08 01:05)
-- [ ] Write Failing Tests: For Embedding lookup kernel.
-- [ ] Implement Feature: Implement `Embedding` kernel.
+- [x] Write Failing Tests: For Embedding lookup kernel. (Started: 2025-12-08 01:10, Completed: 2025-12-08 01:15)
+- [x] Implement Feature: Implement `Embedding` kernel. (Started: 2025-12-08 01:15, Completed: 2025-12-08 01:20)
 - [ ] Implement Feature: Optimize CPU Matmul (Parallelize).
 
 ### Task: Documentation and Code Quality Refinement

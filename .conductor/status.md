@@ -10,15 +10,15 @@ Phase 5: Integration, Testing, and Documentation (Real Inference)
 Task: Real Inference Support (Data Path)
 
 ## Progress
-- [x] Implement `mmap` safetensors.
-- [x] Implement BF16->FP32 conversion.
-- [x] Implement `LoadWeights` mapping to blocks.
+- [x] Implement `Embedding` kernel.
 
 ## Next Action
-Write Failing Tests: For Embedding lookup kernel.
+Implement Feature: Optimize CPU Matmul (Parallelize). (Optional but recommended for speed).
 
 ## Blockers
 None
 
 ## Notes
-- Weights are now effectively loaded into RAM as F32.
+- All kernels implemented.
+- `Matmul` is single-threaded $O(N^3)$, so it will be slow.
+- Next is parallelism.

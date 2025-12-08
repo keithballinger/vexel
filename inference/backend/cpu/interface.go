@@ -11,4 +11,11 @@ type Backend interface {
 
 	// Device returns the device associated with this backend.
 	Device() tensor.Device
+
+	// Compute Kernels
+	Matmul(a, b, out []float32, m, n, k int)
+	RMSNorm(x, weight, out []float32, rows, cols int, eps float32)
+	RoPE(q, k []float32, headDim, seqLen, startPos int, theta float32)
+	SiLU(x, out []float32, n int)
+	Embedding(ids []int, table []float32, out []float32, dim int)
 }

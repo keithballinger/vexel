@@ -104,11 +104,28 @@ func (b *cpuBackend) RoPE(q, k []float32, headDim, seqLen, startPos int, theta f
 }
 
 // SiLU applies the Sigmoid Linear Unit activation function element-wise.
-// out = x * sigmoid(x) = x / (1 + exp(-x))
 func (b *cpuBackend) SiLU(x, out []float32, n int) {
 	for i := 0; i < n; i++ {
 		val := x[i]
 		sigmoid := 1.0 / (1.0 + float32(math.Exp(float64(-val))))
 		out[i] = val * sigmoid
+	}
+}
+
+// Embedding performs lookup: out[i] = table[ids[i]]
+func (b *cpuBackend) Embedding(ids []int, table []float32, out []float32, dim int) {
+	for i, id := range ids {
+		// Copy vector
+		start := id * dim
+		end := start + dim
+		
+		// Range check
+		if start < 0 || end > len(table) {
+			continue // Or panic/error? For now safe skip.
+		}
+		
+		src := table[start:end]
+		dst := out[i*dim : (i+1)*dim]
+		copy(dst, src)
 	}
 }
