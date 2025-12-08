@@ -18,4 +18,5 @@ type Backend interface {
 	RoPE(q, k []float32, headDim, seqLen, startPos int, theta float32)
 	SiLU(x, out []float32, n int)
 	Embedding(ids []int, table []float32, out []float32, dim int)
+	Softmax(x, out []float32, rows, cols int)
 }

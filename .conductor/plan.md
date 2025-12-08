@@ -181,6 +181,17 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement `Embedding` kernel. (Started: 2025-12-08 01:15, Completed: 2025-12-08 01:20)
 - [x] Implement Feature: Optimize CPU Matmul (Parallelize). (Started: 2025-12-08 01:20, Completed: 2025-12-08 01:25)
 
+### Task: Real Inference Support (Memory & Math)
+- [~] Write Failing Tests: For `Arena` allocator. (Started: 2025-12-08 02:00)
+- [ ] Implement Feature: Implement `Arena` with real memory allocation.
+- [ ] Write Failing Tests: For `Softmax` kernel.
+- [x] Implement Feature: Implement `Softmax` kernel. (Started: 2025-12-08 02:00, Completed: 2025-12-08 02:05)
+- [ ] Write Failing Tests: For `SDPA` (Scaled Dot Product Attention) logic.
+- [ ] Implement Feature: Implement `SDPA` with causal masking.
+- [ ] Write Failing Tests: For KV Cache read/write logic in `BlockRuntime`.
+- [ ] Implement Feature: Integrate KV Cache into `BlockRuntime`.
+- [ ] Implement Feature: Implement `Matmul` Transpose support (for linear layers).
+
 ### Task: Documentation and Code Quality Refinement
 - [ ] Implement Feature: Add comprehensive GoDoc comments for all public types, functions, and methods.
 - [ ] Implement Feature: Review and refine `user_guide.md` and `architecture.md` to reflect implementation details and any evolved design decisions.

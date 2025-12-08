@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"vexel/inference/memory"
 	"vexel/inference/tensor"
 )
 
@@ -23,15 +24,31 @@ func (m *ModelRuntime) DecodeStep(inputs BatchRuntimeInputs) (tensor.Tensor, err
 	)
 	
 	// Create scratch buffer
-	// Usually allocated from Arena. For now, mock it.
 	scratchSize := m.config.ScratchBytes(batchSize)
-	// We need shape? Scratch is byte blob usually. But Kernels expect []float32.
-	// Let's create a big float32 tensor for scratch.
-	scratchElements := int(scratchSize / 2)
+	scratchElements := int(scratchSize / 2) // Assuming 2 bytes per float
+	
+	// Allocate from Arena
+	// We assume ctx has a Scratch arena. If not, panic or error?
+	// For "Real" inference, we must ensure it's initialized.
+	var ptr tensor.DevicePtr
+	
+	arena := m.ctx.GetArena(memory.Scratch)
+	if arena != nil {
+		m.ctx.ResetScratch()
+		var err error
+		ptr, err = arena.Alloc(int(scratchSize))
+		if err != nil {
+			return tensor.Tensor{}, err
+		}
+	} else {
+		// Fallback for tests that didn't set up arena (mock behavior)
+		ptr = tensor.NewDevicePtr(tensor.CPU, 0)
+	}
+
 	scratch := tensor.NewTensor(
 		tensor.NewShape(scratchElements),
 		m.config.DType,
-		tensor.NewDevicePtr(tensor.CPU, 0),
+		ptr,
 	)
 	
 	// 3. Layer Loop

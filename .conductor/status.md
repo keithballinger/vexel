@@ -7,17 +7,18 @@
 Phase 5: Integration, Testing, and Documentation (Real Inference)
 
 ## Current Task
-Task: Documentation and Code Quality Refinement
+Task: Real Inference Support (Memory & Math)
 
 ## Progress
-- [x] Implement CPU Matmul Parallelization.
+- [x] Implement `Arena` (Memory Allocator).
+- [x] Implement `Softmax` kernel.
 
 ## Next Action
-Refine documentation.
+Write Failing Tests: For `SDPA` (Scaled Dot Product Attention) logic.
 
 ## Blockers
 None
 
 ## Notes
-- All functional requirements for "Real Inference" are met.
-- CPU backend is parallelized.
+- `Arena` is now used for scratch buffers.
+- `Softmax` is ready for Attention.

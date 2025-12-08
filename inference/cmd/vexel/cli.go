@@ -54,14 +54,20 @@ func main() {
 
 	// 2. Load Tokenizer
 	tokPath := filepath.Join(*modelDir, "tiny_tokenizer.json")
-	_, err = tokenizer.Load(tokPath)
+	tok, err := tokenizer.Load(tokPath)
 	if err != nil {
 		log.Printf("Warning: Failed to load tokenizer: %v", err)
 	}
 
 	// 3. Initialize Runtime
 	backend := cpu.NewBackend()
-	ctx := &memory.InferenceContext{}
+	
+	// Create context with Scratch Arena
+	ctx := memory.NewInferenceContext(tensor.CPU)
+	scratchSize := cfg.ScratchBytes(1) // Batch size 1
+	// Add buffer for overhead
+	ctx.AddArena(memory.Scratch, int(scratchSize * 2))
+	
 	cache := &kv.KVCache{}
 	
 	rt, err := runtime.NewModelRuntime(backend, ctx, cache, cfg)
