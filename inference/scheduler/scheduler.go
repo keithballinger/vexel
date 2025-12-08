@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"vexel/inference/pkg/sampler"
+	"vexel/inference/pkg/tokenizer"
 	"vexel/inference/runtime"
+	"vexel/inference/tensor"
 )
 
 // Config holds configuration for the scheduler.
@@ -23,19 +26,21 @@ type SchedulerMetrics struct {
 // Scheduler manages the execution of sequences.
 type Scheduler struct {
 	runtime   *runtime.ModelRuntime
+	tokenizer *tokenizer.Tokenizer
 	config    Config
 	sequences map[SequenceID]*Sequence
 	metrics   SchedulerMetrics
 }
 
 // NewScheduler creates a new Scheduler instance.
-func NewScheduler(rt *runtime.ModelRuntime, config Config) (*Scheduler, error) {
+func NewScheduler(rt *runtime.ModelRuntime, tok *tokenizer.Tokenizer, config Config) (*Scheduler, error) {
 	if rt == nil {
 		return nil, fmt.Errorf("runtime cannot be nil")
 	}
 	
 	return &Scheduler{
 		runtime:   rt,
+		tokenizer: tok,
 		config:    config,
 		sequences: make(map[SequenceID]*Sequence),
 	}, nil
@@ -125,19 +130,47 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 	if err != nil {
 		return err
 	}
-	
-	// Silence unused variable until we slice it
-	_ = logits
 
-	// Update metrics and sequence state
+	// Update metrics
 	s.metrics.TotalTokens += len(batch)
 	
-	for _, seq := range batch {
+	// Sample and Decode
+	// Logits: [Batch, Vocab]
+	// We need raw access.
+	logitsData := tensor.ToFloat32Slice(logits)
+	vocabSize := s.runtime.Config().VocabSize
+	
+	for i, seq := range batch {
 		if seq.State() == StatePending {
 			seq.SetState(StateDecoding)
 		}
-		// Mock token generation for interactive CLI demo
-		seq.PushToken("token ")
+		
+		// Extract logits for this sequence
+		start := i * vocabSize
+		end := start + vocabSize
+		
+		// Safety check
+		if logitsData == nil || end > len(logitsData) {
+			// Fallback if tensor is invalid (e.g. mock runtime returning empty)
+			seq.PushToken("?")
+			continue
+		}
+		
+		seqLogits := logitsData[start:end]
+		
+		// Sample
+		tokenID := sampler.Argmax(seqLogits)
+		
+		// Decode
+		// If tokenizer is nil (e.g. benchmark/test), push ID as string
+		var text string
+		if s.tokenizer != nil {
+			text, _ = s.tokenizer.Decode([]int{tokenID})
+		} else {
+			text = fmt.Sprintf(" %d", tokenID)
+		}
+		
+		seq.PushToken(text)
 	}
 
 	return nil

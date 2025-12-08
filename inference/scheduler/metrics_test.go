@@ -27,7 +27,7 @@ func BenchmarkSchedulerCycle(b *testing.B) {
 	// Setup
 	cfg := scheduler.Config{MaxBatchSize: 128, MaxSequences: 128}
 	rt := &runtime.ModelRuntime{} // Stub returns immediately (error or nil)
-	sched, _ := scheduler.NewScheduler(rt, cfg)
+	sched, _ := scheduler.NewScheduler(rt, nil, cfg)
 
 	// Add sequences
 	for i := 0; i < 100; i++ {
@@ -57,7 +57,7 @@ func TestPerformanceMetrics(t *testing.T) {
 	
 	cfg := scheduler.Config{MaxBatchSize: 8, MaxSequences: 16}
 	rt := &runtime.ModelRuntime{}
-	sched, _ := scheduler.NewScheduler(rt, cfg)
+	sched, _ := scheduler.NewScheduler(rt, nil, cfg)
 	
 	seq := scheduler.NewSequence(1, "Test")
 	sched.AddSequence(seq)

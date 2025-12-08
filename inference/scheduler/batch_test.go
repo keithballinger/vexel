@@ -12,7 +12,7 @@ func TestFormBatches(t *testing.T) {
 		MaxSequences: 16,
 	}
 	rt := &runtime.ModelRuntime{}
-	sched, _ := NewScheduler(rt, cfg)
+	sched, _ := NewScheduler(rt, nil, cfg)
 
 	// Create 3 sequences
 	s1 := NewSequence(1, "1")

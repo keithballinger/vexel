@@ -35,7 +35,7 @@ func TestSchedulerInitialization(t *testing.T) {
 		MaxSequences: 16,
 	}
 
-	sched, err := scheduler.NewScheduler(nil, cfg)
+	sched, err := scheduler.NewScheduler(nil, nil, cfg)
 	if err == nil {
 		t.Error("Expected error when initializing Scheduler with nil runtime")
 	}
@@ -43,7 +43,7 @@ func TestSchedulerInitialization(t *testing.T) {
 	// Create a dummy runtime (using nil internals as we won't run it)
 	rt := &runtime.ModelRuntime{}
 	
-	sched, err = scheduler.NewScheduler(rt, cfg)
+	sched, err = scheduler.NewScheduler(rt, nil, cfg)
 	if err != nil {
 		t.Fatalf("Failed to create scheduler: %v", err)
 	}

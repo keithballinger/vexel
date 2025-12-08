@@ -18,7 +18,7 @@ func TestRunDecodeStep(t *testing.T) {
 	// Since runtime.DecodeStep is not implemented fully yet (returns error), we expect an error.
 	
 	rt := &runtime.ModelRuntime{}
-	sched, _ := NewScheduler(rt, cfg)
+	sched, _ := NewScheduler(rt, nil, cfg)
 
 	// Create a batch
 	s1 := NewSequence(1, "Test")

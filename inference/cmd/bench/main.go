@@ -34,7 +34,7 @@ flag.Parse()
 		MaxBatchSize: *batchSize,
 		MaxSequences: *numSeqs,
 	}
-	sched, err := scheduler.NewScheduler(rt, schedCfg)
+	sched, err := scheduler.NewScheduler(rt, nil, schedCfg)
 	if err != nil {
 		log.Fatalf("Failed to create scheduler: %v", err)
 	}

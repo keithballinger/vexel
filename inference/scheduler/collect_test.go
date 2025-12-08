@@ -12,7 +12,7 @@ func TestCollectReady(t *testing.T) {
 		MaxSequences: 16,
 	}
 	rt := &runtime.ModelRuntime{}
-	sched, _ := NewScheduler(rt, cfg)
+	sched, _ := NewScheduler(rt, nil, cfg)
 
 	// Create sequences
 	s1 := NewSequence(1, "Prompt 1") // Pending
