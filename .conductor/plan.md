@@ -202,3 +202,95 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [ ] Implement Feature: Ensure all code adheres to the selected Go code style guide and passes linting/static analysis checks.
 - [ ] Implement Feature: Review and ensure high code coverage (>80%) for all modules.
 
+## Phase 6: GGUF Model Support
+
+### Task: Implement GGUF File Format Loader (`inference/pkg/gguf/`)
+- [ ] Write Failing Tests: For GGUF header parsing (magic number, version, tensor count, metadata count).
+- [ ] Implement Feature: Implement GGUF header parser.
+- [ ] Write Failing Tests: For GGUF metadata parsing (key-value pairs, string/int/float/array types).
+- [ ] Implement Feature: Implement GGUF metadata parser (extract model config, tokenizer, chat template).
+- [ ] Write Failing Tests: For GGUF tensor info parsing (name, dimensions, type, offset).
+- [ ] Implement Feature: Implement GGUF tensor info parser.
+- [ ] Write Failing Tests: For mmap-based tensor data access.
+- [ ] Implement Feature: Implement mmap loading for GGUF tensor data.
+
+### Task: Implement Quantized Tensor Support
+- [ ] Write Failing Tests: For Q4_0 dequantization (block of 32 values with 4-bit weights + scale).
+- [ ] Implement Feature: Implement Q4_0 dequantization kernel.
+- [ ] Write Failing Tests: For Q4_K dequantization (k-quants with super-blocks).
+- [ ] Implement Feature: Implement Q4_K dequantization kernel.
+- [ ] Write Failing Tests: For Q8_0 dequantization.
+- [ ] Implement Feature: Implement Q8_0 dequantization kernel.
+- [ ] Write Failing Tests: For quantized matmul (multiply without full dequant).
+- [ ] Implement Feature: Implement fused quantized matmul for Q4/Q8.
+
+### Task: Integrate GGUF with Runtime
+- [ ] Write Failing Tests: For ModelRuntime loading from GGUF file.
+- [ ] Implement Feature: Update ModelRuntime to auto-detect and load GGUF vs SafeTensors.
+- [ ] Write Failing Tests: For tokenizer extraction from GGUF metadata.
+- [ ] Implement Feature: Parse tokenizer vocab and special tokens from GGUF metadata.
+- [ ] Write Failing Tests: For chat template extraction from GGUF.
+- [ ] Implement Feature: Extract and apply chat templates from GGUF metadata.
+
+## Phase 7: Real GPU Backend Implementation
+
+### Task: CUDA Backend - Real Kernels (`inference/backend/cuda/`)
+*Note: Phase 3 implemented interface structure. This phase implements actual CUDA kernels.*
+- [ ] Write Failing Tests: For CUDA device detection and initialization.
+- [ ] Implement Feature: Implement CUDA device enumeration and context creation.
+- [ ] Write Failing Tests: For CUDA memory allocation (cudaMalloc/cudaFree).
+- [ ] Implement Feature: Implement CUDA memory management.
+- [ ] Write Failing Tests: For CUDA Matmul kernel (cuBLAS GEMM).
+- [ ] Implement Feature: Implement Matmul using cuBLAS.
+- [ ] Write Failing Tests: For CUDA RMSNorm kernel.
+- [ ] Implement Feature: Implement RMSNorm CUDA kernel.
+- [ ] Write Failing Tests: For CUDA RoPE kernel.
+- [ ] Implement Feature: Implement RoPE CUDA kernel.
+- [ ] Write Failing Tests: For CUDA SiLU kernel.
+- [ ] Implement Feature: Implement SiLU CUDA kernel.
+- [ ] Write Failing Tests: For CUDA Softmax kernel.
+- [ ] Implement Feature: Implement Softmax CUDA kernel.
+- [ ] Write Failing Tests: For CUDA Flash Attention kernel.
+- [ ] Implement Feature: Implement Flash Attention for CUDA (memory-efficient SDPA).
+
+### Task: Metal Backend - Real Kernels (`inference/backend/metal/`)
+*Note: Phase 3 implemented interface structure. This phase implements actual Metal shaders.*
+- [ ] Write Failing Tests: For Metal device detection and command queue creation.
+- [ ] Implement Feature: Implement Metal device initialization.
+- [ ] Write Failing Tests: For Metal buffer allocation.
+- [ ] Implement Feature: Implement Metal memory management.
+- [ ] Write Failing Tests: For Metal Matmul shader (MPSMatrixMultiplication or custom).
+- [ ] Implement Feature: Implement Matmul using MPS or custom Metal shader.
+- [ ] Write Failing Tests: For Metal RMSNorm shader.
+- [ ] Implement Feature: Implement RMSNorm Metal shader.
+- [ ] Write Failing Tests: For Metal RoPE shader.
+- [ ] Implement Feature: Implement RoPE Metal shader.
+- [ ] Write Failing Tests: For Metal SiLU shader.
+- [ ] Implement Feature: Implement SiLU Metal shader.
+- [ ] Write Failing Tests: For Metal Softmax shader.
+- [ ] Implement Feature: Implement Softmax Metal shader.
+- [ ] Write Failing Tests: For Metal Flash Attention shader.
+- [ ] Implement Feature: Implement Flash Attention for Metal.
+
+## Phase 8: Advanced Optimizations
+
+### Task: Batched Prefill
+- [ ] Write Failing Tests: For processing multiple prompt tokens in single forward pass.
+- [ ] Implement Feature: Update DecodeStep to handle batched prefill (all prompt tokens at once).
+- [ ] Write Failing Tests: For KV cache batch write during prefill.
+- [ ] Implement Feature: Optimize KV cache writes for batched prefill.
+
+### Task: Speculative Decoding
+- [ ] Write Failing Tests: For draft model token generation.
+- [ ] Implement Feature: Implement draft model support (smaller model for speculation).
+- [ ] Write Failing Tests: For verification of draft tokens by main model.
+- [ ] Implement Feature: Implement speculative verification and acceptance logic.
+- [ ] Write Failing Tests: For speculative decoding speedup measurement.
+- [ ] Implement Feature: Integrate speculative decoding into scheduler.
+
+### Task: Continuous Batching Improvements
+- [ ] Write Failing Tests: For dynamic batch size adjustment.
+- [ ] Implement Feature: Implement iteration-level batching (add/remove sequences mid-generation).
+- [ ] Write Failing Tests: For preemption and resumption of sequences.
+- [ ] Implement Feature: Implement sequence preemption with KV cache preservation.
+
