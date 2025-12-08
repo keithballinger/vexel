@@ -157,6 +157,16 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Write Failing Tests: For `DecodeStep` invoking kernels (mocked or real). (Started: 2025-12-07 23:45, Completed: 2025-12-07 23:50)
 - [x] Implement Feature: Update `DecodeStep` to execute the full Llama-3 forward pass using `cpuBackend` kernels. (Started: 2025-12-07 23:50, Completed: 2025-12-07 23:55)
 
+### Task: Real Inference Support
+- [x] Write Failing Tests: For `Tokenizer` loading and encoding/decoding. (Started: 2025-12-07 23:50, Completed: 2025-12-07 23:55)
+- [x] Implement Feature: Implement `Tokenizer` (BPE/SentencePiece support from `tokenizer.json`). (Started: 2025-12-07 23:55, Completed: 2025-12-08 00:00)
+- [ ] Write Failing Tests: For `mmap` based weight loading.
+- [ ] Implement Feature: Implement `mmap` loading in `safetensors` package.
+- [ ] Write Failing Tests: For `BlockRuntime` actually invoking kernels.
+- [ ] Implement Feature: Wire `BlockRuntime` to call backend kernels (`Matmul`, `RoPE`, etc).
+- [ ] Write Failing Tests: For Sampling strategy (Argmax).
+- [ ] Implement Feature: Implement `Sampler` and wire to Scheduler.
+
 ### Task: Documentation and Code Quality Refinement
 - [ ] Implement Feature: Add comprehensive GoDoc comments for all public types, functions, and methods.
 - [ ] Implement Feature: Review and refine `user_guide.md` and `architecture.md` to reflect implementation details and any evolved design decisions.

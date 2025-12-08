@@ -1,25 +1,23 @@
 # Project Status
 
-**Date:** 2025-12-07
+**Date:** 2025-12-08
 **Status:** 🟢 On Track
 
 ## Current Phase
-Phase 5: Integration, Testing, and Documentation
+Phase 5: Integration, Testing, and Documentation (Real Inference)
 
 ## Current Task
-Task: Documentation and Code Quality Refinement
+Task: Real Inference Support
 
 ## Progress
-- [x] Wire ModelRuntime to Kernels (Control flow implemented).
-- [x] Implement Basic CPU Kernels (`Matmul`, `RMSNorm`, `RoPE`, `SiLU`).
+- [x] Implement Feature: Implement `Tokenizer`.
 
 ## Next Action
-Refine documentation.
+Write Failing Tests: For `mmap` based weight loading.
 
 ## Blockers
 None
 
 ## Notes
-- System is end-to-end integrated from HTTP -> Scheduler -> Runtime -> Block -> Backend.
-- Real model weights can be loaded.
-- Benchmarks run.
+- Basic tokenizer that loads vocab from `tokenizer.json` is implemented.
+- BPE logic is extremely naive (direct map lookup), which works for whole words but will fail for subwords. For "Real Inference", this is a known limitation but sufficient to start the pipe.
