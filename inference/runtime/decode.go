@@ -106,7 +106,7 @@ func (m *ModelRuntime) DecodeStep(inputs BatchRuntimeInputs) (tensor.Tensor, err
 	
 	// 4. Final Norm
 	// Allocate Output for Norm? Or in-place?
-	// RMSNorm can be in-place if x != out? 
+	// RMSNorm can be in-place if x != out?
 	// stateData is reused.
 	// We need weights.
 	if !m.FinalNorm.DevicePtr().IsNil() {
@@ -131,6 +131,6 @@ func (m *ModelRuntime) DecodeStep(inputs BatchRuntimeInputs) (tensor.Tensor, err
 		// So we use MatmulTransposeB.
 		m.backend.MatmulTransposeB(stateData, headWeights, logitsData, batchSize, m.config.VocabSize, hiddenSize)
 	}
-	
+
 	return logits, nil
 }

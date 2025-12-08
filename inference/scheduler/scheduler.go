@@ -118,10 +118,20 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 	}
 
 	// Prepare inputs for the runtime
-	// In a real implementation, we'd extract tokens/cache IDs from the sequences.
-	inputs := runtime.BatchRuntimeInputs{
-		// ... map batch to inputs ...
+	tokens := make([]int, len(batch))
+	// handles := make([]*kv.SeqKVHandle, len(batch)) // TODO: Pass handles
+	for i := range batch {
+		// Use last token as input?
+		// Or prompt if StatePending?
+		// Sequence doesn't track "last token" explicitly? 
+		// It has `prompt` which is `[]int`.
+		// But here we need 1 token for DecodeStep?
+		// Or full prompt for Prefill?
+		// For now, assuming mock single token input "1".
+		tokens[i] = 1 // Mock
 	}
+
+	inputs := runtime.NewBatchRuntimeInputs(tokens, nil)
 
 	// Execute model
 	// Note: runtime.DecodeStep signature is (inputs BatchRuntimeInputs) (tensor.Tensor, error)
@@ -139,6 +149,8 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 	// We need raw access.
 	logitsData := tensor.ToFloat32Slice(logits)
 	vocabSize := s.runtime.Config().VocabSize
+	
+	fmt.Printf("[DEBUG] BatchSize: %d, VocabSize: %d, LogitsLen: %d, LogitsNil: %v\n", len(batch), vocabSize, len(logitsData), logitsData == nil)
 	
 	for i, seq := range batch {
 		if seq.State() == StatePending {
@@ -160,6 +172,15 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 		
 		// Sample
 		tokenID := sampler.Argmax(seqLogits)
+		
+		// Debug: Print top token and value
+		fmt.Printf("\n[DEBUG] Top Token: %d, Value: %f\n", tokenID, seqLogits[tokenID])
+		// Check if logits are all zero
+		if seqLogits[tokenID] == 0 && seqLogits[0] == 0 {
+			fmt.Println("[DEBUG] Logits are ALL ZERO!")
+			seq.PushToken("?")
+			continue
+		}
 		
 		// Decode
 		// If tokenizer is nil (e.g. benchmark/test), push ID as string

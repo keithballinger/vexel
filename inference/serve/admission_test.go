@@ -15,7 +15,7 @@ func TestAdmissionControl(t *testing.T) {
 	// Setup real scheduler with mock runtime
 	cfg := scheduler.Config{MaxBatchSize: 1, MaxSequences: 1} // Limit to 1 sequence for easy full test
 	rt := &runtime.ModelRuntime{}
-	sched, _ := scheduler.NewScheduler(rt, cfg)
+	sched, _ := scheduler.NewScheduler(rt, nil, cfg)
 	
 	server := serve.NewServer(sched)
 

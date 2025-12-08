@@ -193,7 +193,10 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [~] Implement Feature: Integrate KV Cache into `BlockRuntime`. (Started: 2025-12-08 02:30, Completed: 2025-12-08 02:35)
 - [x] Implement Feature: Implement `Matmul` Transpose support (for linear layers). (Started: 2025-12-08 02:35, Completed: 2025-12-08 02:40)
 
-### Task: Documentation and Code Quality Refinement
+### Task: Manual Testing and Debugging
+- [ ] Implement Feature: Instrument `Scheduler` to print raw logits/token IDs.
+- [ ] Implement Feature: Debug Embedding and Layer outputs.
+- [ ] Verify: Generate real English text.
 - [ ] Implement Feature: Add comprehensive GoDoc comments for all public types, functions, and methods.
 - [ ] Implement Feature: Review and refine `user_guide.md` and `architecture.md` to reflect implementation details and any evolved design decisions.
 - [ ] Implement Feature: Ensure all code adheres to the selected Go code style guide and passes linting/static analysis checks.

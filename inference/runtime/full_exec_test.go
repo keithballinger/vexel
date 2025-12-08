@@ -6,6 +6,7 @@ import (
 	"vexel/inference/kv"
 	"vexel/inference/memory"
 	"vexel/inference/runtime"
+	"vexel/inference/tensor"
 )
 
 func TestDecodeStepExecution(t *testing.T) {
@@ -19,8 +20,9 @@ func TestDecodeStepExecution(t *testing.T) {
 	cfg.VocabSize = 256
 
 	b := cpu.NewBackend()
-	ctx := &memory.InferenceContext{} // Mock/Empty
-	cache := &kv.KVCache{}            // Mock/Empty
+	ctx := memory.NewInferenceContext(tensor.CPU)
+	ctx.AddArena(memory.Scratch, 1024*1024) // 1MB scratch
+	cache := &kv.KVCache{}
 	
 	rt, err := runtime.NewModelRuntime(b, ctx, cache, cfg)
 	if err != nil {
@@ -28,14 +30,8 @@ func TestDecodeStepExecution(t *testing.T) {
 	}
 
 	// Create inputs
-	// We need 1 token input
-	// Since we don't have tokenization, we just need the runtime to not crash.
-	// Runtime assumes inputs are prepared? Or does DecodeStep take tokens?
-	// Currently DecodeStep takes BatchRuntimeInputs.
-	
-	inputs := runtime.BatchRuntimeInputs{
-		// TODO: Add fields for input tokens/positions if not present
-	}
+	tokens := []int{1} // Batch size 1
+	inputs := runtime.NewBatchRuntimeInputs(tokens, nil)
 
 	// This test asserts that DecodeStep actually runs through the layers.
 	// Since we can't easily spy on the backend calls without a mock backend,

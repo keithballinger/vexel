@@ -14,14 +14,17 @@ type ModelRuntime struct {
 	cache   *kv.KVCache
 	config  ModelConfig
 	layers  []*BlockRuntime
-	
+
 	// Global weights
 	Embedding  tensor.Tensor
 	FinalNorm  tensor.Tensor
 	OutputHead tensor.Tensor
-	
+
 	// Keep mapped file alive
 	mappedFile interface{ Close() error }
+
+	// Keep converted weight slices alive to prevent GC
+	keepAlive [][]float32
 }
 
 // NewModelRuntime initializes a new model runtime.

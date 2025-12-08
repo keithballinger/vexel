@@ -45,54 +45,52 @@ func (m *ModelRuntime) LoadWeights(path string) error {
 			continue
 		}
 		
-		start := uint64(offsets[0].(float64)) // JSON numbers are float64
-		// end := uint64(offsets[1].(float64))
-		
-		// Calculate pointer
-		ptr := baseAddr + uintptr(start)
-		
 		// Get shape
 		shapeList, _ := info["shape"].([]interface{})
 		dims := make([]int, len(shapeList))
+		numElements := 1
 		for i, v := range shapeList {
 			dims[i] = int(v.(float64))
+			numElements *= dims[i]
 		}
 		
+		start := uint64(offsets[0].(float64)) // JSON numbers are float64
+
+		// Calculate pointer
+		ptr := baseAddr + uintptr(start)
+
 		// Get DType (assuming matches config for now, or parse string)
 		// TinyLlama is usually F16 or BF16.
 		// For now using Config dtype.
-		
+
 		var tensorPtr tensor.DevicePtr
 		dtype := m.config.DType
-		
+
 		// Hack: Force conversion to F32 if model is BF16/F16 but we run on CPU (Float32 kernel)
 		// Safetensors dtype "BF16" -> we read 2 bytes
 		// If our kernel expects F32, we must allocate and convert.
-		
+
 		stDType := info["dtype"].(string)
 		
 		if stDType == "BF16" && m.config.DType == tensor.Float32 {
-			// Read raw bytes
-			// End is start + num_elements * 2
+			// Read raw bytes - start is offset within data section
 			numElements := 1
 			for _, d := range dims {
 				numElements *= d
 			}
-			rawBytes := data[start : start+uint64(numElements*2)]
-			
-			// Convert
+			// Add dataOffset for absolute file position
+			absStart := uint64(dataOffset) + start
+			absEnd := absStart + uint64(numElements*2)
+			rawBytes := data[absStart:absEnd]
+
+			// Convert BF16 to FP32
 			f32Data := bf16.ConvertToFP32(rawBytes)
-			
-			// Allocate new pointer (leaking logic for now, or need Arena)
-			// Using Go GC managed slice address
+
+			// Store pointer to converted data
 			tensorPtr = tensor.NewDevicePtr(tensor.CPU, uintptr(unsafe.Pointer(&f32Data[0])))
-			
-			// Keep reference to prevent GC?
-			// We need to store f32Data somewhere.
-			// m.keepAlive = append(m.keepAlive, f32Data)
-			// For this MVP, we assume f32Data won't be collected immediately if we don't return from LoadWeights?
-			// No, it will be collected.
-			// We need a keepAlive list in ModelRuntime.
+
+			// Keep reference to prevent GC from collecting the converted data
+			m.keepAlive = append(m.keepAlive, f32Data)
 		} else {
 			// Zero-copy (if types match)
 			tensorPtr = tensor.NewDevicePtr(tensor.CPU, ptr)
