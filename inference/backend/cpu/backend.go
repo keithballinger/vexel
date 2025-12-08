@@ -2,6 +2,8 @@ package cpu
 
 import (
 	"math"
+	"runtime"
+	"sync"
 	"vexel/inference/tensor"
 )
 
@@ -25,19 +27,89 @@ func (b *cpuBackend) Device() tensor.Device {
 
 // Matmul performs matrix multiplication: C = A * B
 func (b *cpuBackend) Matmul(a, bData, out []float32, m, n, k int) {
+	// ... (implementation exists)
 	for i := range out {
 		out[i] = 0
 	}
 
-	for i := 0; i < m; i++ {
-		for j := 0; j < n; j++ {
-			var sum float32
-			for p := 0; p < k; p++ {
-				sum += a[i*k+p] * bData[p*n+j]
-			}
-			out[i*n+j] = sum
-		}
+	// Parallelize over M (rows of A)
+	numWorkers := runtime.NumCPU()
+	if m < numWorkers {
+		numWorkers = m
 	}
+	
+	var wg sync.WaitGroup
+	chunkSize := (m + numWorkers - 1) / numWorkers
+
+	for w := 0; w < numWorkers; w++ {
+		startRow := w * chunkSize
+		endRow := startRow + chunkSize
+		if endRow > m {
+			endRow = m
+		}
+		
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			for i := start; i < end; i++ {
+				for j := 0; j < n; j++ {
+					var sum float32
+					for p := 0; p < k; p++ {
+						sum += a[i*k+p] * bData[p*n+j]
+					}
+					out[i*n+j] = sum
+				}
+			}
+		}(startRow, endRow)
+	}
+	wg.Wait()
+}
+
+// MatmulTransposeB performs C = A * B^T
+// A: [m, k]
+// B: [n, k] (Transposed logic: B_row_j is the j-th row of B, which corresponds to j-th col of B^T)
+// C: [m, n]
+// C[i, j] = sum(A[i, p] * B[j, p])
+func (b *cpuBackend) MatmulTransposeB(a, bData, out []float32, m, n, k int) {
+	for i := range out {
+		out[i] = 0
+	}
+
+	// Parallelize
+	numWorkers := runtime.NumCPU()
+	if m < numWorkers {
+		numWorkers = m
+	}
+	
+	var wg sync.WaitGroup
+	chunkSize := (m + numWorkers - 1) / numWorkers
+
+	for w := 0; w < numWorkers; w++ {
+		startRow := w * chunkSize
+		endRow := startRow + chunkSize
+		if endRow > m {
+			endRow = m
+		}
+		
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			for i := start; i < end; i++ {
+				for j := 0; j < n; j++ {
+					var sum float32
+					// Inner loop over K
+					// Access B at [j, p] instead of [p, j]
+					// B is [N, K]
+					// B index = j*k + p
+					for p := 0; p < k; p++ {
+						sum += a[i*k+p] * bData[j*k+p]
+					}
+					out[i*n+j] = sum
+				}
+			}
+		}(startRow, endRow)
+	}
+	wg.Wait()
 }
 
 // RMSNorm performs Root Mean Square Normalization.

@@ -23,6 +23,10 @@ func (s *SpyBackend) Matmul(a, b, out []float32, m, n, k int) {
 	s.MatmulCalls++
 }
 
+func (s *SpyBackend) MatmulTransposeB(a, b, out []float32, m, n, k int) {
+	s.MatmulCalls++
+}
+
 func (s *SpyBackend) RMSNorm(x, weight, out []float32, rows, cols int, eps float32) {
 	s.RMSNormCalls++
 }

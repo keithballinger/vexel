@@ -190,8 +190,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement `SDPA` with causal masking. (Started: 2025-12-08 02:15, Completed: 2025-12-08 02:20)
 - [ ] Write Failing Tests: For KV Cache read/write logic in `BlockRuntime`.
 - [x] Write Failing Tests: For KV Cache read/write logic in `BlockRuntime`. (Started: 2025-12-08 02:20, Completed: 2025-12-08 02:25)
-- [~] Implement Feature: Integrate KV Cache into `BlockRuntime`. (Started: 2025-12-08 02:25)
-- [ ] Implement Feature: Implement `Matmul` Transpose support (for linear layers).
+- [~] Implement Feature: Integrate KV Cache into `BlockRuntime`. (Started: 2025-12-08 02:30, Completed: 2025-12-08 02:35)
+- [x] Implement Feature: Implement `Matmul` Transpose support (for linear layers). (Started: 2025-12-08 02:35, Completed: 2025-12-08 02:40)
 
 ### Task: Documentation and Code Quality Refinement
 - [ ] Implement Feature: Add comprehensive GoDoc comments for all public types, functions, and methods.

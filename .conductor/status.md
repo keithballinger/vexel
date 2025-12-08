@@ -7,17 +7,17 @@
 Phase 5: Integration, Testing, and Documentation (Real Inference)
 
 ## Current Task
-Task: Real Inference Support (Memory & Math)
+Task: Documentation and Code Quality Refinement
 
 ## Progress
-- [x] Wire `SDPA` logic.
-- [x] Implement `KVCache` interface stub for runtime.
+- [x] Implement `Matmul` Transpose.
 
 ## Next Action
-Implement Feature: Integrate KV Cache into `BlockRuntime` (Actually using `GetView`).
+Implement Feature: Add comprehensive GoDoc comments for all public types, functions, and methods.
 
 ## Blockers
 None
 
 ## Notes
-- KV Cache integration is next.
+- All kernels required for Llama-3 execution (Embedding, Matmul, RMSNorm, RoPE, SiLU, Softmax) are implemented and unit tested on CPU.
+- `Matmul` is parallelized.
