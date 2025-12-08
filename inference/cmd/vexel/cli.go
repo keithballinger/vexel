@@ -10,7 +10,6 @@ import (
 
 	"vexel/inference/backend/cpu"
 	"vexel/inference/cmd/vexel/internal"
-	"vexel/inference/kv"
 	"vexel/inference/memory"
 	"vexel/inference/pkg/tokenizer"
 	"vexel/inference/runtime"
@@ -70,12 +69,15 @@ func main() {
 	totalScratch := scratchSize + logitsSize*2
 	ctx.AddArena(memory.Scratch, int(totalScratch))
 	
-	cache := &kv.KVCache{}
-	
-	rt, err := runtime.NewModelRuntime(backend, ctx, cache, cfg)
+	rt, err := runtime.NewModelRuntime(backend, ctx, nil, cfg)
 	if err != nil {
 		log.Fatalf("Failed to create runtime: %v", err)
 	}
+
+	// Create paged KV cache
+	maxBlocks := 256 // Enough for 4096 tokens with block size 16
+	pagedCache := rt.CreatePagedKVCache(maxBlocks)
+	fmt.Printf("Paged KV cache: %d blocks available\n", pagedCache.FreeBlocks())
 
 	// 4. Load Weights
 	weightsPath := filepath.Join(*modelDir, "tiny_model.safetensors")

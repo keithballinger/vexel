@@ -44,6 +44,9 @@ type Sequence struct {
 	// generatedTokens stores the IDs of tokens we've generated.
 	generatedTokens []int
 
+	// kvSeqID is the sequence ID in the PagedKVCache.
+	kvSeqID int64
+
 	// tokenChan creates a stream of generated tokens back to the caller.
 	tokenChan chan string
 }
@@ -153,4 +156,14 @@ func (s *Sequence) PushToken(token string) {
 // Close closes the token stream.
 func (s *Sequence) Close() {
 	close(s.tokenChan)
+}
+
+// KVSeqID returns the sequence ID in the PagedKVCache.
+func (s *Sequence) KVSeqID() int64 {
+	return s.kvSeqID
+}
+
+// SetKVSeqID sets the sequence ID in the PagedKVCache.
+func (s *Sequence) SetKVSeqID(id int64) {
+	s.kvSeqID = id
 }

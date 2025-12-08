@@ -118,10 +118,14 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 		return nil
 	}
 
+	// Check if we have paged KV cache
+	usePagedCache := s.runtime.PagedKVCache() != nil
+
 	// Prepare inputs for the runtime
 	tokens := make([]int, len(batch))
 	positions := make([]int, len(batch))
-	// handles := make([]*kv.SeqKVHandle, len(batch)) // TODO: Pass handles
+	seqIDs := make([]int64, len(batch))
+
 	for i, seq := range batch {
 		token, pos, hasMore := seq.NextInputToken()
 		if !hasMore {
@@ -131,14 +135,22 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 		}
 		tokens[i] = token
 		positions[i] = pos
+		seqIDs[i] = seq.KVSeqID()
 	}
 
-	inputs := runtime.NewBatchRuntimeInputsWithPos(tokens, positions, nil)
+	var logits tensor.Tensor
+	var err error
 
-	// Execute model
-	// Note: runtime.DecodeStep signature is (inputs BatchRuntimeInputs) (tensor.Tensor, error)
-	// We ignore the output tensor for now as we aren't processing logits yet.
-	logits, err := s.runtime.DecodeStep(inputs)
+	if usePagedCache {
+		// Use paged KV cache path
+		inputs := runtime.NewBatchRuntimeInputsFull(tokens, positions, seqIDs)
+		logits, err = s.runtime.DecodeStepWithPagedKV(inputs)
+	} else {
+		// Legacy path without paged cache
+		inputs := runtime.NewBatchRuntimeInputsWithPos(tokens, positions, nil)
+		logits, err = s.runtime.DecodeStep(inputs)
+	}
+
 	if err != nil {
 		return err
 	}
@@ -151,9 +163,7 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 	// We need raw access.
 	logitsData := tensor.ToFloat32Slice(logits)
 	vocabSize := s.runtime.Config().VocabSize
-	
-	fmt.Printf("[DEBUG] BatchSize: %d, VocabSize: %d, LogitsLen: %d, LogitsNil: %v\n", len(batch), vocabSize, len(logitsData), logitsData == nil)
-	
+
 	for i, seq := range batch {
 		// Advance position after processing this token
 		seq.AdvancePosition()
@@ -194,15 +204,6 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 		// Track the generated token
 		seq.AddGeneratedToken(tokenID)
 
-		// Debug: Print top token and value
-		fmt.Printf("\n[DEBUG] Top Token: %d, Value: %f\n", tokenID, seqLogits[tokenID])
-		// Check if logits are all zero
-		if seqLogits[tokenID] == 0 && seqLogits[0] == 0 {
-			fmt.Println("[DEBUG] Logits are ALL ZERO!")
-			seq.PushToken("?")
-			continue
-		}
-
 		// Decode
 		// If tokenizer is nil (e.g. benchmark/test), push ID as string
 		var text string
@@ -228,7 +229,30 @@ func (s *Scheduler) AddSequence(seq *Sequence) {
 			seq.SetPromptTokens(tokens)
 		}
 	}
+
+	// Create sequence in PagedKVCache if available
+	if cache := s.runtime.PagedKVCache(); cache != nil {
+		kvSeqID := cache.CreateSequence()
+		seq.SetKVSeqID(kvSeqID)
+	}
+
 	s.sequences[seq.ID()] = seq
+}
+
+// RemoveSequence removes a sequence and cleans up its KV cache.
+func (s *Scheduler) RemoveSequence(id SequenceID) {
+	seq, ok := s.sequences[id]
+	if !ok {
+		return
+	}
+
+	// Clean up KV cache
+	if cache := s.runtime.PagedKVCache(); cache != nil && seq.KVSeqID() != 0 {
+		cache.DeleteSequence(seq.KVSeqID())
+	}
+
+	delete(s.sequences, id)
+	s.metrics.CompletedSequences++
 }
 
 // SequenceCount returns the number of active sequences.
