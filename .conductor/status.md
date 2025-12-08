@@ -10,14 +10,14 @@ Phase 5: Integration, Testing, and Documentation (Real Inference)
 Task: Real Inference Support
 
 ## Progress
-- [x] Implement Feature: Implement `Tokenizer`.
+- [x] Write Failing Tests: For `mmap` based weight loading.
+- [x] Implement Feature: Implement `mmap` loading in `safetensors` package.
 
 ## Next Action
-Write Failing Tests: For `mmap` based weight loading.
+Write Failing Tests: For `BlockRuntime` actually invoking kernels.
 
 ## Blockers
 None
 
 ## Notes
-- Basic tokenizer that loads vocab from `tokenizer.json` is implemented.
-- BPE logic is extremely naive (direct map lookup), which works for whole words but will fail for subwords. For "Real Inference", this is a known limitation but sufficient to start the pipe.
+- `mmap` support added to `safetensors` package. This allows us to load huge files (like the 2.2GB model) without reading them entirely into RAM (letting OS manage paging).
