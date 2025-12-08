@@ -30,7 +30,7 @@ func TestSDPA(t *testing.T) {
 	input := tensor.NewTensor(tensor.NewShape(1, 4), tensor.Float32, tensor.NewDevicePtr(tensor.CPU, 123))
 	scratch := tensor.NewTensor(tensor.NewShape(100), tensor.Float32, tensor.NewDevicePtr(tensor.CPU, 456))
 	
-	block.Execute(input, scratch)
+	block.Execute(input, scratch, nil, 0, 0)
 	
 	// QKV Proj (3 Matmuls) + O Proj (1 Matmul) + MLP (3 Matmuls) = 7
 	// Plus SDPA involves Q*K^T and Attn*V.

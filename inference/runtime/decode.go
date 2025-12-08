@@ -52,9 +52,10 @@ func (m *ModelRuntime) DecodeStep(inputs BatchRuntimeInputs) (tensor.Tensor, err
 	)
 	
 	// 3. Layer Loop
-	for _, layer := range m.layers {
+	for i, layer := range m.layers {
 		var err error
-		state, err = layer.Execute(state, scratch)
+		// Pass pos=0 for now (TODO: get from input metadata)
+		state, err = layer.Execute(state, scratch, m.cache, i, 0)
 		if err != nil {
 			return tensor.Tensor{}, err
 		}

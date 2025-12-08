@@ -55,3 +55,13 @@ func (c *KVCache) Config() KVConfig {
 func (c *KVCache) FreeBlocks() int {
 	return len(c.freeStack)
 }
+
+// GetView returns a pointer to the KV storage for a given layer.
+// Simplified: Assumes contiguous for MVP.
+// Returns K and V pointers.
+func (c *KVCache) GetView(layer int, pos int) (tensor.DevicePtr, tensor.DevicePtr) {
+	// TODO: Implement paging lookup table.
+	// For MVP, return nil to signify "no cache" (generating first token).
+	// Or return offset into basePtr if we assume linear mapping per seq?
+	return tensor.DevicePtr{}, tensor.DevicePtr{}
+}

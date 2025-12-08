@@ -64,7 +64,7 @@ func TestBlockExecution(t *testing.T) {
 	scratch := tensor.NewTensor(scratchShape, tensor.Float32, tensor.NewDevicePtr(tensor.CPU, scratchAddr))
 	
 	// Execute
-	_, err := block.Execute(input, scratch)
+	_, err := block.Execute(input, scratch, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}

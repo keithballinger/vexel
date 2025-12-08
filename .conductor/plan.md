@@ -189,8 +189,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Write Failing Tests: For `SDPA` (Scaled Dot Product Attention) logic. (Started: 2025-12-08 02:10, Completed: 2025-12-08 02:15)
 - [x] Implement Feature: Implement `SDPA` with causal masking. (Started: 2025-12-08 02:15, Completed: 2025-12-08 02:20)
 - [ ] Write Failing Tests: For KV Cache read/write logic in `BlockRuntime`.
-- [ ] Write Failing Tests: For KV Cache read/write logic in `BlockRuntime`.
-- [ ] Implement Feature: Integrate KV Cache into `BlockRuntime`.
+- [x] Write Failing Tests: For KV Cache read/write logic in `BlockRuntime`. (Started: 2025-12-08 02:20, Completed: 2025-12-08 02:25)
+- [~] Implement Feature: Integrate KV Cache into `BlockRuntime`. (Started: 2025-12-08 02:25)
 - [ ] Implement Feature: Implement `Matmul` Transpose support (for linear layers).
 
 ### Task: Documentation and Code Quality Refinement

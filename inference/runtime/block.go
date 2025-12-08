@@ -3,6 +3,7 @@ package runtime
 import (
 	"vexel/inference/backend/cpu"
 	"vexel/inference/ir"
+	"vexel/inference/kv"
 	"vexel/inference/tensor"
 )
 
@@ -30,7 +31,10 @@ func NewBlockRuntime(backend cpu.Backend) *BlockRuntime {
 // Execute performs the forward pass for this block.
 // x: Input tensor [Batch*Seq, Hidden]
 // scratch: Temporary buffer
-func (b *BlockRuntime) Execute(x, scratch tensor.Tensor) (tensor.Tensor, error) {
+// kvCache: Pointer to KV cache manager
+// layerIdx: Index of this layer
+// pos: Current token position (for RoPE and Cache)
+func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, layerIdx, pos int) (tensor.Tensor, error) {
 	// Unsafe Access
 	xData := tensor.ToFloat32Slice(x)
 	scratchData := tensor.ToFloat32Slice(scratch)

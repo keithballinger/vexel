@@ -10,13 +10,14 @@ Phase 5: Integration, Testing, and Documentation (Real Inference)
 Task: Real Inference Support (Memory & Math)
 
 ## Progress
-- [x] Wire `SDPA` logic (Softmax call).
+- [x] Wire `SDPA` logic.
+- [x] Implement `KVCache` interface stub for runtime.
 
 ## Next Action
-Write Failing Tests: For KV Cache read/write logic in `BlockRuntime`.
+Implement Feature: Integrate KV Cache into `BlockRuntime` (Actually using `GetView`).
 
 ## Blockers
 None
 
 ## Notes
-- Attention logic structure is in place (naive calls).
+- KV Cache integration is next.
