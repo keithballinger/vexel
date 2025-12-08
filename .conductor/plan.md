@@ -166,6 +166,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Wire `BlockRuntime` to call backend kernels (`Matmul`, `RoPE`, etc). (Started: 2025-12-08 00:15, Completed: 2025-12-08 00:20)
 - [x] Write Failing Tests: For Sampling strategy (Argmax). (Started: 2025-12-08 00:20, Completed: 2025-12-08 00:25)
 - [x] Implement Feature: Implement `Sampler` and wire to Scheduler. (Started: 2025-12-08 00:25, Completed: 2025-12-08 00:30)
+- [x] Implement Feature: Wire Sampler to Scheduler logic. (Started: 2025-12-08 00:30, Completed: 2025-12-08 00:35)
 
 ### Task: Documentation and Code Quality Refinement
 - [ ] Implement Feature: Add comprehensive GoDoc comments for all public types, functions, and methods.

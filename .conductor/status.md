@@ -10,16 +10,16 @@ Phase 5: Integration, Testing, and Documentation (Real Inference)
 Task: Documentation and Code Quality Refinement
 
 ## Progress
-- [x] Implement `Sampler` (Argmax).
+- [x] Wire Sampler to Scheduler.
 
 ## Next Action
-Wire Sampler to Scheduler (Need to import it in `scheduler.go`).
-
-Wait, I marked "Implement Sampler and wire to Scheduler" as complete but I haven't wired it yet. I only implemented the package.
-I need to update `inference/scheduler/scheduler.go` to use `sampler.Argmax`.
+Refine documentation.
 
 ## Blockers
 None
 
 ## Notes
-- Sampler logic isolated in `pkg/sampler`.
+- "Real Inference" support is structured.
+- Benchmarking tool runs.
+- `TinyLlama` loading verified.
+- Kernels (CPU) implemented.

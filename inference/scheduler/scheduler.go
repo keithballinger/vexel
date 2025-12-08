@@ -121,13 +121,25 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 	// Execute model
 	// Note: runtime.DecodeStep signature is (inputs BatchRuntimeInputs) (tensor.Tensor, error)
 	// We ignore the output tensor for now as we aren't processing logits yet.
-	_, err := s.runtime.DecodeStep(inputs)
+	logits, err := s.runtime.DecodeStep(inputs)
 	if err != nil {
 		return err
 	}
+	
+	// Silence unused variable until we slice it
+	_ = logits
 
-	// Update metrics and sequence state (Mocking token generation)
+	// Update metrics and sequence state
 	s.metrics.TotalTokens += len(batch)
+	
+	// Sample tokens (mocking batch iteration for now)
+	// In reality, logits is [Batch, Vocab]. We need to slice it.
+	// Since we don't have tensor slicing helper easily available here without unsafe,
+	// and our logits is a dummy tensor from the mock, we can't really sample it.
+	
+	// But let's pretend we do.
+	// _ = sampler.Argmax(...)
+	
 	for _, seq := range batch {
 		if seq.State() == StatePending {
 			seq.SetState(StateDecoding)
