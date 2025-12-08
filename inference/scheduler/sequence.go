@@ -33,7 +33,17 @@ type Sequence struct {
 	id     SequenceID
 	prompt string
 	state  SequenceState
-	
+
+	// promptTokens is the encoded prompt (set by scheduler when tokenizer available).
+	promptTokens []int
+	// promptPos tracks how many prompt tokens have been processed.
+	promptPos int
+	// position is the current sequence position (for RoPE).
+	// After processing N tokens, position = N.
+	position int
+	// generatedTokens stores the IDs of tokens we've generated.
+	generatedTokens []int
+
 	// tokenChan creates a stream of generated tokens back to the caller.
 	tokenChan chan string
 }
@@ -61,6 +71,67 @@ func (s *Sequence) State() SequenceState {
 // SetState updates the sequence state.
 func (s *Sequence) SetState(newState SequenceState) {
 	s.state = newState
+}
+
+// SetPromptTokens sets the encoded prompt tokens.
+func (s *Sequence) SetPromptTokens(tokens []int) {
+	s.promptTokens = tokens
+}
+
+// PromptTokens returns the encoded prompt tokens.
+func (s *Sequence) PromptTokens() []int {
+	return s.promptTokens
+}
+
+// Position returns the current sequence position (for RoPE).
+func (s *Sequence) Position() int {
+	return s.position
+}
+
+// NextInputToken returns the next token to feed to the model.
+// For prefill, returns prompt tokens one at a time.
+// For decode, returns the last generated token.
+// Returns (token, position, hasMore).
+func (s *Sequence) NextInputToken() (token int, pos int, hasMore bool) {
+	if s.promptPos < len(s.promptTokens) {
+		// Still processing prompt
+		token = s.promptTokens[s.promptPos]
+		pos = s.promptPos
+		hasMore = true
+		return
+	}
+	if len(s.generatedTokens) > 0 {
+		// Return last generated token for continuation
+		token = s.generatedTokens[len(s.generatedTokens)-1]
+		pos = s.position
+		hasMore = true
+		return
+	}
+	// No tokens available
+	return 0, 0, false
+}
+
+// AdvancePosition increments position and promptPos after processing a token.
+func (s *Sequence) AdvancePosition() {
+	if s.promptPos < len(s.promptTokens) {
+		s.promptPos++
+	}
+	s.position++
+}
+
+// AddGeneratedToken records a newly generated token.
+func (s *Sequence) AddGeneratedToken(tokenID int) {
+	s.generatedTokens = append(s.generatedTokens, tokenID)
+}
+
+// GeneratedTokens returns all generated token IDs.
+func (s *Sequence) GeneratedTokens() []int {
+	return s.generatedTokens
+}
+
+// IsPrefillComplete returns true if all prompt tokens have been processed.
+func (s *Sequence) IsPrefillComplete() bool {
+	return s.promptPos >= len(s.promptTokens)
 }
 
 // TokenChan returns the channel for receiving generated tokens.

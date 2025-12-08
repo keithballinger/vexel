@@ -90,15 +90,17 @@ func (m *ModelRuntime) DecodeStep(inputs BatchRuntimeInputs) (tensor.Tensor, err
 		scratchPtr,
 	)
 	
+	// Get position from inputs (default to 0 for backwards compatibility)
+	pos := 0
+	if positions := inputs.Positions(); len(positions) > 0 {
+		// For now, use position of first token in batch
+		// TODO: Support variable positions per sequence in batch
+		pos = positions[0]
+	}
+
 	// 3. Layer Loop
 	for i, layer := range m.layers {
-		// Pass pos=0 for now (TODO: get from input metadata. For single token gen, pos increases)
-		// We need position from inputs! BatchRuntimeInputs doesn't have it.
-		// For MVP assuming pos=0 (prefill) or just incrementing?
-		// Scheduler tracks seq state.
-		// We need to pass pos into DecodeStep.
-		// For now hardcode 0 to prove flow.
-		state, err = layer.Execute(state, scratch, m.cache, i, 0)
+		state, err = layer.Execute(state, scratch, m.cache, i, pos)
 		if err != nil {
 			return tensor.Tensor{}, err
 		}

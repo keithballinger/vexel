@@ -91,7 +91,8 @@ func (s *Scheduler) step(ctx context.Context) error {
 func (s *Scheduler) collectReady() []*Sequence {
 	ready := make([]*Sequence, 0)
 	for _, seq := range s.sequences {
-		if seq.State() == StatePending || seq.State() == StateDecoding {
+		switch seq.State() {
+		case StatePending, StatePrefill, StateDecoding:
 			ready = append(ready, seq)
 		}
 	}
@@ -119,19 +120,20 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 
 	// Prepare inputs for the runtime
 	tokens := make([]int, len(batch))
+	positions := make([]int, len(batch))
 	// handles := make([]*kv.SeqKVHandle, len(batch)) // TODO: Pass handles
-	for i := range batch {
-		// Use last token as input?
-		// Or prompt if StatePending?
-		// Sequence doesn't track "last token" explicitly? 
-		// It has `prompt` which is `[]int`.
-		// But here we need 1 token for DecodeStep?
-		// Or full prompt for Prefill?
-		// For now, assuming mock single token input "1".
-		tokens[i] = 1 // Mock
+	for i, seq := range batch {
+		token, pos, hasMore := seq.NextInputToken()
+		if !hasMore {
+			// No token available - use BOS as fallback
+			token = 1
+			pos = 0
+		}
+		tokens[i] = token
+		positions[i] = pos
 	}
 
-	inputs := runtime.NewBatchRuntimeInputs(tokens, nil)
+	inputs := runtime.NewBatchRuntimeInputsWithPos(tokens, positions, nil)
 
 	// Execute model
 	// Note: runtime.DecodeStep signature is (inputs BatchRuntimeInputs) (tensor.Tensor, error)
@@ -153,26 +155,45 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 	fmt.Printf("[DEBUG] BatchSize: %d, VocabSize: %d, LogitsLen: %d, LogitsNil: %v\n", len(batch), vocabSize, len(logitsData), logitsData == nil)
 	
 	for i, seq := range batch {
+		// Advance position after processing this token
+		seq.AdvancePosition()
+
+		// Update state based on prefill completion
 		if seq.State() == StatePending {
+			if seq.IsPrefillComplete() {
+				seq.SetState(StateDecoding)
+			} else {
+				seq.SetState(StatePrefill)
+			}
+		} else if seq.State() == StatePrefill && seq.IsPrefillComplete() {
 			seq.SetState(StateDecoding)
 		}
-		
+
+		// Only sample and output on the last prompt token or during decode
+		if !seq.IsPrefillComplete() {
+			// Still prefilling - don't sample yet
+			continue
+		}
+
 		// Extract logits for this sequence
 		start := i * vocabSize
 		end := start + vocabSize
-		
+
 		// Safety check
 		if logitsData == nil || end > len(logitsData) {
 			// Fallback if tensor is invalid (e.g. mock runtime returning empty)
 			seq.PushToken("?")
 			continue
 		}
-		
+
 		seqLogits := logitsData[start:end]
-		
+
 		// Sample
 		tokenID := sampler.Argmax(seqLogits)
-		
+
+		// Track the generated token
+		seq.AddGeneratedToken(tokenID)
+
 		// Debug: Print top token and value
 		fmt.Printf("\n[DEBUG] Top Token: %d, Value: %f\n", tokenID, seqLogits[tokenID])
 		// Check if logits are all zero
@@ -181,7 +202,7 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 			seq.PushToken("?")
 			continue
 		}
-		
+
 		// Decode
 		// If tokenizer is nil (e.g. benchmark/test), push ID as string
 		var text string
@@ -190,7 +211,7 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 		} else {
 			text = fmt.Sprintf(" %d", tokenID)
 		}
-		
+
 		seq.PushToken(text)
 	}
 
@@ -198,7 +219,15 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 }
 
 // AddSequence registers a new sequence with the scheduler.
+// If a tokenizer is available, encodes the prompt into tokens.
 func (s *Scheduler) AddSequence(seq *Sequence) {
+	// Encode prompt if tokenizer available and prompt not yet encoded
+	if s.tokenizer != nil && len(seq.PromptTokens()) == 0 && seq.prompt != "" {
+		tokens, err := s.tokenizer.Encode(seq.prompt)
+		if err == nil {
+			seq.SetPromptTokens(tokens)
+		}
+	}
 	s.sequences[seq.ID()] = seq
 }
 

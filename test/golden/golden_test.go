@@ -261,6 +261,63 @@ func TestQProjectionMatchesGolden(t *testing.T) {
 	}
 }
 
+// TestRoPEPositionDependence verifies that RoPE applies position-dependent rotation.
+// This tests at the kernel level since full forward pass with seqLen=1 and no KV cache
+// produces identical outputs (attention output = V when there's only one position to attend).
+func TestRoPEPositionDependence(t *testing.T) {
+	backend := cpu.NewBackend()
+
+	// Test with multiple heads to verify position is applied correctly
+	headDim := 64
+	numHeads := 4
+	seqLen := 1
+	theta := float32(10000.0)
+
+	// Create test Q vectors (all heads at one sequence position)
+	size := seqLen * numHeads * headDim
+	q0 := make([]float32, size)
+	q5 := make([]float32, size)
+
+	// Initialize with same values
+	for i := 0; i < size; i++ {
+		q0[i] = float32(i%10) * 0.1 // Some non-trivial values
+		q5[i] = q0[i]
+	}
+
+	// Apply RoPE at position 0
+	backend.RoPE(q0, nil, headDim, numHeads, seqLen, 0, theta)
+
+	// Apply RoPE at position 5
+	backend.RoPE(q5, nil, headDim, numHeads, seqLen, 5, theta)
+
+	// At position 0, rotation angle = 0, so cos(0)=1, sin(0)=0, values unchanged
+	// At position 5, rotation angle > 0, values should change
+	// Verify q0 and q5 are different
+	maxDiff, maxIdx, equal := compareSlices(q0, q5, 1e-6)
+	if equal {
+		t.Error("Position 0 and position 5 Q vectors are identical - RoPE is not position-dependent")
+	} else {
+		t.Logf("RoPE is position-dependent as expected (max diff = %e at idx %d)", maxDiff, maxIdx)
+	}
+
+	// Also verify position 0 produces no rotation (angle=0 means identity)
+	qIdentity := make([]float32, size)
+	for i := 0; i < size; i++ {
+		qIdentity[i] = float32(i%10) * 0.1
+	}
+	originalCopy := make([]float32, size)
+	copy(originalCopy, qIdentity)
+	backend.RoPE(qIdentity, nil, headDim, numHeads, seqLen, 0, theta)
+
+	// Should be unchanged at position 0
+	_, _, unchanged := compareSlices(qIdentity, originalCopy, 1e-6)
+	if !unchanged {
+		t.Error("Position 0 should not rotate values (identity transform)")
+	} else {
+		t.Log("Position 0 correctly applies identity transform")
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

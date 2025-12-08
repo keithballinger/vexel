@@ -31,7 +31,7 @@ func (s *SpyBackend) RMSNorm(x, weight, out []float32, rows, cols int, eps float
 	s.RMSNormCalls++
 }
 
-func (s *SpyBackend) RoPE(q, k []float32, headDim, seqLen, startPos int, theta float32) {
+func (s *SpyBackend) RoPE(q, k []float32, headDim, numHeads, seqLen, startPos int, theta float32) {
 	s.RoPECalls++
 }
 

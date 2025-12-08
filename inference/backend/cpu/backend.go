@@ -129,32 +129,42 @@ func (b *cpuBackend) RMSNorm(x, weight, out []float32, rows, cols int, eps float
 }
 
 // RoPE applies Rotary Positional Embeddings in-place.
-func (b *cpuBackend) RoPE(q, k []float32, headDim, seqLen, startPos int, theta float32) {
+// Data layout: [seqLen, numHeads, headDim]
+// All heads at the same sequence position use the same RoPE position.
+func (b *cpuBackend) RoPE(q, k []float32, headDim, numHeads, seqLen, startPos int, theta float32) {
 	totalVectors := len(q) / headDim
-	
+
 	for i := 0; i < totalVectors; i++ {
-		pos := startPos + i
+		// Compute sequence position: all heads at same seq pos use same RoPE pos
+		seqPos := i / numHeads
+		pos := startPos + seqPos
 		offset := i * headDim
 		halfDim := headDim / 2
-		
+
 		for j := 0; j < halfDim; j++ {
 			exp := float64(2*j) / float64(headDim)
 			freq := float32(1.0 / math.Pow(float64(theta), exp))
 			angle := float32(pos) * freq
 			cos := float32(math.Cos(float64(angle)))
 			sin := float32(math.Sin(float64(angle)))
-			
+
 			val1 := q[offset+j]
 			val2 := q[offset+j+halfDim]
 			q[offset+j] = val1*cos - val2*sin
 			q[offset+j+halfDim] = val1*sin + val2*cos
 		}
 	}
-	
+
 	if k != nil {
+		// K may have different numHeads (GQA), recalculate
+		numKVHeads := len(k) / (seqLen * headDim)
+		if numKVHeads == 0 {
+			numKVHeads = 1
+		}
 		totalVectorsK := len(k) / headDim
 		for i := 0; i < totalVectorsK; i++ {
-			pos := startPos + i
+			seqPos := i / numKVHeads
+			pos := startPos + seqPos
 			offset := i * headDim
 			halfDim := headDim / 2
 			for j := 0; j < halfDim; j++ {

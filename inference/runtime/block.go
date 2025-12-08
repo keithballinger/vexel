@@ -128,9 +128,9 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 	// 3. RoPE - Apply to Q and K
 	// Q is [seqLen, numHeads, headDim] flattened
 	// K is [seqLen, numKVHeads, headDim] flattened
-	// RoPE operates on each head vector independently
-	b.backend.RoPE(qOut, nil, headDim, seqLen*numHeads, pos, float32(b.RoPETheta))
-	b.backend.RoPE(kOut, nil, headDim, seqLen*numKVHeads, pos, float32(b.RoPETheta))
+	// RoPE operates on each head vector independently, all heads at same seqPos use same RoPE
+	b.backend.RoPE(qOut, nil, headDim, numHeads, seqLen, pos, float32(b.RoPETheta))
+	b.backend.RoPE(kOut, nil, headDim, numKVHeads, seqLen, pos, float32(b.RoPETheta))
 
 	// 4. Multi-Head Attention with GQA
 	// For each query head, find its corresponding KV head and compute attention
