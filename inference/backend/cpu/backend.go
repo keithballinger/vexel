@@ -2,6 +2,8 @@ package cpu
 
 import (
 	"math"
+	"runtime"
+	"sync"
 	"vexel/inference/tensor"
 )
 
@@ -25,19 +27,47 @@ func (b *cpuBackend) Device() tensor.Device {
 
 // Matmul performs matrix multiplication: C = A * B
 func (b *cpuBackend) Matmul(a, bData, out []float32, m, n, k int) {
+	// Zero out output first (safe practice)
+	// Parallelize zeroing? Usually memset is fast enough.
 	for i := range out {
 		out[i] = 0
 	}
 
-	for i := 0; i < m; i++ {
-		for j := 0; j < n; j++ {
-			var sum float32
-			for p := 0; p < k; p++ {
-				sum += a[i*k+p] * bData[p*n+j]
-			}
-			out[i*n+j] = sum
-		}
+	// Parallelize over M (rows of A)
+	numWorkers := runtime.NumCPU()
+	if m < numWorkers {
+		numWorkers = m
 	}
+	
+	var wg sync.WaitGroup
+	chunkSize := (m + numWorkers - 1) / numWorkers
+
+	for w := 0; w < numWorkers; w++ {
+		startRow := w * chunkSize
+		endRow := startRow + chunkSize
+		if endRow > m {
+			endRow = m
+		}
+		
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			for i := start; i < end; i++ {
+				for j := 0; j < n; j++ {
+					var sum float32
+					// Inner loop over K
+					// Optimization: Cache A[i*k+p] if possible? 
+					// Compiler usually handles this reasonably well.
+					// SIMD would be better here.
+					for p := 0; p < k; p++ {
+						sum += a[i*k+p] * bData[p*n+j]
+					}
+					out[i*n+j] = sum
+				}
+			}
+		}(startRow, endRow)
+	}
+	wg.Wait()
 }
 
 // RMSNorm performs Root Mean Square Normalization.

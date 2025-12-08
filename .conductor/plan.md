@@ -179,7 +179,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Map safetensors offsets to `BlockRuntime` tensors. (Started: 2025-12-08 01:00, Completed: 2025-12-08 01:05)
 - [x] Write Failing Tests: For Embedding lookup kernel. (Started: 2025-12-08 01:10, Completed: 2025-12-08 01:15)
 - [x] Implement Feature: Implement `Embedding` kernel. (Started: 2025-12-08 01:15, Completed: 2025-12-08 01:20)
-- [ ] Implement Feature: Optimize CPU Matmul (Parallelize).
+- [x] Implement Feature: Optimize CPU Matmul (Parallelize). (Started: 2025-12-08 01:20, Completed: 2025-12-08 01:25)
 
 ### Task: Documentation and Code Quality Refinement
 - [ ] Implement Feature: Add comprehensive GoDoc comments for all public types, functions, and methods.
