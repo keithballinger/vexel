@@ -151,6 +151,25 @@ func (c *PagedKVCache) StoreKV(seqID int64, layer, pos int, k, v []float32) erro
 	return nil
 }
 
+// StoreKVBatch stores K and V for multiple tokens at consecutive positions.
+// k and v should have shape [numTokens, numKVHeads*headDim] flattened.
+// startPos is the position of the first token.
+func (c *PagedKVCache) StoreKVBatch(seqID int64, layer, startPos int, k, v []float32, numTokens int) error {
+	kvSize := c.config.NumKVHeads * c.config.HeadDim
+
+	// Store each token
+	for i := 0; i < numTokens; i++ {
+		pos := startPos + i
+		kStart := i * kvSize
+		vStart := i * kvSize
+		err := c.StoreKV(seqID, layer, pos, k[kStart:kStart+kvSize], v[vStart:vStart+kvSize])
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // GetKVSlice returns K and V data for positions [0, endPos] for a layer.
 // Returns slices pointing into block memory (zero-copy when possible).
 // For paged memory, this gathers from multiple blocks.

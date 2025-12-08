@@ -128,16 +128,40 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 	// Check if we have paged KV cache
 	usePagedCache := s.runtime.PagedKVCache() != nil
 
-	// Prepare inputs for the runtime
-	tokens := make([]int, len(batch))
-	positions := make([]int, len(batch))
-	seqIDs := make([]int64, len(batch))
+	// Process each sequence - check if any need batched prefill
+	for _, seq := range batch {
+		if seq.State() == StatePending && len(seq.PromptTokens()) > 0 && !seq.IsPrefillComplete() {
+			// This sequence needs prefill - do it all at once
+			if usePagedCache {
+				if err := s.runBatchedPrefill(seq); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+	}
 
-	for i, seq := range batch {
+	// Filter to sequences that need decode (already prefilled or no prompt)
+	decodeSeqs := make([]*Sequence, 0, len(batch))
+	for _, seq := range batch {
+		if seq.State() == StateDecoding || (seq.State() == StatePending && seq.IsPrefillComplete()) {
+			decodeSeqs = append(decodeSeqs, seq)
+		}
+	}
+
+	if len(decodeSeqs) == 0 {
+		return nil
+	}
+
+	// Prepare inputs for decode
+	tokens := make([]int, len(decodeSeqs))
+	positions := make([]int, len(decodeSeqs))
+	seqIDs := make([]int64, len(decodeSeqs))
+
+	for i, seq := range decodeSeqs {
 		token, pos, hasMore := seq.NextInputToken()
 		if !hasMore {
-			// No token available - use BOS as fallback
-			token = 1
+			token = 1 // BOS fallback
 			pos = 0
 		}
 		tokens[i] = token
@@ -149,11 +173,9 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 	var err error
 
 	if usePagedCache {
-		// Use paged KV cache path
 		inputs := runtime.NewBatchRuntimeInputsFull(tokens, positions, seqIDs)
 		logits, err = s.runtime.DecodeStepWithPagedKV(inputs)
 	} else {
-		// Legacy path without paged cache
 		inputs := runtime.NewBatchRuntimeInputsWithPos(tokens, positions, nil)
 		logits, err = s.runtime.DecodeStep(inputs)
 	}
@@ -163,56 +185,36 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 	}
 
 	// Update metrics
-	s.metrics.TotalTokens += len(batch)
-	
+	s.metrics.TotalTokens += len(decodeSeqs)
+
 	// Sample and Decode
-	// Logits: [Batch, Vocab]
-	// We need raw access.
 	logitsData := tensor.ToFloat32Slice(logits)
 	vocabSize := s.runtime.Config().VocabSize
 
-	for i, seq := range batch {
-		// Advance position after processing this token
+	for i, seq := range decodeSeqs {
 		seq.AdvancePosition()
 
-		// Update state based on prefill completion
 		if seq.State() == StatePending {
-			if seq.IsPrefillComplete() {
-				seq.SetState(StateDecoding)
-			} else {
-				seq.SetState(StatePrefill)
-			}
-		} else if seq.State() == StatePrefill && seq.IsPrefillComplete() {
 			seq.SetState(StateDecoding)
-		}
-
-		// Only sample and output on the last prompt token or during decode
-		if !seq.IsPrefillComplete() {
-			// Still prefilling - don't sample yet
-			continue
 		}
 
 		// Extract logits for this sequence
 		start := i * vocabSize
 		end := start + vocabSize
 
-		// Safety check
 		if logitsData == nil || end > len(logitsData) {
-			// Fallback if tensor is invalid (e.g. mock runtime returning empty)
 			seq.PushToken("?")
 			continue
 		}
 
 		seqLogits := logitsData[start:end]
 
-		// Sample using configured sampler
+		// Sample
 		tokenID := s.sampler.Sample(seqLogits)
-
-		// Track the generated token
 		seq.AddGeneratedToken(tokenID)
 
-		// Check for EOS token
-		eosToken := 2 // Default Llama EOS
+		// Check for EOS
+		eosToken := 2
 		if s.tokenizer != nil {
 			eosToken = s.tokenizer.EOS()
 		}
@@ -222,15 +224,14 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 			continue
 		}
 
-		// Check for max tokens
+		// Check max tokens
 		if s.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= s.config.MaxTokens {
 			seq.SetState(StateFinished)
 			seq.Close()
 			continue
 		}
 
-		// Decode
-		// If tokenizer is nil (e.g. benchmark/test), push ID as string
+		// Decode token to text
 		var text string
 		if s.tokenizer != nil {
 			text, _ = s.tokenizer.Decode([]int{tokenID})
@@ -241,6 +242,66 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 		seq.PushToken(text)
 	}
 
+	return nil
+}
+
+// runBatchedPrefill processes all prompt tokens for a sequence in one forward pass.
+func (s *Scheduler) runBatchedPrefill(seq *Sequence) error {
+	promptTokens := seq.PromptTokens()
+	if len(promptTokens) == 0 {
+		seq.SetState(StateDecoding)
+		return nil
+	}
+
+	// Run prefill with all tokens at once
+	logits, err := s.runtime.PrefillWithPagedKV(promptTokens, seq.KVSeqID(), 0)
+	if err != nil {
+		return fmt.Errorf("prefill failed: %w", err)
+	}
+
+	// Mark all prompt tokens as processed
+	seq.SetPrefillComplete(len(promptTokens))
+
+	// Update metrics
+	s.metrics.TotalTokens += len(promptTokens)
+
+	// Sample from the logits (which are for the last prompt token)
+	logitsData := tensor.ToFloat32Slice(logits)
+	vocabSize := s.runtime.Config().VocabSize
+
+	if logitsData == nil || len(logitsData) < vocabSize {
+		seq.SetState(StateDecoding)
+		return nil
+	}
+
+	seqLogits := logitsData[:vocabSize]
+
+	// Sample first generated token
+	tokenID := s.sampler.Sample(seqLogits)
+	seq.AddGeneratedToken(tokenID)
+
+	// Check for EOS
+	eosToken := 2
+	if s.tokenizer != nil {
+		eosToken = s.tokenizer.EOS()
+	}
+	if tokenID == eosToken {
+		seq.SetState(StateFinished)
+		seq.Close()
+		return nil
+	}
+
+	// Decode and push token
+	var text string
+	if s.tokenizer != nil {
+		text, _ = s.tokenizer.Decode([]int{tokenID})
+	} else {
+		text = fmt.Sprintf(" %d", tokenID)
+	}
+	seq.PushToken(text)
+
+	// Transition to decode state
+	seq.SetState(StateDecoding)
 	return nil
 }
 

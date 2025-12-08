@@ -137,6 +137,13 @@ func (s *Sequence) IsPrefillComplete() bool {
 	return s.promptPos >= len(s.promptTokens)
 }
 
+// SetPrefillComplete marks all prompt tokens as processed and sets position.
+// Used by batched prefill to skip token-by-token processing.
+func (s *Sequence) SetPrefillComplete(numTokens int) {
+	s.promptPos = len(s.promptTokens)
+	s.position = numTokens
+}
+
 // TokenChan returns the channel for receiving generated tokens.
 func (s *Sequence) TokenChan() <-chan string {
 	return s.tokenChan

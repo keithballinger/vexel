@@ -283,13 +283,13 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 
 // ExecuteWithPagedKV performs the forward pass using paged KV cache.
 // This is the production path that properly stores and retrieves from the KV cache.
-// x: Input tensor [1, Hidden] (single token for decode)
+// x: Input tensor [seqLen, Hidden] (seqLen=1 for decode, seqLen>1 for prefill)
 // scratch: Temporary buffer
 // pagedCache: Paged KV cache manager
 // seqID: Sequence ID for this request
 // layerIdx: Index of this layer
-// pos: Current token position (for RoPE and Cache storage)
-func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *kv.PagedKVCache, seqID int64, layerIdx, pos int) (tensor.Tensor, error) {
+// startPos: Starting position for RoPE and cache storage (0 for prefill, pos for decode)
+func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *kv.PagedKVCache, seqID int64, layerIdx, startPos int) (tensor.Tensor, error) {
 	xData := tensor.ToFloat32Slice(x)
 	scratchData := tensor.ToFloat32Slice(scratch)
 
@@ -298,12 +298,13 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 	}
 
 	// Dimensions from config
-	seqLen := x.Shape().NumElements() / b.HiddenSize // Should be 1 for decode
+	seqLen := x.Shape().NumElements() / b.HiddenSize
 	hiddenSize := b.HiddenSize
 	numHeads := b.NumAttentionHeads
 	numKVHeads := b.NumKeyValueHeads
 	headDim := b.HeadDim
 	intermediateSize := b.IntermediateSize
+	headsPerKV := numHeads / numKVHeads
 
 	// Derived sizes
 	qSize := seqLen * numHeads * headDim
@@ -354,49 +355,99 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 		b.backend.MatmulTransposeB(normOut, wV, vOut, seqLen, vDim, hiddenSize)
 	}
 
-	// 3. RoPE - Apply to Q and K
-	b.backend.RoPE(qOut, nil, headDim, numHeads, seqLen, pos, float32(b.RoPETheta))
-	b.backend.RoPE(kOut, nil, headDim, numKVHeads, seqLen, pos, float32(b.RoPETheta))
+	// 3. RoPE - Apply to Q and K at positions [startPos, startPos+seqLen)
+	b.backend.RoPE(qOut, nil, headDim, numHeads, seqLen, startPos, float32(b.RoPETheta))
+	b.backend.RoPE(kOut, nil, headDim, numKVHeads, seqLen, startPos, float32(b.RoPETheta))
 
 	// 4. Store K,V to PagedKVCache
-	// For seqLen=1 (decode), we store at position `pos`
 	if pagedCache != nil {
-		err := pagedCache.StoreKV(seqID, layerIdx, pos, kOut, vOut)
-		if err != nil {
-			return x, fmt.Errorf("failed to store KV: %w", err)
+		if seqLen == 1 {
+			// Single token (decode mode)
+			err := pagedCache.StoreKV(seqID, layerIdx, startPos, kOut, vOut)
+			if err != nil {
+				return x, fmt.Errorf("failed to store KV: %w", err)
+			}
+		} else {
+			// Multiple tokens (prefill mode)
+			err := pagedCache.StoreKVBatch(seqID, layerIdx, startPos, kOut, vOut, seqLen)
+			if err != nil {
+				return x, fmt.Errorf("failed to store KV batch: %w", err)
+			}
 		}
 	}
 
-	// 5. Multi-Head Attention with KV Cache
-	// Retrieve all K,V from cache [0..pos] with RoPE shifts applied for fragments
+	// 5. Multi-Head Attention
 	attnOut := scratchData[offset : offset+qSize]
 	offset += qSize
 
-	if pagedCache != nil {
-		// Gather K,V from cache for positions [0, pos]
-		// Use GetKVSliceForAttention to apply RoPE shifts for any cached fragments
+	endPos := startPos + seqLen - 1 // Last position we're processing
+
+	if pagedCache != nil && seqLen == 1 {
+		// Decode mode: attend to all cached positions [0, endPos]
 		cachedK, cachedV := pagedCache.GetKVSliceForAttention(
-			seqID, layerIdx, pos,
+			seqID, layerIdx, endPos,
 			float32(b.RoPETheta),
 			b.backend.RoPEShift,
 		)
-		kvLen := pos + 1 // Number of KV positions
+		kvLen := endPos + 1
 
 		if len(cachedK) > 0 && len(cachedV) > 0 {
 			scale := float32(1.0 / sqrt(float64(headDim)))
 			b.backend.SDPA(qOut, cachedK, cachedV, attnOut, kvLen, numHeads, numKVHeads, headDim, scale)
 		} else {
-			// No cache data, just copy V (shouldn't happen in normal flow)
 			copy(attnOut, vOut)
 		}
 	} else {
-		// No cache - fallback to current K,V only
-		// With seqLen=1, attention output = V
+		// Prefill mode: causal self-attention within the current batch
+		// Each query position i attends to positions 0..i (causal)
+		// For prefill starting at pos 0, this is standard causal attention
+		// Q: [seqLen, numHeads, headDim], K/V: [seqLen, numKVHeads, headDim]
+
+		scoresSize := seqLen * seqLen
+		scores := scratchData[offset : offset+scoresSize]
+		offset += scoresSize
+
+		scale := float32(1.0 / sqrt(float64(headDim)))
+
+		// Process each query head
 		for h := 0; h < numHeads; h++ {
-			kvHead := h / (numHeads / numKVHeads)
-			srcOffset := kvHead * headDim
-			dstOffset := h * headDim
-			copy(attnOut[dstOffset:dstOffset+headDim], vOut[srcOffset:srcOffset+headDim])
+			kvHead := h / headsPerKV
+
+			// Compute attention scores: Q @ K^T
+			for i := 0; i < seqLen; i++ {
+				qRow := qOut[i*numHeads*headDim+h*headDim : i*numHeads*headDim+(h+1)*headDim]
+				for j := 0; j < seqLen; j++ {
+					kRow := kOut[j*numKVHeads*headDim+kvHead*headDim : j*numKVHeads*headDim+(kvHead+1)*headDim]
+					var dot float32
+					for d := 0; d < headDim; d++ {
+						dot += qRow[d] * kRow[d]
+					}
+					scores[i*seqLen+j] = dot * scale
+				}
+			}
+
+			// Apply causal mask (future positions set to -inf)
+			for i := 0; i < seqLen; i++ {
+				for j := i + 1; j < seqLen; j++ {
+					scores[i*seqLen+j] = -1e9
+				}
+			}
+
+			// Softmax each row
+			b.backend.Softmax(scores, scores, seqLen, seqLen)
+
+			// Compute output: scores @ V
+			for i := 0; i < seqLen; i++ {
+				outRow := attnOut[i*numHeads*headDim+h*headDim : i*numHeads*headDim+(h+1)*headDim]
+				for d := 0; d < headDim; d++ {
+					var sum float32
+					for j := 0; j < seqLen; j++ {
+						vVal := vOut[j*numKVHeads*headDim+kvHead*headDim+d]
+						sum += scores[i*seqLen+j] * vVal
+					}
+					outRow[d] = sum
+				}
+			}
 		}
 	}
 
