@@ -9,11 +9,12 @@ import (
 
 // ModelRuntime manages the execution of a model.
 type ModelRuntime struct {
-	backend cpu.Backend
-	ctx     *memory.InferenceContext
-	cache   *kv.KVCache
-	config  ModelConfig
-	layers  []*BlockRuntime
+	backend    cpu.Backend
+	ctx        *memory.InferenceContext
+	cache      *kv.KVCache       // Legacy simple cache
+	pagedCache *kv.PagedKVCache  // Production paged cache
+	config     ModelConfig
+	layers     []*BlockRuntime
 
 	// Global weights
 	Embedding  tensor.Tensor
@@ -55,4 +56,29 @@ func (m *ModelRuntime) Layer(i int) *BlockRuntime {
 		return nil
 	}
 	return m.layers[i]
+}
+
+// SetPagedKVCache sets the paged KV cache for production use.
+func (m *ModelRuntime) SetPagedKVCache(cache *kv.PagedKVCache) {
+	m.pagedCache = cache
+}
+
+// PagedKVCache returns the paged KV cache.
+func (m *ModelRuntime) PagedKVCache() *kv.PagedKVCache {
+	return m.pagedCache
+}
+
+// CreatePagedKVCache creates and sets a new paged KV cache based on model config.
+func (m *ModelRuntime) CreatePagedKVCache(maxBlocks int) *kv.PagedKVCache {
+	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	config := kv.PagedKVConfig{
+		NumLayers:  m.config.NumHiddenLayers,
+		NumKVHeads: m.config.NumKeyValueHeads,
+		HeadDim:    headDim,
+		BlockSize:  16, // Standard block size
+		MaxBlocks:  maxBlocks,
+	}
+	cache := kv.NewPagedKVCache(config)
+	m.pagedCache = cache
+	return cache
 }

@@ -235,3 +235,118 @@ func (b *cpuBackend) Softmax(x, out []float32, rows, cols int) {
 		}
 	}
 }
+
+// RoPEShift applies a uniform RoPE position shift to K vectors in place.
+// This enables fragment caching by transforming RoPE(p) -> RoPE(p+shift).
+func (b *cpuBackend) RoPEShift(k []float32, headDim, numKVHeads, numTokens, shift int, theta float32) {
+	if shift == 0 {
+		return // No shift needed
+	}
+
+	halfDim := headDim / 2
+
+	// Apply RoPE(shift) to each K vector
+	// K layout: [numTokens, numKVHeads, headDim]
+	for t := 0; t < numTokens; t++ {
+		for h := 0; h < numKVHeads; h++ {
+			offset := t*numKVHeads*headDim + h*headDim
+
+			for j := 0; j < halfDim; j++ {
+				// Compute rotation angle for this dimension at position `shift`
+				exp := float64(2*j) / float64(headDim)
+				freq := float32(1.0 / math.Pow(float64(theta), exp))
+				angle := float32(shift) * freq
+				cos := float32(math.Cos(float64(angle)))
+				sin := float32(math.Sin(float64(angle)))
+
+				// Apply rotation
+				val1 := k[offset+j]
+				val2 := k[offset+j+halfDim]
+				k[offset+j] = val1*cos - val2*sin
+				k[offset+j+halfDim] = val1*sin + val2*cos
+			}
+		}
+	}
+}
+
+// SDPA performs Scaled Dot-Product Attention for a single query position.
+// This implements causal attention: each query can only attend to positions <= its own.
+// For decode (single query), this means attending to all kvLen positions.
+//
+// Q: [numQHeads, headDim] - query vectors
+// K: [kvLen, numKVHeads, headDim] - key vectors from cache
+// V: [kvLen, numKVHeads, headDim] - value vectors from cache
+// out: [numQHeads, headDim] - output vectors
+func (b *cpuBackend) SDPA(q, k, v, out []float32, kvLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	// GQA: map Q heads to KV heads
+	headsPerKV := numQHeads / numKVHeads
+
+	// Temporary buffer for attention scores
+	scores := make([]float32, kvLen)
+
+	// Process each query head
+	for h := 0; h < numQHeads; h++ {
+		kvHead := h / headsPerKV
+
+		// Pointer to this Q head: [headDim]
+		qOffset := h * headDim
+		qHead := q[qOffset : qOffset+headDim]
+
+		// Output pointer for this head
+		outOffset := h * headDim
+		outHead := out[outOffset : outOffset+headDim]
+
+		// Compute attention scores: Q dot K for each position
+		for pos := 0; pos < kvLen; pos++ {
+			// K at position pos for this KV head
+			// K layout: [kvLen, numKVHeads, headDim]
+			kOffset := pos*numKVHeads*headDim + kvHead*headDim
+			kVec := k[kOffset : kOffset+headDim]
+
+			var dot float32
+			for d := 0; d < headDim; d++ {
+				dot += qHead[d] * kVec[d]
+			}
+			scores[pos] = dot * scale
+		}
+
+		// Softmax over scores
+		// Find max for numerical stability
+		maxScore := scores[0]
+		for _, s := range scores {
+			if s > maxScore {
+				maxScore = s
+			}
+		}
+
+		// Compute exp and sum
+		var sumExp float32
+		for i := range scores {
+			scores[i] = float32(math.Exp(float64(scores[i] - maxScore)))
+			sumExp += scores[i]
+		}
+
+		// Normalize
+		invSum := 1.0 / sumExp
+		for i := range scores {
+			scores[i] *= invSum
+		}
+
+		// Compute weighted sum of V
+		// Zero output first
+		for d := 0; d < headDim; d++ {
+			outHead[d] = 0
+		}
+
+		for pos := 0; pos < kvLen; pos++ {
+			// V at position pos for this KV head
+			vOffset := pos*numKVHeads*headDim + kvHead*headDim
+			vVec := v[vOffset : vOffset+headDim]
+
+			weight := scores[pos]
+			for d := 0; d < headDim; d++ {
+				outHead[d] += weight * vVec[d]
+			}
+		}
+	}
+}

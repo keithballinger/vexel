@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"fmt"
 	"math"
 
 	"vexel/inference/backend/cpu"
@@ -270,6 +271,185 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 		w2 := tensor.ToFloat32Slice(b.W2)
 		w2Dim := b.W2.Shape().Dims()[0] // hiddenSize
 		// Project to hidden size, store in normOut
+		b.backend.MatmulTransposeB(gateOut, w2, normOut, seqLen, w2Dim, intermediateSize)
+		// Add residual
+		for i := 0; i < seqLen*hiddenSize; i++ {
+			xData[i] += normOut[i]
+		}
+	}
+
+	return x, nil
+}
+
+// ExecuteWithPagedKV performs the forward pass using paged KV cache.
+// This is the production path that properly stores and retrieves from the KV cache.
+// x: Input tensor [1, Hidden] (single token for decode)
+// scratch: Temporary buffer
+// pagedCache: Paged KV cache manager
+// seqID: Sequence ID for this request
+// layerIdx: Index of this layer
+// pos: Current token position (for RoPE and Cache storage)
+func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *kv.PagedKVCache, seqID int64, layerIdx, pos int) (tensor.Tensor, error) {
+	xData := tensor.ToFloat32Slice(x)
+	scratchData := tensor.ToFloat32Slice(scratch)
+
+	if xData == nil || scratchData == nil {
+		return x, nil
+	}
+
+	// Dimensions from config
+	seqLen := x.Shape().NumElements() / b.HiddenSize // Should be 1 for decode
+	hiddenSize := b.HiddenSize
+	numHeads := b.NumAttentionHeads
+	numKVHeads := b.NumKeyValueHeads
+	headDim := b.HeadDim
+	intermediateSize := b.IntermediateSize
+
+	// Derived sizes
+	qSize := seqLen * numHeads * headDim
+	kvSize := seqLen * numKVHeads * headDim
+
+	// Scratch layout
+	offset := 0
+
+	// 1. RMSNorm (Attention)
+	normOut := scratchData[offset : offset+seqLen*hiddenSize]
+	offset += seqLen * hiddenSize
+
+	wNorm := tensor.ToFloat32Slice(b.AttnNorm)
+	if wNorm != nil {
+		b.backend.RMSNorm(xData, wNorm, normOut, seqLen, hiddenSize, float32(b.RMSNormEPS))
+	} else {
+		copy(normOut, xData)
+	}
+
+	// 2. Q/K/V Projections
+	qOut := scratchData[offset : offset+qSize]
+	offset += qSize
+
+	kOut := scratchData[offset : offset+kvSize]
+	offset += kvSize
+
+	vOut := scratchData[offset : offset+kvSize]
+	offset += kvSize
+
+	// Wq: [numHeads*headDim, hiddenSize] -> Q: [seqLen, numHeads*headDim]
+	if !b.Wq.DevicePtr().IsNil() {
+		wQ := tensor.ToFloat32Slice(b.Wq)
+		qDim := b.Wq.Shape().Dims()[0]
+		b.backend.MatmulTransposeB(normOut, wQ, qOut, seqLen, qDim, hiddenSize)
+	}
+
+	// Wk: [numKVHeads*headDim, hiddenSize] -> K: [seqLen, numKVHeads*headDim]
+	if !b.Wk.DevicePtr().IsNil() {
+		wK := tensor.ToFloat32Slice(b.Wk)
+		kDim := b.Wk.Shape().Dims()[0]
+		b.backend.MatmulTransposeB(normOut, wK, kOut, seqLen, kDim, hiddenSize)
+	}
+
+	// Wv: [numKVHeads*headDim, hiddenSize] -> V: [seqLen, numKVHeads*headDim]
+	if !b.Wv.DevicePtr().IsNil() {
+		wV := tensor.ToFloat32Slice(b.Wv)
+		vDim := b.Wv.Shape().Dims()[0]
+		b.backend.MatmulTransposeB(normOut, wV, vOut, seqLen, vDim, hiddenSize)
+	}
+
+	// 3. RoPE - Apply to Q and K
+	b.backend.RoPE(qOut, nil, headDim, numHeads, seqLen, pos, float32(b.RoPETheta))
+	b.backend.RoPE(kOut, nil, headDim, numKVHeads, seqLen, pos, float32(b.RoPETheta))
+
+	// 4. Store K,V to PagedKVCache
+	// For seqLen=1 (decode), we store at position `pos`
+	if pagedCache != nil {
+		err := pagedCache.StoreKV(seqID, layerIdx, pos, kOut, vOut)
+		if err != nil {
+			return x, fmt.Errorf("failed to store KV: %w", err)
+		}
+	}
+
+	// 5. Multi-Head Attention with KV Cache
+	// Retrieve all K,V from cache [0..pos] with RoPE shifts applied for fragments
+	attnOut := scratchData[offset : offset+qSize]
+	offset += qSize
+
+	if pagedCache != nil {
+		// Gather K,V from cache for positions [0, pos]
+		// Use GetKVSliceForAttention to apply RoPE shifts for any cached fragments
+		cachedK, cachedV := pagedCache.GetKVSliceForAttention(
+			seqID, layerIdx, pos,
+			float32(b.RoPETheta),
+			b.backend.RoPEShift,
+		)
+		kvLen := pos + 1 // Number of KV positions
+
+		if len(cachedK) > 0 && len(cachedV) > 0 {
+			scale := float32(1.0 / sqrt(float64(headDim)))
+			b.backend.SDPA(qOut, cachedK, cachedV, attnOut, kvLen, numHeads, numKVHeads, headDim, scale)
+		} else {
+			// No cache data, just copy V (shouldn't happen in normal flow)
+			copy(attnOut, vOut)
+		}
+	} else {
+		// No cache - fallback to current K,V only
+		// With seqLen=1, attention output = V
+		for h := 0; h < numHeads; h++ {
+			kvHead := h / (numHeads / numKVHeads)
+			srcOffset := kvHead * headDim
+			dstOffset := h * headDim
+			copy(attnOut[dstOffset:dstOffset+headDim], vOut[srcOffset:srcOffset+headDim])
+		}
+	}
+
+	// 6. Output Projection: attnOut [seqLen, numHeads*headDim] -> [seqLen, hiddenSize]
+	if !b.Wo.DevicePtr().IsNil() {
+		wO := tensor.ToFloat32Slice(b.Wo)
+		oDim := b.Wo.Shape().Dims()[0]
+		b.backend.MatmulTransposeB(attnOut, wO, normOut, seqLen, oDim, numHeads*headDim)
+		// Add residual: x = x + attn_out
+		for i := 0; i < seqLen*hiddenSize; i++ {
+			xData[i] += normOut[i]
+		}
+	}
+
+	// 7. FFN RMSNorm
+	wFFN := tensor.ToFloat32Slice(b.FFNNorm)
+	if wFFN != nil {
+		b.backend.RMSNorm(xData, wFFN, normOut, seqLen, hiddenSize, float32(b.RMSNormEPS))
+	} else {
+		copy(normOut, xData)
+	}
+
+	// 8. MLP: SwiGLU variant
+	gateOut := scratchData[offset : offset+seqLen*intermediateSize]
+	offset += seqLen * intermediateSize
+
+	upOut := scratchData[offset : offset+seqLen*intermediateSize]
+	offset += seqLen * intermediateSize
+
+	// Gate projection
+	if !b.W1.DevicePtr().IsNil() {
+		w1 := tensor.ToFloat32Slice(b.W1)
+		w1Dim := b.W1.Shape().Dims()[0]
+		b.backend.MatmulTransposeB(normOut, w1, gateOut, seqLen, w1Dim, hiddenSize)
+	}
+
+	// Up projection
+	if !b.W3.DevicePtr().IsNil() {
+		w3 := tensor.ToFloat32Slice(b.W3)
+		w3Dim := b.W3.Shape().Dims()[0]
+		b.backend.MatmulTransposeB(normOut, w3, upOut, seqLen, w3Dim, hiddenSize)
+	}
+
+	// SiLU on gate, then multiply with up
+	b.backend.SiLU(gateOut, gateOut, seqLen*intermediateSize)
+	for i := 0; i < seqLen*intermediateSize; i++ {
+		gateOut[i] *= upOut[i]
+	}
+
+	// Down projection and residual
+	if !b.W2.DevicePtr().IsNil() {
+		w2 := tensor.ToFloat32Slice(b.W2)
+		w2Dim := b.W2.Shape().Dims()[0]
 		b.backend.MatmulTransposeB(gateOut, w2, normOut, seqLen, w2Dim, intermediateSize)
 		// Add residual
 		for i := 0; i < seqLen*hiddenSize; i++ {

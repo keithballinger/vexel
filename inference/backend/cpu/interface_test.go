@@ -18,6 +18,8 @@ func (m *mockBackend) RoPE(q, k []float32, headDim, numHeads, seqLen, startPos i
 func (m *mockBackend) SiLU(x, out []float32, n int) {}
 func (m *mockBackend) Embedding(ids []int, table, out []float32, dim int) {}
 func (m *mockBackend) Softmax(x, out []float32, rows, cols int) {}
+func (m *mockBackend) SDPA(q, k, v, out []float32, kvLen, numQHeads, numKVHeads, headDim int, scale float32) {}
+func (m *mockBackend) RoPEShift(k []float32, headDim, numKVHeads, numTokens, shift int, theta float32) {}
 
 // This test verifies that the Backend interface is defined and contains the expected methods.
 // We do this by asserting that our mock implementation satisfies the interface.
