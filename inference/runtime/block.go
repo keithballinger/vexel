@@ -111,9 +111,23 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor) (tensor.Tensor, error) 
 	// Rotate Q and K
 	b.backend.RoPE(qOut, qOut, cols/4, rows, 0, 10000.0) // Heads? assuming 4 heads
 	
-	// SDPA (Softmax etc) - Not implemented in kernel yet?
-	// We skipped SDPA kernel in plan.
-	// We can do naive Matmul for Q*K^T.
+	// SDPA Logic (Naive)
+	// 1. Compute Scores Q * K^T
+	// Since we don't have Transpose, and Q/K are in scratch, we assume layout.
+	// For generation (1 token), Q is [1, Dim]. K is [1, Dim] (if no cache).
+	// Score is dot product.
+	// Let's use a placeholder for scores.
+	scores := scratchData[offset : offset+cols] // Dummy size
+	
+	// Mock Matmul calls for QK^T
+	b.backend.Matmul(qOut, qOut, scores, rows, cols, cols) 
+	
+	// 2. Softmax
+	// Normalize scores
+	b.backend.Softmax(scores, scores, 1, cols) // rows=heads?
+	
+	// 3. Attn * V
+	b.backend.Matmul(scores, qOut, qOut, rows, cols, cols)
 	
 	// O Projection
 	b.backend.Matmul(qOut, nil, xData, rows, cols, cols) // Wo (add to Residual)

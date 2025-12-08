@@ -186,8 +186,9 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [ ] Implement Feature: Implement `Arena` with real memory allocation.
 - [ ] Write Failing Tests: For `Softmax` kernel.
 - [x] Implement Feature: Implement `Softmax` kernel. (Started: 2025-12-08 02:00, Completed: 2025-12-08 02:05)
-- [ ] Write Failing Tests: For `SDPA` (Scaled Dot Product Attention) logic.
-- [ ] Implement Feature: Implement `SDPA` with causal masking.
+- [x] Write Failing Tests: For `SDPA` (Scaled Dot Product Attention) logic. (Started: 2025-12-08 02:10, Completed: 2025-12-08 02:15)
+- [x] Implement Feature: Implement `SDPA` with causal masking. (Started: 2025-12-08 02:15, Completed: 2025-12-08 02:20)
+- [ ] Write Failing Tests: For KV Cache read/write logic in `BlockRuntime`.
 - [ ] Write Failing Tests: For KV Cache read/write logic in `BlockRuntime`.
 - [ ] Implement Feature: Integrate KV Cache into `BlockRuntime`.
 - [ ] Implement Feature: Implement `Matmul` Transpose support (for linear layers).

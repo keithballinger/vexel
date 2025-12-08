@@ -10,15 +10,13 @@ Phase 5: Integration, Testing, and Documentation (Real Inference)
 Task: Real Inference Support (Memory & Math)
 
 ## Progress
-- [x] Implement `Arena` (Memory Allocator).
-- [x] Implement `Softmax` kernel.
+- [x] Wire `SDPA` logic (Softmax call).
 
 ## Next Action
-Write Failing Tests: For `SDPA` (Scaled Dot Product Attention) logic.
+Write Failing Tests: For KV Cache read/write logic in `BlockRuntime`.
 
 ## Blockers
 None
 
 ## Notes
-- `Arena` is now used for scratch buffers.
-- `Softmax` is ready for Attention.
+- Attention logic structure is in place (naive calls).

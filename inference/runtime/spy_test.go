@@ -15,6 +15,8 @@ type SpyBackend struct {
 	RMSNormCalls int
 	RoPECalls int
 	SiLUCalls int
+	SoftmaxCalls int
+	EmbeddingCalls int
 }
 
 func (s *SpyBackend) Matmul(a, b, out []float32, m, n, k int) {
@@ -31,6 +33,14 @@ func (s *SpyBackend) RoPE(q, k []float32, headDim, seqLen, startPos int, theta f
 
 func (s *SpyBackend) SiLU(x, out []float32, n int) {
 	s.SiLUCalls++
+}
+
+func (s *SpyBackend) Softmax(x, out []float32, rows, cols int) {
+	s.SoftmaxCalls++
+}
+
+func (s *SpyBackend) Embedding(ids []int, table, out []float32, dim int) {
+	s.EmbeddingCalls++
 }
 
 func (s *SpyBackend) CreateStream() (interface{}, error) { return nil, nil }
