@@ -168,6 +168,12 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement `Sampler` and wire to Scheduler. (Started: 2025-12-08 00:25, Completed: 2025-12-08 00:30)
 - [x] Implement Feature: Wire Sampler to Scheduler logic. (Started: 2025-12-08 00:30, Completed: 2025-12-08 00:35)
 
+### Task: Interactive Chat CLI
+- [x] Write Failing Tests: For Sequence token streaming channel. (Started: 2025-12-08 00:40, Completed: 2025-12-08 00:45)
+- [x] Implement Feature: Add `TokenChan` to `Sequence` and update `Scheduler` to push tokens. (Started: 2025-12-08 00:45, Completed: 2025-12-08 00:50)
+- [ ] Write Failing Tests: For Interactive CLI loop (mocked stdin).
+- [ ] Implement Feature: Update `cli.go` to support interactive chat loop.
+
 ### Task: Documentation and Code Quality Refinement
 - [ ] Implement Feature: Add comprehensive GoDoc comments for all public types, functions, and methods.
 - [ ] Implement Feature: Review and refine `user_guide.md` and `architecture.md` to reflect implementation details and any evolved design decisions.

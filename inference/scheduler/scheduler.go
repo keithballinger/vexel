@@ -132,22 +132,12 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 	// Update metrics and sequence state
 	s.metrics.TotalTokens += len(batch)
 	
-	// Sample tokens (mocking batch iteration for now)
-	// In reality, logits is [Batch, Vocab]. We need to slice it.
-	// Since we don't have tensor slicing helper easily available here without unsafe,
-	// and our logits is a dummy tensor from the mock, we can't really sample it.
-	
-	// But let's pretend we do.
-	// _ = sampler.Argmax(...)
-	
 	for _, seq := range batch {
 		if seq.State() == StatePending {
 			seq.SetState(StateDecoding)
 		}
-		// In a real loop, we check for EOS or max len.
-		// For benchmark, let's just finish them fast so we see throughput.
-		// Or keep them running. To simulate completion, we can use a counter.
-		// Let's assume infinite decoding for the benchmark duration.
+		// Mock token generation for interactive CLI demo
+		seq.PushToken("token ")
 	}
 
 	return nil

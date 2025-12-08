@@ -33,14 +33,18 @@ type Sequence struct {
 	id     SequenceID
 	prompt string
 	state  SequenceState
+	
+	// tokenChan creates a stream of generated tokens back to the caller.
+	tokenChan chan string
 }
 
 // NewSequence creates a new sequence in the Pending state.
 func NewSequence(id SequenceID, prompt string) *Sequence {
 	return &Sequence{
-		id:     id,
-		prompt: prompt,
-		state:  StatePending,
+		id:        id,
+		prompt:    prompt,
+		state:     StatePending,
+		tokenChan: make(chan string, 100), // Buffer to prevent blocking scheduler
 	}
 }
 
@@ -56,7 +60,26 @@ func (s *Sequence) State() SequenceState {
 
 // SetState updates the sequence state.
 func (s *Sequence) SetState(newState SequenceState) {
-	// Simple transition logic for now.
-	// In the future, we might enforce valid transitions (e.g., Finished -> Pending is invalid).
 	s.state = newState
+}
+
+// TokenChan returns the channel for receiving generated tokens.
+func (s *Sequence) TokenChan() <-chan string {
+	return s.tokenChan
+}
+
+// PushToken adds a token to the stream.
+func (s *Sequence) PushToken(token string) {
+	select {
+	case s.tokenChan <- token:
+	default:
+		// Drop token if channel full? Or block?
+		// Blocking scheduler is bad. Drop or expand buffer.
+		// For now, drop implies user is too slow.
+	}
+}
+
+// Close closes the token stream.
+func (s *Sequence) Close() {
+	close(s.tokenChan)
 }
