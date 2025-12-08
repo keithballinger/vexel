@@ -65,8 +65,10 @@ func main() {
 	// Create context with Scratch Arena
 	ctx := memory.NewInferenceContext(tensor.CPU)
 	scratchSize := cfg.ScratchBytes(1) // Batch size 1
-	// Add buffer for overhead
-	ctx.AddArena(memory.Scratch, int(scratchSize * 2))
+	// Add buffer for logits (VocabSize * 4 bytes) plus overhead
+	logitsSize := int64(cfg.VocabSize) * 4
+	totalScratch := scratchSize + logitsSize*2
+	ctx.AddArena(memory.Scratch, int(totalScratch))
 	
 	cache := &kv.KVCache{}
 	

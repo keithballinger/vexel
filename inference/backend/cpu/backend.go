@@ -4,6 +4,7 @@ import (
 	"math"
 	"runtime"
 	"sync"
+
 	"vexel/inference/tensor"
 )
 
@@ -66,10 +67,6 @@ func (b *cpuBackend) Matmul(a, bData, out []float32, m, n, k int) {
 }
 
 // MatmulTransposeB performs C = A * B^T
-// A: [m, k]
-// B: [n, k] (Transposed logic: B_row_j is the j-th row of B, which corresponds to j-th col of B^T)
-// C: [m, n]
-// C[i, j] = sum(A[i, p] * B[j, p])
 func (b *cpuBackend) MatmulTransposeB(a, bData, out []float32, m, n, k int) {
 	for i := range out {
 		out[i] = 0

@@ -26,10 +26,10 @@ type ModelRuntime struct {
 
 // NewModelRuntime initializes a new model runtime.
 func NewModelRuntime(backend cpu.Backend, ctx *memory.InferenceContext, cache *kv.KVCache, config ModelConfig) (*ModelRuntime, error) {
-	// Initialize layers
+	// Initialize layers with config for GQA support
 	layers := make([]*BlockRuntime, config.NumHiddenLayers)
 	for i := range layers {
-		layers[i] = NewBlockRuntime(backend)
+		layers[i] = NewBlockRuntime(backend, config)
 	}
 	
 	return &ModelRuntime{

@@ -2,6 +2,8 @@ package runtime_test
 
 import (
 	"testing"
+	"unsafe"
+
 	"vexel/inference/backend/cpu"
 	"vexel/inference/runtime"
 	"vexel/inference/tensor"
@@ -9,28 +11,37 @@ import (
 
 func TestBlockExecutionWithKV(t *testing.T) {
 	spy := &SpyBackend{Backend: cpu.NewBackend()}
-	block := runtime.NewBlockRuntime(spy)
+	cfg := testConfig()
+	block := runtime.NewBlockRuntime(spy, cfg)
 
-	// Mock Inputs
-	inputShape := tensor.NewShape(1, 4)
-	input := tensor.NewTensor(inputShape, tensor.Float32, tensor.NewDevicePtr(tensor.CPU, 100))
-	scratch := tensor.NewTensor(tensor.NewShape(1000), tensor.Float32, tensor.NewDevicePtr(tensor.CPU, 200))
-	
-	// Execute with sequence length > 1 (implies history)
-	// We need to pass metadata to Execute saying "Current pos is X, Total Seq Len is Y".
-	// Currently Execute signature is `(x, scratch)`.
-	// We need `Execute(x, scratch, kvCache, layerIdx, pos)`.
-	
-	// This test asserts we change the signature (compiler fail) OR we fail to use it.
-	
-	// Let's assume we update Execute to take `RuntimeContext` struct?
-	// Or just params.
-	
-	// I'll call with new signature and expect compilation failure, marking the "Red" phase.
-	
-	// block.Execute(input, scratch, nil, 0, 5) 
-	
+	// Setup weight tensors with proper GQA dimensions
+	hiddenSize := cfg.HiddenSize
+	intermediateSize := cfg.IntermediateSize
+	numHeads := cfg.NumAttentionHeads
+	numKVHeads := cfg.NumKeyValueHeads
+	headDim := hiddenSize / numHeads
+	dummyPtr := tensor.NewDevicePtr(tensor.CPU, 123) // Dummy for spy backend
+
+	block.Wq = tensor.NewTensor(tensor.NewShape(numHeads*headDim, hiddenSize), tensor.Float32, dummyPtr)
+	block.Wk = tensor.NewTensor(tensor.NewShape(numKVHeads*headDim, hiddenSize), tensor.Float32, dummyPtr)
+	block.Wv = tensor.NewTensor(tensor.NewShape(numKVHeads*headDim, hiddenSize), tensor.Float32, dummyPtr)
+	block.Wo = tensor.NewTensor(tensor.NewShape(hiddenSize, numHeads*headDim), tensor.Float32, dummyPtr)
+	block.W1 = tensor.NewTensor(tensor.NewShape(intermediateSize, hiddenSize), tensor.Float32, dummyPtr)
+	block.W2 = tensor.NewTensor(tensor.NewShape(hiddenSize, intermediateSize), tensor.Float32, dummyPtr)
+	block.W3 = tensor.NewTensor(tensor.NewShape(intermediateSize, hiddenSize), tensor.Float32, dummyPtr)
+	block.AttnNorm = tensor.NewTensor(tensor.NewShape(hiddenSize), tensor.Float32, dummyPtr)
+	block.FFNNorm = tensor.NewTensor(tensor.NewShape(hiddenSize), tensor.Float32, dummyPtr)
+
+	// Allocate real memory for input and scratch
+	inputData := make([]float32, hiddenSize)
+	inputAddr := uintptr(unsafe.Pointer(&inputData[0]))
+	inputShape := tensor.NewShape(1, hiddenSize)
+	input := tensor.NewTensor(inputShape, tensor.Float32, tensor.NewDevicePtr(tensor.CPU, inputAddr))
+
+	scratchData := make([]float32, 8192)
+	scratchAddr := uintptr(unsafe.Pointer(&scratchData[0]))
+	scratch := tensor.NewTensor(tensor.NewShape(8192), tensor.Float32, tensor.NewDevicePtr(tensor.CPU, scratchAddr))
+
 	// Execute with KV params (kvCache=nil for test, layer=0, pos=10)
-	// Expectation: Execute signature should support this.
 	block.Execute(input, scratch, nil, 0, 10)
 }

@@ -49,7 +49,6 @@ func (a *Arena) Alloc(size int) (tensor.DevicePtr, error) {
 
 	addr := a.basePtr + uintptr(a.offset)
 	a.offset += size
-
 	return tensor.NewDevicePtr(a.loc, addr), nil
 }
 

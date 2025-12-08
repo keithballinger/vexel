@@ -52,19 +52,40 @@ func (s *SpyBackend) Device() tensor.Device { return tensor.NewDevice(tensor.CPU
 
 func TestBlockExecution(t *testing.T) {
 	spy := &SpyBackend{Backend: cpu.NewBackend()}
-	block := runtime.NewBlockRuntime(spy)
+	cfg := testConfig()
+	block := runtime.NewBlockRuntime(spy, cfg)
 
-	// Mock input (Real memory)
-	data := make([]float32, 4)
-	addr := uintptr(unsafe.Pointer(&data[0]))
-	
-	inputShape := tensor.NewShape(1, 4)
-	input := tensor.NewTensor(inputShape, tensor.Float32, tensor.NewDevicePtr(tensor.CPU, addr))
-	
-	scratchData := make([]float32, 100) // Big enough
+	// Initialize weights to trigger execution paths
+	// Weight shapes must match config dimensions for GQA
+	dummyPtr := tensor.NewDevicePtr(tensor.CPU, 123)
+	hiddenSize := cfg.HiddenSize
+	intermediateSize := cfg.IntermediateSize
+	numHeads := cfg.NumAttentionHeads
+	numKVHeads := cfg.NumKeyValueHeads
+	headDim := hiddenSize / numHeads
+
+	// Q: [numHeads*headDim, hiddenSize] = [32, 32]
+	// K,V: [numKVHeads*headDim, hiddenSize] = [16, 32] for GQA
+	block.Wq = tensor.NewTensor(tensor.NewShape(numHeads*headDim, hiddenSize), tensor.Float32, dummyPtr)
+	block.Wk = tensor.NewTensor(tensor.NewShape(numKVHeads*headDim, hiddenSize), tensor.Float32, dummyPtr)
+	block.Wv = tensor.NewTensor(tensor.NewShape(numKVHeads*headDim, hiddenSize), tensor.Float32, dummyPtr)
+	block.Wo = tensor.NewTensor(tensor.NewShape(hiddenSize, numHeads*headDim), tensor.Float32, dummyPtr)
+	block.W1 = tensor.NewTensor(tensor.NewShape(intermediateSize, hiddenSize), tensor.Float32, dummyPtr)
+	block.W2 = tensor.NewTensor(tensor.NewShape(hiddenSize, intermediateSize), tensor.Float32, dummyPtr)
+	block.W3 = tensor.NewTensor(tensor.NewShape(intermediateSize, hiddenSize), tensor.Float32, dummyPtr)
+	block.AttnNorm = tensor.NewTensor(tensor.NewShape(hiddenSize), tensor.Float32, dummyPtr)
+	block.FFNNorm = tensor.NewTensor(tensor.NewShape(hiddenSize), tensor.Float32, dummyPtr)
+
+	// Mock Input with real memory
+	inputData := make([]float32, hiddenSize)
+	inputAddr := uintptr(unsafe.Pointer(&inputData[0]))
+	inputShape := tensor.NewShape(1, hiddenSize) // Batch=1, Hidden=32
+	input := tensor.NewTensor(inputShape, tensor.Float32, tensor.NewDevicePtr(tensor.CPU, inputAddr))
+
+	// Allocate larger scratch for GQA buffers
+	scratchData := make([]float32, 8192) // Big enough
 	scratchAddr := uintptr(unsafe.Pointer(&scratchData[0]))
-	// Fix shape to match allocation
-	scratchShape := tensor.NewShape(100)
+	scratchShape := tensor.NewShape(8192)
 	scratch := tensor.NewTensor(scratchShape, tensor.Float32, tensor.NewDevicePtr(tensor.CPU, scratchAddr))
 	
 	// Execute

@@ -113,14 +113,39 @@ func (c ModelConfig) KVBytes(activeSequences int, contextLen int, profile tensor
 
 // ScratchBytes calculates the peak scratch memory required for a given batch size.
 func (c ModelConfig) ScratchBytes(maxBatchSize int) int64 {
-	logits := int64(maxBatchSize) * int64(c.VocabSize)
-	mlp := int64(maxBatchSize) * int64(c.IntermediateSize)
-	bytesPerElem := int64(2)
-	
-	if logits > mlp {
-		return logits * bytesPerElem
+	// Guard against uninitialized config
+	if c.NumAttentionHeads == 0 {
+		return 0
 	}
-	return mlp * bytesPerElem
+
+	// Calculate GQA-aware sizes
+	headDim := int64(c.HiddenSize) / int64(c.NumAttentionHeads)
+	qSize := int64(maxBatchSize) * int64(c.NumAttentionHeads) * headDim     // Q buffer
+	kvSize := int64(maxBatchSize) * int64(c.NumKeyValueHeads) * headDim     // K and V buffers (each)
+
+	// Scratch layout for BlockRuntime.Execute:
+	// [normOut][Q][K][V][attnOut][scores][gate][up]
+	// All buffers are allocated at once (no reuse during execution)
+	normOut := int64(maxBatchSize) * int64(c.HiddenSize)
+	attnOut := qSize                                                         // Same size as Q
+	scores := int64(maxBatchSize) * int64(maxBatchSize)                      // seqLen x seqLen per head (reused)
+	gate := int64(maxBatchSize) * int64(c.IntermediateSize)
+	up := int64(maxBatchSize) * int64(c.IntermediateSize)
+
+	// Total scratch needed for BlockRuntime.Execute
+	blockScratch := normOut + qSize + kvSize + kvSize + attnOut + scores + gate + up
+
+	// Logits calculation needs separate buffer (in DecodeStep)
+	logits := int64(maxBatchSize) * int64(c.VocabSize)
+
+	// Take max (usually block scratch is larger for small batch sizes)
+	peak := blockScratch
+	if logits > peak {
+		peak = logits
+	}
+
+	bytesPerElem := int64(4) // Float32
+	return peak * bytesPerElem
 }
 
 // MemoryPlan aggregates memory usage estimates into a comprehensive plan.
