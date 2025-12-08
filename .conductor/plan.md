@@ -162,8 +162,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement `Tokenizer` (BPE/SentencePiece support from `tokenizer.json`). (Started: 2025-12-07 23:55, Completed: 2025-12-08 00:00)
 - [x] Write Failing Tests: For `mmap` based weight loading. (Started: 2025-12-08 00:00, Completed: 2025-12-08 00:05)
 - [x] Implement Feature: Implement `mmap` loading in `safetensors` package. (Started: 2025-12-08 00:05, Completed: 2025-12-08 00:10)
-- [ ] Write Failing Tests: For `BlockRuntime` actually invoking kernels.
-- [ ] Implement Feature: Wire `BlockRuntime` to call backend kernels (`Matmul`, `RoPE`, etc).
+- [x] Write Failing Tests: For `BlockRuntime` actually invoking kernels. (Started: 2025-12-08 00:10, Completed: 2025-12-08 00:15)
+- [x] Implement Feature: Wire `BlockRuntime` to call backend kernels (`Matmul`, `RoPE`, etc). (Started: 2025-12-08 00:15, Completed: 2025-12-08 00:20)
 - [ ] Write Failing Tests: For Sampling strategy (Argmax).
 - [ ] Implement Feature: Implement `Sampler` and wire to Scheduler.
 

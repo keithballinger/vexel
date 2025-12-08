@@ -10,14 +10,14 @@ Phase 5: Integration, Testing, and Documentation (Real Inference)
 Task: Real Inference Support
 
 ## Progress
-- [x] Write Failing Tests: For `mmap` based weight loading.
-- [x] Implement Feature: Implement `mmap` loading in `safetensors` package.
+- [x] Wire `BlockRuntime` to backend kernels.
 
 ## Next Action
-Write Failing Tests: For `BlockRuntime` actually invoking kernels.
+Write Failing Tests: For Sampling strategy (Argmax).
 
 ## Blockers
 None
 
 ## Notes
-- `mmap` support added to `safetensors` package. This allows us to load huge files (like the 2.2GB model) without reading them entirely into RAM (letting OS manage paging).
+- Inference pipeline is logically complete (DecodeStep -> Layers -> Kernels).
+- Need Sampler to convert logits to tokens.

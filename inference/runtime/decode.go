@@ -22,10 +22,22 @@ func (m *ModelRuntime) DecodeStep(inputs BatchRuntimeInputs) (tensor.Tensor, err
 		tensor.NewDevicePtr(tensor.CPU, 0),
 	)
 	
+	// Create scratch buffer
+	// Usually allocated from Arena. For now, mock it.
+	scratchSize := m.config.ScratchBytes(batchSize)
+	// We need shape? Scratch is byte blob usually. But Kernels expect []float32.
+	// Let's create a big float32 tensor for scratch.
+	scratchElements := int(scratchSize / 2)
+	scratch := tensor.NewTensor(
+		tensor.NewShape(scratchElements),
+		m.config.DType,
+		tensor.NewDevicePtr(tensor.CPU, 0),
+	)
+	
 	// 3. Layer Loop
 	for _, layer := range m.layers {
 		var err error
-		state, err = layer.Execute(state)
+		state, err = layer.Execute(state, scratch)
 		if err != nil {
 			return tensor.Tensor{}, err
 		}
