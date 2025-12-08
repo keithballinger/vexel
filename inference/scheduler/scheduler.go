@@ -12,8 +12,10 @@ import (
 
 // Config holds configuration for the scheduler.
 type Config struct {
-	MaxBatchSize int
-	MaxSequences int
+	MaxBatchSize  int
+	MaxSequences  int
+	MaxTokens     int            // Max tokens to generate per sequence (0 = unlimited)
+	SamplerConfig sampler.Config // Sampling parameters
 }
 
 // SchedulerMetrics holds performance indicators.
@@ -27,6 +29,7 @@ type SchedulerMetrics struct {
 type Scheduler struct {
 	runtime   *runtime.ModelRuntime
 	tokenizer *tokenizer.Tokenizer
+	sampler   *sampler.Sampler
 	config    Config
 	sequences map[SequenceID]*Sequence
 	metrics   SchedulerMetrics
@@ -37,10 +40,14 @@ func NewScheduler(rt *runtime.ModelRuntime, tok *tokenizer.Tokenizer, config Con
 	if rt == nil {
 		return nil, fmt.Errorf("runtime cannot be nil")
 	}
-	
+
+	// Create sampler with config (use time-based seed for randomness)
+	s := sampler.New(config.SamplerConfig, time.Now().UnixNano())
+
 	return &Scheduler{
 		runtime:   rt,
 		tokenizer: tok,
+		sampler:   s,
 		config:    config,
 		sequences: make(map[SequenceID]*Sequence),
 	}, nil
@@ -198,11 +205,29 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 
 		seqLogits := logitsData[start:end]
 
-		// Sample
-		tokenID := sampler.Argmax(seqLogits)
+		// Sample using configured sampler
+		tokenID := s.sampler.Sample(seqLogits)
 
 		// Track the generated token
 		seq.AddGeneratedToken(tokenID)
+
+		// Check for EOS token
+		eosToken := 2 // Default Llama EOS
+		if s.tokenizer != nil {
+			eosToken = s.tokenizer.EOS()
+		}
+		if tokenID == eosToken {
+			seq.SetState(StateFinished)
+			seq.Close()
+			continue
+		}
+
+		// Check for max tokens
+		if s.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= s.config.MaxTokens {
+			seq.SetState(StateFinished)
+			seq.Close()
+			continue
+		}
 
 		// Decode
 		// If tokenizer is nil (e.g. benchmark/test), push ID as string

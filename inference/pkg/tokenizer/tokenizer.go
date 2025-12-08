@@ -10,6 +10,8 @@ import (
 type Tokenizer struct {
 	vocab map[string]int
 	ids   map[int]string
+	bos   int // Beginning of sequence token
+	eos   int // End of sequence token
 }
 
 // Load loads a tokenizer from a file (tokenizer.json).
@@ -28,6 +30,10 @@ func Load(path string) (*Tokenizer, error) {
 		Model struct {
 			Vocab map[string]int `json:"vocab"`
 		} `json:"model"`
+		AddedTokens []struct {
+			ID      int    `json:"id"`
+			Content string `json:"content"`
+		} `json:"added_tokens"`
 	}
 
 	if err := json.NewDecoder(f).Decode(&data); err != nil {
@@ -39,9 +45,25 @@ func Load(path string) (*Tokenizer, error) {
 		ids[v] = k
 	}
 
+	// Default special token IDs (Llama convention)
+	bos := 1
+	eos := 2
+
+	// Try to find special tokens in added_tokens
+	for _, tok := range data.AddedTokens {
+		switch tok.Content {
+		case "<s>":
+			bos = tok.ID
+		case "</s>":
+			eos = tok.ID
+		}
+	}
+
 	return &Tokenizer{
 		vocab: data.Model.Vocab,
 		ids:   ids,
+		bos:   bos,
+		eos:   eos,
 	}, nil
 }
 
@@ -76,4 +98,14 @@ func (t *Tokenizer) Decode(ids []int) (string, error) {
 		}
 	}
 	return out, nil
+}
+
+// BOS returns the beginning-of-sequence token ID.
+func (t *Tokenizer) BOS() int {
+	return t.bos
+}
+
+// EOS returns the end-of-sequence token ID.
+func (t *Tokenizer) EOS() int {
+	return t.eos
 }

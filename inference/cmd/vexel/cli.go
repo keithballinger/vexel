@@ -11,6 +11,7 @@ import (
 	"vexel/inference/backend/cpu"
 	"vexel/inference/cmd/vexel/internal"
 	"vexel/inference/memory"
+	"vexel/inference/pkg/sampler"
 	"vexel/inference/pkg/tokenizer"
 	"vexel/inference/runtime"
 	"vexel/inference/scheduler"
@@ -19,6 +20,10 @@ import (
 
 func main() {
 	modelDir := flag.String("model", "models", "Directory containing model files")
+	temperature := flag.Float64("temp", 0.7, "Sampling temperature (0 = greedy)")
+	topK := flag.Int("top-k", 40, "Top-K sampling (0 = disabled)")
+	topP := flag.Float64("top-p", 0.9, "Top-P nucleus sampling (0 = disabled)")
+	maxTokens := flag.Int("max-tokens", 256, "Maximum tokens to generate per response")
 	flag.Parse()
 
 	fmt.Println("Vexel Inference Engine - Interactive Mode")
@@ -87,8 +92,19 @@ func main() {
 	fmt.Println("Model loaded.")
 
 	// 5. Start Scheduler
-	schedCfg := scheduler.Config{MaxBatchSize: 1, MaxSequences: 1}
+	schedCfg := scheduler.Config{
+		MaxBatchSize: 1,
+		MaxSequences: 1,
+		MaxTokens:    *maxTokens,
+		SamplerConfig: sampler.Config{
+			Temperature: float32(*temperature),
+			TopK:        *topK,
+			TopP:        float32(*topP),
+		},
+	}
 	sched, _ := scheduler.NewScheduler(rt, tok, schedCfg)
+	fmt.Printf("Sampling: temp=%.2f, top-k=%d, top-p=%.2f, max-tokens=%d\n",
+		*temperature, *topK, *topP, *maxTokens)
 
 	// 6. Run Scheduler
 	go func() {
