@@ -68,11 +68,15 @@ func main() {
 	
 	// Create context with Scratch Arena
 	ctx := memory.NewInferenceContext(tensor.CPU)
-	scratchSize := cfg.ScratchBytes(1) // Batch size 1
-	// Add buffer for logits (VocabSize * 4 bytes) plus overhead
+	// Allocate scratch for batched prefill (up to 256 tokens at once)
+	maxPrefillTokens := 256
+	scratchSize := cfg.ScratchBytes(maxPrefillTokens)
+	// Add buffer for logits (VocabSize * 4 bytes) plus attention scores (seqLen^2)
 	logitsSize := int64(cfg.VocabSize) * 4
-	totalScratch := scratchSize + logitsSize*2
+	attnScoresSize := int64(maxPrefillTokens * maxPrefillTokens * 4)
+	totalScratch := scratchSize + logitsSize*2 + attnScoresSize
 	ctx.AddArena(memory.Scratch, int(totalScratch))
+	fmt.Printf("Scratch arena: %d MB (supports up to %d token prefill)\n", totalScratch/(1024*1024), maxPrefillTokens)
 	
 	rt, err := runtime.NewModelRuntime(backend, ctx, nil, cfg)
 	if err != nil {
