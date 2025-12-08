@@ -171,8 +171,15 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 ### Task: Interactive Chat CLI
 - [x] Write Failing Tests: For Sequence token streaming channel. (Started: 2025-12-08 00:40, Completed: 2025-12-08 00:45)
 - [x] Implement Feature: Add `TokenChan` to `Sequence` and update `Scheduler` to push tokens. (Started: 2025-12-08 00:45, Completed: 2025-12-08 00:50)
-- [ ] Write Failing Tests: For Interactive CLI loop (mocked stdin).
-- [ ] Implement Feature: Update `cli.go` to support interactive chat loop.
+- [x] Write Failing Tests: For Interactive CLI loop (mocked stdin). (Started: 2025-12-08 00:50, Completed: 2025-12-08 00:55)
+- [~] Implement Feature: Update `cli.go` to support interactive chat loop. (Started: 2025-12-08 00:55)
+
+### Task: Real Inference Support (Data Path)
+- [x] Write Failing Tests: For verifying weight data is populated from safetensors. (Started: 2025-12-08 00:55, Completed: 2025-12-08 01:00)
+- [x] Implement Feature: Map safetensors offsets to `BlockRuntime` tensors. (Started: 2025-12-08 01:00, Completed: 2025-12-08 01:05)
+- [ ] Write Failing Tests: For Embedding lookup kernel.
+- [ ] Implement Feature: Implement `Embedding` kernel.
+- [ ] Implement Feature: Optimize CPU Matmul (Parallelize).
 
 ### Task: Documentation and Code Quality Refinement
 - [ ] Implement Feature: Add comprehensive GoDoc comments for all public types, functions, and methods.

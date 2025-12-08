@@ -4,6 +4,7 @@ import (
 	"vexel/inference/backend/cpu"
 	"vexel/inference/kv"
 	"vexel/inference/memory"
+	"vexel/inference/tensor"
 )
 
 // ModelRuntime manages the execution of a model.
@@ -13,6 +14,14 @@ type ModelRuntime struct {
 	cache   *kv.KVCache
 	config  ModelConfig
 	layers  []*BlockRuntime
+	
+	// Global weights
+	Embedding  tensor.Tensor
+	FinalNorm  tensor.Tensor
+	OutputHead tensor.Tensor
+	
+	// Keep mapped file alive
+	mappedFile interface{ Close() error }
 }
 
 // NewModelRuntime initializes a new model runtime.
@@ -35,4 +44,12 @@ func NewModelRuntime(backend cpu.Backend, ctx *memory.InferenceContext, cache *k
 // Config returns the model configuration.
 func (m *ModelRuntime) Config() ModelConfig {
 	return m.config
+}
+
+// Layer returns the block runtime at the given index.
+func (m *ModelRuntime) Layer(i int) *BlockRuntime {
+	if i < 0 || i >= len(m.layers) {
+		return nil
+	}
+	return m.layers[i]
 }

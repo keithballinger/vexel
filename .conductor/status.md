@@ -7,19 +7,18 @@
 Phase 5: Integration, Testing, and Documentation (Real Inference)
 
 ## Current Task
-Task: Documentation and Code Quality Refinement
+Task: Real Inference Support (Data Path)
 
 ## Progress
-- [x] Wire Sampler to Scheduler.
+- [x] Implement `mmap` safetensors.
+- [x] Implement BF16->FP32 conversion.
+- [x] Implement `LoadWeights` mapping to blocks.
 
 ## Next Action
-Refine documentation.
+Write Failing Tests: For Embedding lookup kernel.
 
 ## Blockers
 None
 
 ## Notes
-- "Real Inference" support is structured.
-- Benchmarking tool runs.
-- `TinyLlama` loading verified.
-- Kernels (CPU) implemented.
+- Weights are now effectively loaded into RAM as F32.
