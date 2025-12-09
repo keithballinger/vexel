@@ -3,7 +3,7 @@
 package metal
 
 /*
-#cgo CFLAGS: -x objective-c -I${SRCDIR}/cgo
+#cgo CFLAGS: -x objective-c
 #cgo LDFLAGS: -framework Metal -framework Foundation -framework MetalPerformanceShaders
 #include "metal_bridge.h"
 */
@@ -23,13 +23,16 @@ type Backend struct {
 	deviceID int
 
 	// Cached pipeline states
-	matmulPipeline  unsafe.Pointer
-	softmaxPipeline unsafe.Pointer
-	rmsnormPipeline unsafe.Pointer
-	ropePipeline    unsafe.Pointer
-	siluPipeline    unsafe.Pointer
-	addPipeline     unsafe.Pointer
-	mulPipeline     unsafe.Pointer
+	matmulPipeline      unsafe.Pointer
+	softmaxPipeline     unsafe.Pointer
+	rmsnormPipeline     unsafe.Pointer
+	ropePipeline        unsafe.Pointer
+	ropeGQAPipeline     unsafe.Pointer
+	siluPipeline        unsafe.Pointer
+	addPipeline         unsafe.Pointer
+	mulPipeline         unsafe.Pointer
+	sdpaDecodePipeline  unsafe.Pointer
+	sdpaPrefillPipeline unsafe.Pointer
 }
 
 // NewBackend creates a new Metal backend.
@@ -58,9 +61,12 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.softmaxPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("softmax_f32"))
 	b.rmsnormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_f32"))
 	b.ropePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_f32"))
+	b.ropeGQAPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_gqa_f32"))
 	b.siluPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_f32"))
 	b.addPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_f32"))
 	b.mulPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("mul_f32"))
+	b.sdpaDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_gqa_f32"))
+	b.sdpaPrefillPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_prefill_f32"))
 
 	return b, nil
 }
@@ -172,14 +178,32 @@ func (b *Backend) Embedding(tokens []int, table, out unsafe.Pointer, vocabSize, 
 		C.int(len(tokens)), C.int(vocabSize), C.int(dim))
 }
 
-// ScaledDotProductAttention performs attention computation.
+// SDPADecode performs scaled dot-product attention for decode (single query token).
+// Q: [numQHeads, headDim] - single query token
+// K: [kvLen, numKVHeads, headDim] - key cache
+// V: [kvLen, numKVHeads, headDim] - value cache
+// out: [numQHeads, headDim] - output
+func (b *Backend) SDPADecode(q, k, v, out unsafe.Pointer,
+	kvLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	C.metal_sdpa_decode_f32(b.queue, b.sdpaDecodePipeline, q, k, v, out,
+		C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale))
+}
+
+// SDPAPrefill performs scaled dot-product attention for prefill with causal masking.
+// Q: [seqLen, numQHeads, headDim]
+// K: [seqLen, numKVHeads, headDim]
+// V: [seqLen, numKVHeads, headDim]
+// out: [seqLen, numQHeads, headDim]
+func (b *Backend) SDPAPrefill(q, k, v, out unsafe.Pointer,
+	seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	C.metal_sdpa_prefill_f32(b.queue, b.sdpaPrefillPipeline, q, k, v, out,
+		C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale))
+}
+
+// ScaledDotProductAttention is deprecated, use SDPADecode or SDPAPrefill instead.
 func (b *Backend) ScaledDotProductAttention(q, k, v, out unsafe.Pointer,
 	batchSize, numHeads, seqLen, headDim int, scale float32, causal bool) {
-	causalInt := 0
-	if causal {
-		causalInt = 1
-	}
-	C.metal_scaled_dot_product_attention(b.queue, q, k, v, out,
-		C.int(batchSize), C.int(numHeads), C.int(seqLen), C.int(headDim),
-		C.float(scale), C.int(causalInt))
+	// Legacy interface - does nothing
 }

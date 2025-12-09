@@ -63,7 +63,9 @@ kernel void rmsnorm_f32(
     out[gid] = val * rms * weight[col];
 }
 
-// RoPE - Rotary Position Encoding
+// RoPE - Rotary Position Encoding (paired-element layout)
+// Data layout: [seqLen, numHeads, headDim]
+// Rotation pairs: (dim[j], dim[j + headDim/2]) for j in 0..headDim/2
 kernel void rope_f32(
     device float* q [[buffer(0)]],
     device float* k [[buffer(1)]],
@@ -74,32 +76,91 @@ kernel void rope_f32(
     constant float& theta [[buffer(6)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
-    int head = gid.y;
     int pos = gid.x;
+    int head = gid.y;
 
     if (pos >= seqLen || head >= numHeads) return;
 
     int absPos = startPos + pos;
+    int halfDim = headDim / 2;
 
-    for (int i = 0; i < headDim / 2; i++) {
-        float freq = 1.0f / pow(theta, float(2 * i) / float(headDim));
+    // Base offset for this position and head
+    // Layout: [seqLen, numHeads, headDim]
+    int offset = (pos * numHeads + head) * headDim;
+
+    for (int j = 0; j < halfDim; j++) {
+        // Frequency for this dimension pair
+        float freq = 1.0f / pow(theta, float(2 * j) / float(headDim));
         float angle = float(absPos) * freq;
         float cos_val = cos(angle);
         float sin_val = sin(angle);
 
-        int idx = (pos * numHeads + head) * headDim + i * 2;
-
-        // Apply to Q
-        float q0 = q[idx];
-        float q1 = q[idx + 1];
-        q[idx] = q0 * cos_val - q1 * sin_val;
-        q[idx + 1] = q0 * sin_val + q1 * cos_val;
+        // Apply rotation to Q using paired elements (j and j+halfDim)
+        float q0 = q[offset + j];
+        float q1 = q[offset + j + halfDim];
+        q[offset + j] = q0 * cos_val - q1 * sin_val;
+        q[offset + j + halfDim] = q0 * sin_val + q1 * cos_val;
 
         // Apply to K
-        float k0 = k[idx];
-        float k1 = k[idx + 1];
-        k[idx] = k0 * cos_val - k1 * sin_val;
-        k[idx + 1] = k0 * sin_val + k1 * cos_val;
+        float k0 = k[offset + j];
+        float k1 = k[offset + j + halfDim];
+        k[offset + j] = k0 * cos_val - k1 * sin_val;
+        k[offset + j + halfDim] = k0 * sin_val + k1 * cos_val;
+    }
+}
+
+// RoPE for GQA - separate Q and K head counts
+// Q layout: [seqLen, numQHeads, headDim]
+// K layout: [seqLen, numKVHeads, headDim]
+kernel void rope_gqa_f32(
+    device float* q [[buffer(0)]],
+    device float* k [[buffer(1)]],
+    constant int& seqLen [[buffer(2)]],
+    constant int& numQHeads [[buffer(3)]],
+    constant int& numKVHeads [[buffer(4)]],
+    constant int& headDim [[buffer(5)]],
+    constant int& startPos [[buffer(6)]],
+    constant float& theta [[buffer(7)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    int pos = gid.x;
+    int head = gid.y;
+
+    if (pos >= seqLen) return;
+
+    int absPos = startPos + pos;
+    int halfDim = headDim / 2;
+
+    // Process Q heads
+    if (head < numQHeads) {
+        int qOffset = (pos * numQHeads + head) * headDim;
+        for (int j = 0; j < halfDim; j++) {
+            float freq = 1.0f / pow(theta, float(2 * j) / float(headDim));
+            float angle = float(absPos) * freq;
+            float cos_val = cos(angle);
+            float sin_val = sin(angle);
+
+            float q0 = q[qOffset + j];
+            float q1 = q[qOffset + j + halfDim];
+            q[qOffset + j] = q0 * cos_val - q1 * sin_val;
+            q[qOffset + j + halfDim] = q0 * sin_val + q1 * cos_val;
+        }
+    }
+
+    // Process K heads (fewer due to GQA)
+    if (head < numKVHeads) {
+        int kOffset = (pos * numKVHeads + head) * headDim;
+        for (int j = 0; j < halfDim; j++) {
+            float freq = 1.0f / pow(theta, float(2 * j) / float(headDim));
+            float angle = float(absPos) * freq;
+            float cos_val = cos(angle);
+            float sin_val = sin(angle);
+
+            float k0 = k[kOffset + j];
+            float k1 = k[kOffset + j + halfDim];
+            k[kOffset + j] = k0 * cos_val - k1 * sin_val;
+            k[kOffset + j + halfDim] = k0 * sin_val + k1 * cos_val;
+        }
     }
 }
 
@@ -180,54 +241,148 @@ kernel void embedding_f32(
     out[tokenIdx * dim + elemIdx] = table[token * dim + elemIdx];
 }
 
-// Scaled dot-product attention
-kernel void sdpa_f32(
+// Scaled dot-product attention for GQA decode
+// Q: [numQHeads, headDim] - single query token
+// K: [kvLen, numKVHeads, headDim] - key cache
+// V: [kvLen, numKVHeads, headDim] - value cache
+// out: [numQHeads, headDim] - output
+kernel void sdpa_gqa_f32(
+    device const float* Q [[buffer(0)]],
+    device const float* K [[buffer(1)]],
+    device const float* V [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int& kvLen [[buffer(4)]],
+    constant int& numQHeads [[buffer(5)]],
+    constant int& numKVHeads [[buffer(6)]],
+    constant int& headDim [[buffer(7)]],
+    constant float& scale [[buffer(8)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    int qHead = gid;
+    if (qHead >= numQHeads) return;
+
+    // GQA: map Q head to KV head
+    int headsPerKV = numQHeads / numKVHeads;
+    int kvHead = qHead / headsPerKV;
+
+    // Q head pointer
+    int qOffset = qHead * headDim;
+
+    // Compute attention scores: Q dot K for each KV position
+    // Use thread-local storage (limited to 2048 positions)
+    float scores[2048];
+    float maxScore = -INFINITY;
+
+    for (int pos = 0; pos < kvLen && pos < 2048; pos++) {
+        // K at position pos for this KV head
+        // K layout: [kvLen, numKVHeads, headDim]
+        int kOffset = pos * numKVHeads * headDim + kvHead * headDim;
+
+        float dot = 0.0f;
+        for (int d = 0; d < headDim; d++) {
+            dot += Q[qOffset + d] * K[kOffset + d];
+        }
+        scores[pos] = dot * scale;
+        maxScore = max(maxScore, scores[pos]);
+    }
+
+    // Softmax
+    float sumExp = 0.0f;
+    int effectiveLen = min(kvLen, 2048);
+    for (int pos = 0; pos < effectiveLen; pos++) {
+        scores[pos] = exp(scores[pos] - maxScore);
+        sumExp += scores[pos];
+    }
+    float invSum = 1.0f / sumExp;
+    for (int pos = 0; pos < effectiveLen; pos++) {
+        scores[pos] *= invSum;
+    }
+
+    // Compute weighted sum of V
+    int outOffset = qHead * headDim;
+    for (int d = 0; d < headDim; d++) {
+        float sum = 0.0f;
+        for (int pos = 0; pos < effectiveLen; pos++) {
+            // V layout: [kvLen, numKVHeads, headDim]
+            int vOffset = pos * numKVHeads * headDim + kvHead * headDim;
+            sum += scores[pos] * V[vOffset + d];
+        }
+        out[outOffset + d] = sum;
+    }
+}
+
+// Batched SDPA for prefill with causal masking
+// Q: [seqLen, numQHeads, headDim]
+// K: [seqLen, numKVHeads, headDim]
+// V: [seqLen, numKVHeads, headDim]
+// out: [seqLen, numQHeads, headDim]
+kernel void sdpa_prefill_f32(
     device const float* Q [[buffer(0)]],
     device const float* K [[buffer(1)]],
     device const float* V [[buffer(2)]],
     device float* out [[buffer(3)]],
     constant int& seqLen [[buffer(4)]],
-    constant int& headDim [[buffer(5)]],
-    constant float& scale [[buffer(6)]],
-    constant int& causal [[buffer(7)]],
+    constant int& numQHeads [[buffer(5)]],
+    constant int& numKVHeads [[buffer(6)]],
+    constant int& headDim [[buffer(7)]],
+    constant float& scale [[buffer(8)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
-    int queryPos = gid.y;
-    int dim = gid.x;
+    int qPos = gid.x;
+    int qHead = gid.y;
 
-    if (queryPos >= seqLen || dim >= headDim) return;
+    if (qPos >= seqLen || qHead >= numQHeads) return;
 
-    // Compute attention scores for this query position
-    float scores[512]; // Max sequence length support
+    // GQA mapping
+    int headsPerKV = numQHeads / numKVHeads;
+    int kvHead = qHead / headsPerKV;
+
+    // Q pointer for this position and head
+    // Q layout: [seqLen, numQHeads, headDim]
+    int qOffset = qPos * numQHeads * headDim + qHead * headDim;
+
+    // Causal attention: only attend to positions <= qPos
+    int maxKLen = qPos + 1;
+
+    // Compute attention scores
+    float scores[2048];
     float maxScore = -INFINITY;
 
-    int maxK = causal ? (queryPos + 1) : seqLen;
-    for (int k = 0; k < maxK; k++) {
-        float score = 0.0f;
+    for (int kPos = 0; kPos < maxKLen && kPos < 2048; kPos++) {
+        // K layout: [seqLen, numKVHeads, headDim]
+        int kOffset = kPos * numKVHeads * headDim + kvHead * headDim;
+
+        float dot = 0.0f;
         for (int d = 0; d < headDim; d++) {
-            score += Q[queryPos * headDim + d] * K[k * headDim + d];
+            dot += Q[qOffset + d] * K[kOffset + d];
         }
-        score *= scale;
-        scores[k] = score;
-        maxScore = max(maxScore, score);
+        scores[kPos] = dot * scale;
+        maxScore = max(maxScore, scores[kPos]);
     }
 
     // Softmax
-    float sum = 0.0f;
-    for (int k = 0; k < maxK; k++) {
-        scores[k] = exp(scores[k] - maxScore);
-        sum += scores[k];
+    float sumExp = 0.0f;
+    for (int kPos = 0; kPos < maxKLen; kPos++) {
+        scores[kPos] = exp(scores[kPos] - maxScore);
+        sumExp += scores[kPos];
     }
-    for (int k = 0; k < maxK; k++) {
-        scores[k] /= sum;
+    float invSum = 1.0f / sumExp;
+    for (int kPos = 0; kPos < maxKLen; kPos++) {
+        scores[kPos] *= invSum;
     }
 
-    // Compute weighted sum of values
-    float result = 0.0f;
-    for (int k = 0; k < maxK; k++) {
-        result += scores[k] * V[k * headDim + dim];
+    // Compute weighted sum of V
+    // out layout: [seqLen, numQHeads, headDim]
+    int outOffset = qPos * numQHeads * headDim + qHead * headDim;
+    for (int d = 0; d < headDim; d++) {
+        float sum = 0.0f;
+        for (int kPos = 0; kPos < maxKLen; kPos++) {
+            // V layout: [seqLen, numKVHeads, headDim]
+            int vOffset = kPos * numKVHeads * headDim + kvHead * headDim;
+            sum += scores[kPos] * V[vOffset + d];
+        }
+        out[outOffset + d] = sum;
     }
-    out[queryPos * headDim + dim] = result;
 }
 )";
 
@@ -497,22 +652,77 @@ void metal_embedding_f32(void* queuePtr,
     }
 }
 
+void metal_sdpa_decode_f32(void* queuePtr, void* pipelinePtr,
+                           void* Q, void* K, void* V, void* out,
+                           int kvLen, int numQHeads, int numKVHeads, int headDim,
+                           float scale) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBytes:&kvLen length:sizeof(kvLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+
+    // Dispatch one thread per Q head
+    MTLSize gridSize = MTLSizeMake(numQHeads, 1, 1);
+    MTLSize threadgroupSize = MTLSizeMake(MIN(pipeline.maxTotalThreadsPerThreadgroup, (NSUInteger)numQHeads), 1, 1);
+    MTLSize threadgroups = MTLSizeMake((numQHeads + threadgroupSize.width - 1) / threadgroupSize.width, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadgroupSize];
+    [encoder endEncoding];
+    [cmdBuffer commit];
+    [cmdBuffer waitUntilCompleted];
+}
+
+void metal_sdpa_prefill_f32(void* queuePtr, void* pipelinePtr,
+                            void* Q, void* K, void* V, void* out,
+                            int seqLen, int numQHeads, int numKVHeads, int headDim,
+                            float scale) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBytes:&seqLen length:sizeof(seqLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+
+    // Dispatch [seqLen, numQHeads] grid
+    MTLSize threadgroupSize = MTLSizeMake(MIN(16, (NSUInteger)seqLen), MIN(16, (NSUInteger)numQHeads), 1);
+    MTLSize threadgroups = MTLSizeMake(
+        (seqLen + threadgroupSize.width - 1) / threadgroupSize.width,
+        (numQHeads + threadgroupSize.height - 1) / threadgroupSize.height,
+        1
+    );
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadgroupSize];
+    [encoder endEncoding];
+    [cmdBuffer commit];
+    [cmdBuffer waitUntilCompleted];
+}
+
+// Legacy interface (kept for compatibility)
 void metal_scaled_dot_product_attention(void* queuePtr,
                                         void* Q, void* K, void* V, void* out,
                                         int batchSize, int numHeads, int seqLen, int headDim,
                                         float scale, int causal) {
-    // Use Metal Performance Shaders for optimal attention
-    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
-    id<MTLDevice> device = [queue device];
-
-    // For now, fall back to the kernel-based implementation
-    // A full MPS implementation would use MPSGraph or custom optimized kernels
-
-    id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
-
-    // TODO: Implement efficient attention using MPS
-    // For now, this is a placeholder that processes sequentially
-
-    [cmdBuffer commit];
-    [cmdBuffer waitUntilCompleted];
+    // Deprecated - use metal_sdpa_decode_f32 or metal_sdpa_prefill_f32 instead
 }

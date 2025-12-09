@@ -63,6 +63,21 @@ void metal_embedding_f32(void* queue,
                          int numTokens, int vocabSize, int dim);
 
 // Attention operations
+// SDPA for decode (single query position against KV cache)
+// Q: [numQHeads, headDim], K/V: [kvLen, numKVHeads, headDim]
+void metal_sdpa_decode_f32(void* queue, void* pipeline,
+                           void* Q, void* K, void* V, void* out,
+                           int kvLen, int numQHeads, int numKVHeads, int headDim,
+                           float scale);
+
+// SDPA for prefill (batched with causal masking)
+// Q/K/V: [seqLen, numHeads, headDim]
+void metal_sdpa_prefill_f32(void* queue, void* pipeline,
+                            void* Q, void* K, void* V, void* out,
+                            int seqLen, int numQHeads, int numKVHeads, int headDim,
+                            float scale);
+
+// Legacy interface (deprecated)
 void metal_scaled_dot_product_attention(void* queue,
                                         void* Q, void* K, void* V, void* out,
                                         int batchSize, int numHeads, int seqLen, int headDim,

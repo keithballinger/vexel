@@ -3,7 +3,6 @@
 package metal
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/cgo
 #include "metal_bridge.h"
 */
 import "C"
@@ -24,7 +23,7 @@ func (b *Backend) HostToDevice(dst tensor.DevicePtr, src []byte) error {
 	}
 
 	// Metal uses shared memory, so we can copy directly
-	C.metal_copy_to_buffer(unsafe.Pointer(dst.Address()), unsafe.Pointer(&src[0]), C.size_t(len(src)))
+	C.metal_copy_to_buffer(unsafe.Pointer(dst.Addr()), unsafe.Pointer(&src[0]), C.size_t(len(src)))
 	return nil
 }
 
@@ -37,6 +36,6 @@ func (b *Backend) DeviceToHost(dst []byte, src tensor.DevicePtr) error {
 		return nil
 	}
 
-	C.metal_copy_from_buffer(unsafe.Pointer(&dst[0]), unsafe.Pointer(src.Address()), C.size_t(len(dst)))
+	C.metal_copy_from_buffer(unsafe.Pointer(&dst[0]), unsafe.Pointer(src.Addr()), C.size_t(len(dst)))
 	return nil
 }
