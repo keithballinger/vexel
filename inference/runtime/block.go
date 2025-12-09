@@ -77,8 +77,7 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 	qSize := seqLen * numHeads * headDim
 	kvSize := seqLen * numKVHeads * headDim
 
-	// Calculate byte offsets for scratch regions
-	// Layout: [normOut][Q][K][V][attnOut][gate][up]
+	// Calculate sizes for intermediates
 	normOutBytes := seqLen * hiddenSize * 4
 	qBytes := qSize * 4
 	kvBytes := kvSize * 4
@@ -86,22 +85,39 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 	gateBytes := seqLen * intermediateSize * 4
 	upBytes := seqLen * intermediateSize * 4
 
-	// Create sub-pointers into scratch buffer
-	offset := uintptr(0)
-	normOutPtr := tensor.DevicePtrOffset(scratchPtr, offset)
-	offset += uintptr(normOutBytes)
-	qPtr := tensor.DevicePtrOffset(scratchPtr, offset)
-	offset += uintptr(qBytes)
-	kPtr := tensor.DevicePtrOffset(scratchPtr, offset)
-	offset += uintptr(kvBytes)
-	vPtr := tensor.DevicePtrOffset(scratchPtr, offset)
-	offset += uintptr(kvBytes)
-	attnOutPtr := tensor.DevicePtrOffset(scratchPtr, offset)
-	offset += uintptr(attnOutBytes)
-	gatePtr := tensor.DevicePtrOffset(scratchPtr, offset)
-	offset += uintptr(gateBytes)
-	upPtr := tensor.DevicePtrOffset(scratchPtr, offset)
-	_ = upBytes // Used for allocation
+	// Allocate intermediate buffers
+	// For GPU: allocate separate buffers (Metal doesn't support buffer+offset)
+	// For CPU: use scratch with offsets for better memory locality
+	var normOutPtr, qPtr, kPtr, vPtr, attnOutPtr, gatePtr, upPtr tensor.DevicePtr
+
+	if scratchPtr.Location() == tensor.CPU {
+		// CPU: use offset-based sub-allocation from scratch buffer
+		offset := uintptr(0)
+		normOutPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(normOutBytes)
+		qPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(qBytes)
+		kPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(kvBytes)
+		vPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(kvBytes)
+		attnOutPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(attnOutBytes)
+		gatePtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(gateBytes)
+		upPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		_ = upBytes // Used for allocation
+	} else {
+		// GPU: allocate separate buffers for each intermediate
+		// Metal doesn't support buffer+offset addressing in kernels
+		normOutPtr = b.backend.Alloc(normOutBytes)
+		qPtr = b.backend.Alloc(qBytes)
+		kPtr = b.backend.Alloc(kvBytes)
+		vPtr = b.backend.Alloc(kvBytes)
+		attnOutPtr = b.backend.Alloc(attnOutBytes)
+		gatePtr = b.backend.Alloc(gateBytes)
+		upPtr = b.backend.Alloc(upBytes)
+	}
 
 	// 1. RMSNorm (Attention)
 	if !b.AttnNorm.DevicePtr().IsNil() {

@@ -167,26 +167,11 @@ func (b *Backend) RMSNorm(x, weight, out tensor.DevicePtr, rows, cols int, eps f
 
 // RoPE applies rotary position encoding.
 func (b *Backend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos int, theta float32) {
-	// Use GQA-aware RoPE kernel if Q and K have different head counts
-	if numHeads != numKVHeads && !k.IsNil() {
-		// Need a separate dispatch for K with different head count
-		// For now, use separate calls
-		C.metal_rope_f32(b.queue, b.ropePipeline,
-			unsafe.Pointer(q.Addr()), unsafe.Pointer(q.Addr()), // Q only
-			C.int(1), C.int(seqLen), C.int(numHeads), C.int(headDim),
-			C.int(startPos), C.float(theta))
-		if !k.IsNil() {
-			C.metal_rope_f32(b.queue, b.ropePipeline,
-				unsafe.Pointer(k.Addr()), unsafe.Pointer(k.Addr()), // K only
-				C.int(1), C.int(seqLen), C.int(numKVHeads), C.int(headDim),
-				C.int(startPos), C.float(theta))
-		}
-	} else {
-		C.metal_rope_f32(b.queue, b.ropePipeline,
-			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
-			C.int(1), C.int(seqLen), C.int(numHeads), C.int(headDim),
-			C.int(startPos), C.float(theta))
-	}
+	// Use GQA-aware RoPE kernel which handles Q and K head counts separately
+	C.metal_rope_gqa_f32(b.queue, b.ropeGQAPipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+		C.int(seqLen), C.int(numHeads), C.int(numKVHeads), C.int(headDim),
+		C.int(startPos), C.float(theta))
 }
 
 // Softmax applies softmax row-wise.

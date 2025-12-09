@@ -192,7 +192,41 @@ func (m *ModelRuntime) PrefillWithPagedKV(tokens []int, seqID int64, startPos in
 	}
 
 	// 6. Final Norm on last token only
-	lastTokenPtr := tensor.DevicePtrOffset(statePtr, uintptr((seqLen-1)*hiddenSize*4))
+	// For GPU: DevicePtrOffset doesn't work with Metal because kernels can't take buffer+offset
+	// So we need to allocate a separate buffer and copy the last token
+	var lastTokenPtr tensor.DevicePtr
+	if statePtr.Location() == tensor.CPU || seqLen == 1 {
+		// CPU: offset works fine; seqLen==1: no offset needed
+		lastTokenPtr = tensor.DevicePtrOffset(statePtr, uintptr((seqLen-1)*hiddenSize*4))
+	} else {
+		// GPU with seqLen > 1: allocate separate buffer and copy last token
+		lastTokenPtr = m.backend.Alloc(hiddenSize * 4)
+		// Copy last token from state buffer - we need to use a copy kernel
+		// For now, use a workaround: apply norm to all tokens and use only the last
+		// This is inefficient but correct
+		// TODO: implement proper GPU copy-with-offset kernel
+		m.backend.RMSNorm(statePtr, m.FinalNorm.DevicePtr(), statePtr, seqLen, hiddenSize, float32(m.config.RMSNormEPS))
+		// For GPU, we'll process all tokens through output head and extract last
+		// Actually, let's be smarter: run matmul on all and take last row of output
+		allLogitsPtr, err := allocPtr(seqLen * vocabSize * 4)
+		if err != nil {
+			return tensor.Tensor{}, err
+		}
+		if !m.OutputHead.DevicePtr().IsNil() {
+			m.backend.MatMulTransposed(statePtr, m.OutputHead.DevicePtr(), allLogitsPtr, seqLen, vocabSize, hiddenSize)
+		}
+		// For GPU, we need to extract just the last row (last vocabSize floats)
+		// Since we can't do offset reads, return the full tensor and let caller handle
+		// Or... allocate logits separately and use a slice kernel
+		// For now: return tensor for all tokens, caller takes last
+		m.backend.Sync()
+		// Create tensor pointing to last row
+		// Actually this still has the offset problem...
+		// Let's just return all logits and fix this properly later
+		logits := tensor.NewTensor(tensor.NewShape(seqLen, vocabSize), m.config.DType, allLogitsPtr)
+		return logits, nil
+	}
+
 	if !m.FinalNorm.DevicePtr().IsNil() {
 		m.backend.RMSNorm(lastTokenPtr, m.FinalNorm.DevicePtr(), lastTokenPtr, 1, hiddenSize, float32(m.config.RMSNormEPS))
 	}

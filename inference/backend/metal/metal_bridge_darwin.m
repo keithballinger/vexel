@@ -28,39 +28,33 @@ kernel void matmul_transposed_f32(
     C[gid.y * N + gid.x] = sum;
 }
 
-// RMS Normalization
+// RMS Normalization - one thread per row for correctness
+// TODO: optimize with proper parallel reduction
 kernel void rmsnorm_f32(
     device const float* x [[buffer(0)]],
     device const float* weight [[buffer(1)]],
     device float* out [[buffer(2)]],
     constant int& dim [[buffer(3)]],
     constant float& eps [[buffer(4)]],
-    uint gid [[thread_position_in_grid]],
-    uint tid [[thread_position_in_threadgroup]],
-    uint tgSize [[threads_per_threadgroup]]
+    uint row [[thread_position_in_grid]]
 ) {
-    int row = gid / dim;
-    int col = gid % dim;
+    // Each thread processes one row
+    int base = row * dim;
 
     // Compute sum of squares for this row
-    threadgroup float shared[256];
-
-    float val = x[gid];
-    float sq = val * val;
-
-    // Reduce within threadgroup
-    shared[tid] = sq;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    for (uint s = tgSize / 2; s > 0; s >>= 1) {
-        if (tid < s && tid + s < (uint)dim) {
-            shared[tid] += shared[tid + s];
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+    float sumSq = 0.0f;
+    for (int i = 0; i < dim; i++) {
+        float val = x[base + i];
+        sumSq += val * val;
     }
 
-    float rms = rsqrt(shared[0] / float(dim) + eps);
-    out[gid] = val * rms * weight[col];
+    // Compute RMS
+    float rms = rsqrt(sumSq / float(dim) + eps);
+
+    // Apply normalization and weight
+    for (int i = 0; i < dim; i++) {
+        out[base + i] = x[base + i] * rms * weight[i];
+    }
 }
 
 // RoPE - Rotary Position Encoding (paired-element layout)
@@ -242,6 +236,7 @@ kernel void embedding_f32(
 }
 
 // Scaled dot-product attention for GQA decode
+// Uses two-pass algorithm to avoid large local arrays
 // Q: [numQHeads, headDim] - single query token
 // K: [kvLen, numKVHeads, headDim] - key cache
 // V: [kvLen, numKVHeads, headDim] - value cache
@@ -265,53 +260,54 @@ kernel void sdpa_gqa_f32(
     int headsPerKV = numQHeads / numKVHeads;
     int kvHead = qHead / headsPerKV;
 
-    // Q head pointer
     int qOffset = qHead * headDim;
+    int outOffset = qHead * headDim;
 
-    // Compute attention scores: Q dot K for each KV position
-    // Use thread-local storage (limited to 2048 positions)
-    float scores[2048];
+    // First pass: find max score for numerical stability
     float maxScore = -INFINITY;
-
-    for (int pos = 0; pos < kvLen && pos < 2048; pos++) {
-        // K at position pos for this KV head
-        // K layout: [kvLen, numKVHeads, headDim]
+    for (int pos = 0; pos < kvLen; pos++) {
         int kOffset = pos * numKVHeads * headDim + kvHead * headDim;
-
         float dot = 0.0f;
         for (int d = 0; d < headDim; d++) {
             dot += Q[qOffset + d] * K[kOffset + d];
         }
-        scores[pos] = dot * scale;
-        maxScore = max(maxScore, scores[pos]);
+        maxScore = max(maxScore, dot * scale);
     }
 
-    // Softmax
-    float sumExp = 0.0f;
-    int effectiveLen = min(kvLen, 2048);
-    for (int pos = 0; pos < effectiveLen; pos++) {
-        scores[pos] = exp(scores[pos] - maxScore);
-        sumExp += scores[pos];
-    }
-    float invSum = 1.0f / sumExp;
-    for (int pos = 0; pos < effectiveLen; pos++) {
-        scores[pos] *= invSum;
-    }
-
-    // Compute weighted sum of V
-    int outOffset = qHead * headDim;
+    // Initialize output to zero
     for (int d = 0; d < headDim; d++) {
-        float sum = 0.0f;
-        for (int pos = 0; pos < effectiveLen; pos++) {
-            // V layout: [kvLen, numKVHeads, headDim]
-            int vOffset = pos * numKVHeads * headDim + kvHead * headDim;
-            sum += scores[pos] * V[vOffset + d];
+        out[outOffset + d] = 0.0f;
+    }
+
+    // Second pass: compute softmax and weighted sum
+    float sumExp = 0.0f;
+    for (int pos = 0; pos < kvLen; pos++) {
+        int kOffset = pos * numKVHeads * headDim + kvHead * headDim;
+        int vOffset = pos * numKVHeads * headDim + kvHead * headDim;
+
+        // Recompute score
+        float dot = 0.0f;
+        for (int d = 0; d < headDim; d++) {
+            dot += Q[qOffset + d] * K[kOffset + d];
         }
-        out[outOffset + d] = sum;
+        float weight = exp(dot * scale - maxScore);
+        sumExp += weight;
+
+        // Accumulate weighted V
+        for (int d = 0; d < headDim; d++) {
+            out[outOffset + d] += weight * V[vOffset + d];
+        }
+    }
+
+    // Normalize by sum of exp
+    float invSum = 1.0f / sumExp;
+    for (int d = 0; d < headDim; d++) {
+        out[outOffset + d] *= invSum;
     }
 }
 
 // Batched SDPA for prefill with causal masking
+// Uses two-pass algorithm to avoid large local arrays
 // Q: [seqLen, numQHeads, headDim]
 // K: [seqLen, numKVHeads, headDim]
 // V: [seqLen, numKVHeads, headDim]
@@ -344,11 +340,9 @@ kernel void sdpa_prefill_f32(
     // Causal attention: only attend to positions <= qPos
     int maxKLen = qPos + 1;
 
-    // Compute attention scores
-    float scores[2048];
+    // First pass: find max score for numerical stability
     float maxScore = -INFINITY;
-
-    for (int kPos = 0; kPos < maxKLen && kPos < 2048; kPos++) {
+    for (int kPos = 0; kPos < maxKLen; kPos++) {
         // K layout: [seqLen, numKVHeads, headDim]
         int kOffset = kPos * numKVHeads * headDim + kvHead * headDim;
 
@@ -356,32 +350,41 @@ kernel void sdpa_prefill_f32(
         for (int d = 0; d < headDim; d++) {
             dot += Q[qOffset + d] * K[kOffset + d];
         }
-        scores[kPos] = dot * scale;
-        maxScore = max(maxScore, scores[kPos]);
+        maxScore = max(maxScore, dot * scale);
     }
 
-    // Softmax
-    float sumExp = 0.0f;
-    for (int kPos = 0; kPos < maxKLen; kPos++) {
-        scores[kPos] = exp(scores[kPos] - maxScore);
-        sumExp += scores[kPos];
-    }
-    float invSum = 1.0f / sumExp;
-    for (int kPos = 0; kPos < maxKLen; kPos++) {
-        scores[kPos] *= invSum;
-    }
-
-    // Compute weighted sum of V
     // out layout: [seqLen, numQHeads, headDim]
     int outOffset = qPos * numQHeads * headDim + qHead * headDim;
+
+    // Initialize output to zero
     for (int d = 0; d < headDim; d++) {
-        float sum = 0.0f;
-        for (int kPos = 0; kPos < maxKLen; kPos++) {
-            // V layout: [seqLen, numKVHeads, headDim]
-            int vOffset = kPos * numKVHeads * headDim + kvHead * headDim;
-            sum += scores[kPos] * V[vOffset + d];
+        out[outOffset + d] = 0.0f;
+    }
+
+    // Second pass: compute softmax and weighted sum
+    float sumExp = 0.0f;
+    for (int kPos = 0; kPos < maxKLen; kPos++) {
+        // Recompute K offset and score
+        int kOffset = kPos * numKVHeads * headDim + kvHead * headDim;
+        int vOffset = kPos * numKVHeads * headDim + kvHead * headDim;
+
+        float dot = 0.0f;
+        for (int d = 0; d < headDim; d++) {
+            dot += Q[qOffset + d] * K[kOffset + d];
         }
-        out[outOffset + d] = sum;
+        float weight = exp(dot * scale - maxScore);
+        sumExp += weight;
+
+        // Accumulate weighted V
+        for (int d = 0; d < headDim; d++) {
+            out[outOffset + d] += weight * V[vOffset + d];
+        }
+    }
+
+    // Normalize by sum of exp
+    float invSum = 1.0f / sumExp;
+    for (int d = 0; d < headDim; d++) {
+        out[outOffset + d] *= invSum;
     }
 }
 )";
@@ -552,7 +555,8 @@ void metal_rmsnorm_f32(void* queuePtr, void* pipelinePtr,
         [NSData dataWithBytes:&eps length:sizeof(eps)]
     ];
 
-    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(batchSize * dim, 1, 1));
+    // One thread per row (batchSize rows)
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(batchSize, 1, 1));
 }
 
 void metal_rope_f32(void* queuePtr, void* pipelinePtr,
@@ -575,6 +579,31 @@ void metal_rope_f32(void* queuePtr, void* pipelinePtr,
     ];
 
     dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(seqLen, numHeads, 1));
+}
+
+void metal_rope_gqa_f32(void* queuePtr, void* pipelinePtr,
+                        void* q, void* k,
+                        int seqLen, int numQHeads, int numKVHeads, int headDim,
+                        int startPos, float theta) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)q,
+        (__bridge id<MTLBuffer>)k
+    ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&seqLen length:sizeof(seqLen)],
+        [NSData dataWithBytes:&numQHeads length:sizeof(numQHeads)],
+        [NSData dataWithBytes:&numKVHeads length:sizeof(numKVHeads)],
+        [NSData dataWithBytes:&headDim length:sizeof(headDim)],
+        [NSData dataWithBytes:&startPos length:sizeof(startPos)],
+        [NSData dataWithBytes:&theta length:sizeof(theta)]
+    ];
+
+    // Dispatch with max(numQHeads, numKVHeads) threads per position
+    int maxHeads = numQHeads > numKVHeads ? numQHeads : numKVHeads;
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(seqLen, maxHeads, 1));
 }
 
 void metal_softmax_f32(void* queuePtr, void* pipelinePtr,

@@ -45,6 +45,11 @@ void metal_rope_f32(void* queue, void* pipeline,
                     int batchSize, int seqLen, int numHeads, int headDim,
                     int startPos, float theta);
 
+void metal_rope_gqa_f32(void* queue, void* pipeline,
+                        void* q, void* k,
+                        int seqLen, int numQHeads, int numKVHeads, int headDim,
+                        int startPos, float theta);
+
 void metal_softmax_f32(void* queue, void* pipeline,
                        void* x, void* out,
                        int batchSize, int dim);
