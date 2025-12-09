@@ -4,13 +4,12 @@ import (
 	"testing"
 	"unsafe"
 
-	"vexel/inference/backend/cpu"
 	"vexel/inference/runtime"
 	"vexel/inference/tensor"
 )
 
 func TestBlockExecutionWithKV(t *testing.T) {
-	spy := &SpyBackend{Backend: cpu.NewBackend()}
+	spy := &SpyBackend{}
 	cfg := testConfig()
 	block := runtime.NewBlockRuntime(spy, cfg)
 

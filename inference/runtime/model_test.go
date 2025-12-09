@@ -11,7 +11,7 @@ import (
 
 func TestModelRuntime(t *testing.T) {
 	// Setup dependencies
-	backend := cpu.NewBackend()
+	backend := cpu.NewCPUBackend()
 	loc := tensor.CPU
 	ctx := memory.NewInferenceContext(loc)
 	

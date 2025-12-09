@@ -4,7 +4,6 @@ import (
 	"testing"
 	"unsafe"
 
-	"vexel/inference/backend/cpu"
 	"vexel/inference/runtime"
 	"vexel/inference/tensor"
 )
@@ -16,7 +15,7 @@ import (
 
 func TestSDPA(t *testing.T) {
 	// Setup Spy with GQA-aware config
-	spy := &SpyBackend{Backend: cpu.NewBackend()}
+	spy := &SpyBackend{}
 	cfg := testConfig()
 	block := runtime.NewBlockRuntime(spy, cfg)
 

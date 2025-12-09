@@ -59,7 +59,7 @@ void metal_mul_f32(void* queue, void* pipeline,
                    void* a, void* b, void* out, int n);
 
 void metal_embedding_f32(void* queue,
-                         const int* tokens, void* table, void* out,
+                         void* tokens, void* table, void* out,
                          int numTokens, int vocabSize, int dim);
 
 // Attention operations

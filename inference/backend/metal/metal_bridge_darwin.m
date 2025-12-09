@@ -636,19 +636,22 @@ void metal_mul_f32(void* queuePtr, void* pipelinePtr,
 }
 
 void metal_embedding_f32(void* queuePtr,
-                         const int* tokens, void* table, void* out,
+                         void* tokensPtr, void* tablePtr, void* outPtr,
                          int numTokens, int vocabSize, int dim) {
-    // For embedding, we use MPS or a simple copy
-    // This is a simple CPU fallback for now
-    id<MTLBuffer> tableBuf = (__bridge id<MTLBuffer>)table;
-    id<MTLBuffer> outBuf = (__bridge id<MTLBuffer>)out;
+    // For embedding, we use a simple CPU copy (each buffer is standalone)
+    id<MTLBuffer> tokensBuf = (__bridge id<MTLBuffer>)tokensPtr;
+    id<MTLBuffer> tableBuf = (__bridge id<MTLBuffer>)tablePtr;
+    id<MTLBuffer> outBuf = (__bridge id<MTLBuffer>)outPtr;
 
-    float* tablePtr = (float*)[tableBuf contents];
-    float* outPtr = (float*)[outBuf contents];
+    int32_t* tokensData = (int32_t*)[tokensBuf contents];
+    float* tableData = (float*)[tableBuf contents];
+    float* outData = (float*)[outBuf contents];
 
     for (int t = 0; t < numTokens; t++) {
-        int token = tokens[t];
-        memcpy(outPtr + t * dim, tablePtr + token * dim, dim * sizeof(float));
+        int32_t token = tokensData[t];
+        if (token >= 0 && token < vocabSize) {
+            memcpy(outData + t * dim, tableData + token * dim, dim * sizeof(float));
+        }
     }
 }
 

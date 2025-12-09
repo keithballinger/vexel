@@ -3,9 +3,28 @@
 package metal
 
 import (
+	"encoding/binary"
 	"math"
 	"testing"
 )
+
+// float32ToBytes converts []float32 to []byte
+func float32ToBytes(data []float32) []byte {
+	bytes := make([]byte, len(data)*4)
+	for i, v := range data {
+		binary.LittleEndian.PutUint32(bytes[i*4:], math.Float32bits(v))
+	}
+	return bytes
+}
+
+// bytesToFloat32 converts []byte to []float32
+func bytesToFloat32(data []byte) []float32 {
+	result := make([]float32, len(data)/4)
+	for i := range result {
+		result[i] = math.Float32frombits(binary.LittleEndian.Uint32(data[i*4:]))
+	}
+	return result
+}
 
 func TestBackendCreation(t *testing.T) {
 	b, err := NewBackend(0)
@@ -32,29 +51,30 @@ func TestMatMul(t *testing.T) {
 	M, N, K := 2, 4, 3
 
 	// Input data
-	A := []float32{1, 2, 3, 4, 5, 6}                         // [2,3]
-	B := []float32{1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1}       // [4,3]
-	expected := []float32{1, 2, 3, 6, 4, 5, 6, 15}           // [2,4]
+	A := []float32{1, 2, 3, 4, 5, 6}                   // [2,3]
+	B := []float32{1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1} // [4,3]
+	expected := []float32{1, 2, 3, 6, 4, 5, 6, 15}     // [2,4]
 
-	// Allocate Metal buffers
-	aBuf := b.AllocBuffer(len(A) * 4)
-	bBuf := b.AllocBuffer(len(B) * 4)
-	cBuf := b.AllocBuffer(M * N * 4)
-	defer b.FreeBuffer(aBuf)
-	defer b.FreeBuffer(bBuf)
-	defer b.FreeBuffer(cBuf)
+	// Allocate Metal buffers using new interface
+	aBuf := b.Alloc(len(A) * 4)
+	bBuf := b.Alloc(len(B) * 4)
+	cBuf := b.Alloc(M * N * 4)
+	defer b.Free(aBuf)
+	defer b.Free(bBuf)
+	defer b.Free(cBuf)
 
 	// Copy input data
-	b.CopyToDevice(aBuf, A)
-	b.CopyToDevice(bBuf, B)
+	b.ToDevice(aBuf, float32ToBytes(A))
+	b.ToDevice(bBuf, float32ToBytes(B))
 
 	// Execute matmul
 	b.MatMul(aBuf, bBuf, cBuf, M, N, K)
 	b.Sync()
 
 	// Read result
-	result := make([]float32, M*N)
-	b.CopyFromDevice(result, cBuf)
+	resultBytes := make([]byte, M*N*4)
+	b.ToHost(resultBytes, cBuf)
+	result := bytesToFloat32(resultBytes)
 
 	// Verify
 	for i := range expected {
@@ -76,19 +96,20 @@ func TestSoftmax(t *testing.T) {
 	rows, cols := 1, 4
 
 	// Allocate buffers
-	xBuf := b.AllocBuffer(len(input) * 4)
-	outBuf := b.AllocBuffer(len(input) * 4)
-	defer b.FreeBuffer(xBuf)
-	defer b.FreeBuffer(outBuf)
+	xBuf := b.Alloc(len(input) * 4)
+	outBuf := b.Alloc(len(input) * 4)
+	defer b.Free(xBuf)
+	defer b.Free(outBuf)
 
 	// Copy and execute
-	b.CopyToDevice(xBuf, input)
+	b.ToDevice(xBuf, float32ToBytes(input))
 	b.Softmax(xBuf, outBuf, rows, cols)
 	b.Sync()
 
 	// Read result
-	result := make([]float32, len(input))
-	b.CopyFromDevice(result, outBuf)
+	resultBytes := make([]byte, len(input)*4)
+	b.ToHost(resultBytes, outBuf)
+	result := bytesToFloat32(resultBytes)
 
 	// Verify sum is 1
 	var sum float32
@@ -118,17 +139,18 @@ func TestSiLU(t *testing.T) {
 	input := []float32{-2.0, -1.0, 0.0, 1.0, 2.0}
 	n := len(input)
 
-	xBuf := b.AllocBuffer(n * 4)
-	outBuf := b.AllocBuffer(n * 4)
-	defer b.FreeBuffer(xBuf)
-	defer b.FreeBuffer(outBuf)
+	xBuf := b.Alloc(n * 4)
+	outBuf := b.Alloc(n * 4)
+	defer b.Free(xBuf)
+	defer b.Free(outBuf)
 
-	b.CopyToDevice(xBuf, input)
+	b.ToDevice(xBuf, float32ToBytes(input))
 	b.SiLU(xBuf, outBuf, n)
 	b.Sync()
 
-	result := make([]float32, n)
-	b.CopyFromDevice(result, outBuf)
+	resultBytes := make([]byte, n*4)
+	b.ToHost(resultBytes, outBuf)
+	result := bytesToFloat32(resultBytes)
 
 	// Verify SiLU properties
 	// SiLU(0) = 0
@@ -141,7 +163,7 @@ func TestSiLU(t *testing.T) {
 	}
 }
 
-func TestSDPADecode(t *testing.T) {
+func TestSDPA(t *testing.T) {
 	b, err := NewBackend(0)
 	if err != nil {
 		t.Skipf("Metal backend not available: %v", err)
@@ -165,30 +187,31 @@ func TestSDPADecode(t *testing.T) {
 		0, 0, 1, 0, // Position 2: orthogonal
 	}
 	V := []float32{
-		1, 2, 3, 4, // Value at position 0
-		5, 6, 7, 8, // Value at position 1
+		1, 2, 3, 4,    // Value at position 0
+		5, 6, 7, 8,    // Value at position 1
 		9, 10, 11, 12, // Value at position 2
 	}
 
 	// Allocate buffers
-	qBuf := b.AllocBuffer(len(Q) * 4)
-	kBuf := b.AllocBuffer(len(K) * 4)
-	vBuf := b.AllocBuffer(len(V) * 4)
-	outBuf := b.AllocBuffer(numQHeads * headDim * 4)
-	defer b.FreeBuffer(qBuf)
-	defer b.FreeBuffer(kBuf)
-	defer b.FreeBuffer(vBuf)
-	defer b.FreeBuffer(outBuf)
+	qBuf := b.Alloc(len(Q) * 4)
+	kBuf := b.Alloc(len(K) * 4)
+	vBuf := b.Alloc(len(V) * 4)
+	outBuf := b.Alloc(numQHeads * headDim * 4)
+	defer b.Free(qBuf)
+	defer b.Free(kBuf)
+	defer b.Free(vBuf)
+	defer b.Free(outBuf)
 
-	b.CopyToDevice(qBuf, Q)
-	b.CopyToDevice(kBuf, K)
-	b.CopyToDevice(vBuf, V)
+	b.ToDevice(qBuf, float32ToBytes(Q))
+	b.ToDevice(kBuf, float32ToBytes(K))
+	b.ToDevice(vBuf, float32ToBytes(V))
 
-	b.SDPADecode(qBuf, kBuf, vBuf, outBuf, kvLen, numQHeads, numKVHeads, headDim, scale)
+	b.SDPA(qBuf, kBuf, vBuf, outBuf, kvLen, numQHeads, numKVHeads, headDim, scale)
 	b.Sync()
 
-	result := make([]float32, numQHeads*headDim)
-	b.CopyFromDevice(result, outBuf)
+	resultBytes := make([]byte, numQHeads*headDim*4)
+	b.ToHost(resultBytes, outBuf)
+	result := bytesToFloat32(resultBytes)
 
 	// Since Q matches K[0] perfectly and is orthogonal to K[1,2],
 	// attention should focus mostly on position 0
@@ -211,21 +234,22 @@ func TestAllocFree(t *testing.T) {
 	// Test allocation and free
 	sizes := []int{1024, 1024 * 1024, 16 * 1024 * 1024}
 	for _, size := range sizes {
-		buf := b.AllocBuffer(size)
-		if buf == nil {
+		buf := b.Alloc(size)
+		if buf.IsNil() {
 			t.Errorf("Failed to allocate %d bytes", size)
 			continue
 		}
 		// Test can write and read
 		if size >= 4 {
 			data := []float32{1.0}
-			b.CopyToDevice(buf, data)
-			result := make([]float32, 1)
-			b.CopyFromDevice(result, buf)
+			b.ToDevice(buf, float32ToBytes(data))
+			resultBytes := make([]byte, 4)
+			b.ToHost(resultBytes, buf)
+			result := bytesToFloat32(resultBytes)
 			if result[0] != 1.0 {
 				t.Errorf("Copy roundtrip failed for %d bytes", size)
 			}
 		}
-		b.FreeBuffer(buf)
+		b.Free(buf)
 	}
 }

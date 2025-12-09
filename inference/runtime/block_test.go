@@ -26,7 +26,7 @@ func testConfig() runtime.ModelConfig {
 
 func TestBlockRuntime(t *testing.T) {
 	// Create backend and config
-	b := cpu.NewBackend()
+	b := cpu.NewCPUBackend()
 	cfg := testConfig()
 
 	// Initialize BlockRuntime

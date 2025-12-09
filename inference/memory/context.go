@@ -21,6 +21,12 @@ func (c *InferenceContext) AddArena(kind ArenaKind, size int) {
 	c.arenas[kind] = NewArena(c.loc, size, kind)
 }
 
+// AddArenaWithBackend creates and adds a new arena using a backend allocator.
+// This should be used for GPU arenas to ensure proper GPU memory allocation.
+func (c *InferenceContext) AddArenaWithBackend(kind ArenaKind, size int, alloc AllocFunc) {
+	c.arenas[kind] = NewArenaWithBackend(c.loc, size, kind, alloc)
+}
+
 // GetArena retrieves an arena by kind. Returns nil if not found.
 func (c *InferenceContext) GetArena(kind ArenaKind) *Arena {
 	return c.arenas[kind]

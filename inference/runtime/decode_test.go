@@ -11,7 +11,7 @@ import (
 
 func TestDecodeStepSignature(t *testing.T) {
 	// Setup minimalist environment
-	backend := cpu.NewBackend()
+	backend := cpu.NewCPUBackend()
 	ctx := memory.NewInferenceContext(tensor.CPU)
 	ctx.AddArena(memory.KV, 1024)
 	cache, _ := kv.NewKVCache(ctx, kv.NewKVConfig(tensor.Float16, 64, 16), 1)

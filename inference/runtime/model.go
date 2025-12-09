@@ -1,7 +1,7 @@
 package runtime
 
 import (
-	"vexel/inference/backend/cpu"
+	"vexel/inference/backend"
 	"vexel/inference/kv"
 	"vexel/inference/memory"
 	"vexel/inference/pkg/gguf"
@@ -10,14 +10,14 @@ import (
 
 // ModelRuntime manages the execution of a model.
 type ModelRuntime struct {
-	backend    cpu.Backend
+	backend    backend.Backend
 	ctx        *memory.InferenceContext
-	cache      *kv.KVCache       // Legacy simple cache
-	pagedCache *kv.PagedKVCache  // Production paged cache
+	cache      *kv.KVCache      // Legacy simple cache
+	pagedCache *kv.PagedKVCache // Production paged cache
 	config     ModelConfig
 	layers     []*BlockRuntime
 
-	// Global weights
+	// Global weights (stored as DevicePtr for GPU execution)
 	Embedding  tensor.Tensor
 	FinalNorm  tensor.Tensor
 	OutputHead tensor.Tensor
@@ -33,15 +33,15 @@ type ModelRuntime struct {
 }
 
 // NewModelRuntime initializes a new model runtime.
-func NewModelRuntime(backend cpu.Backend, ctx *memory.InferenceContext, cache *kv.KVCache, config ModelConfig) (*ModelRuntime, error) {
+func NewModelRuntime(b backend.Backend, ctx *memory.InferenceContext, cache *kv.KVCache, config ModelConfig) (*ModelRuntime, error) {
 	// Initialize layers with config for GQA support
 	layers := make([]*BlockRuntime, config.NumHiddenLayers)
 	for i := range layers {
-		layers[i] = NewBlockRuntime(backend, config)
+		layers[i] = NewBlockRuntime(b, config)
 	}
-	
+
 	return &ModelRuntime{
-		backend: backend,
+		backend: b,
 		ctx:     ctx,
 		cache:   cache,
 		config:  config,

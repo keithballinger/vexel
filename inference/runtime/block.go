@@ -1,11 +1,9 @@
 package runtime
 
 import (
-	"fmt"
 	"math"
 
-	"vexel/inference/backend/cpu"
-	"vexel/inference/ir"
+	"vexel/inference/backend"
 	"vexel/inference/kv"
 	"vexel/inference/tensor"
 )
@@ -17,8 +15,7 @@ func sqrt(x float64) float64 {
 
 // BlockRuntime represents a single transformer layer (Attention + MLP).
 type BlockRuntime struct {
-	backend cpu.Backend
-	graph   *ir.BlockIR
+	backend backend.Backend
 
 	// Config (needed for GQA)
 	NumAttentionHeads int
@@ -29,7 +26,7 @@ type BlockRuntime struct {
 	RoPETheta         float64
 	RMSNormEPS        float64
 
-	// Weights
+	// Weights (stored as DevicePtr for GPU execution)
 	AttnNorm   tensor.Tensor
 	Wq, Wk, Wv tensor.Tensor
 	Wo         tensor.Tensor
@@ -39,10 +36,10 @@ type BlockRuntime struct {
 }
 
 // NewBlockRuntime creates a new block runtime with config.
-func NewBlockRuntime(backend cpu.Backend, config ModelConfig) *BlockRuntime {
+func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 	headDim := config.HiddenSize / config.NumAttentionHeads
 	return &BlockRuntime{
-		backend:           backend,
+		backend:           b,
 		NumAttentionHeads: config.NumAttentionHeads,
 		NumKeyValueHeads:  config.NumKeyValueHeads,
 		HeadDim:           headDim,
@@ -53,247 +50,18 @@ func NewBlockRuntime(backend cpu.Backend, config ModelConfig) *BlockRuntime {
 	}
 }
 
-// Execute performs the forward pass for this block.
-// x: Input tensor [Batch*Seq, Hidden]
-// scratch: Temporary buffer
-// kvCache: Pointer to KV cache manager
-// layerIdx: Index of this layer
-// pos: Current token position (for RoPE and Cache)
+// Execute performs the forward pass for this block using DevicePtr operations.
+// All tensors are expected to have valid DevicePtr (allocated on backend device).
+// x: Input tensor [seqLen, Hidden] with DevicePtr
+// scratch: Temporary buffer with DevicePtr (large enough for all intermediates)
+// kvCache: Pointer to KV cache manager (unused in this path, for compatibility)
+// layerIdx: Index of this layer (unused in this path)
+// pos: Current token position (for RoPE)
 func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, layerIdx, pos int) (tensor.Tensor, error) {
-	xData := tensor.ToFloat32Slice(x)
-	scratchData := tensor.ToFloat32Slice(scratch)
+	xPtr := x.DevicePtr()
+	scratchPtr := scratch.DevicePtr()
 
-	if xData == nil || scratchData == nil {
-		return x, nil
-	}
-
-	// Dimensions from config
-	seqLen := x.Shape().NumElements() / b.HiddenSize // Batch*Seq (usually 1 for decode)
-	hiddenSize := b.HiddenSize
-	numHeads := b.NumAttentionHeads
-	numKVHeads := b.NumKeyValueHeads
-	headDim := b.HeadDim
-	intermediateSize := b.IntermediateSize
-
-	// Derived sizes
-	qSize := seqLen * numHeads * headDim     // = seqLen * hiddenSize for standard
-	kvSize := seqLen * numKVHeads * headDim  // Smaller for GQA
-	headsPerKV := numHeads / numKVHeads      // How many Q heads share each KV head
-
-	// Scratch layout:
-	// [normOut][Q][K][V][scores][attnOut][gate][up]
-	offset := 0
-
-	// 1. RMSNorm (Attention)
-	normOut := scratchData[offset : offset+seqLen*hiddenSize]
-	offset += seqLen * hiddenSize
-
-	wNorm := tensor.ToFloat32Slice(b.AttnNorm)
-	if wNorm != nil {
-		b.backend.RMSNorm(xData, wNorm, normOut, seqLen, hiddenSize, float32(b.RMSNormEPS))
-	} else {
-		copy(normOut, xData) // Pass through if no weights
-	}
-
-	// 2. Q/K/V Projections with correct dimensions
-	qOut := scratchData[offset : offset+qSize]
-	offset += qSize
-
-	kOut := scratchData[offset : offset+kvSize]
-	offset += kvSize
-
-	vOut := scratchData[offset : offset+kvSize]
-	offset += kvSize
-
-	// Wq: [numHeads*headDim, hiddenSize] -> Q: [seqLen, numHeads*headDim]
-	if !b.Wq.DevicePtr().IsNil() {
-		wQ := tensor.ToFloat32Slice(b.Wq)
-		qDim := b.Wq.Shape().Dims()[0] // numHeads * headDim
-		b.backend.MatmulTransposeB(normOut, wQ, qOut, seqLen, qDim, hiddenSize)
-	}
-
-	// Wk: [numKVHeads*headDim, hiddenSize] -> K: [seqLen, numKVHeads*headDim]
-	if !b.Wk.DevicePtr().IsNil() {
-		wK := tensor.ToFloat32Slice(b.Wk)
-		kDim := b.Wk.Shape().Dims()[0] // numKVHeads * headDim
-		b.backend.MatmulTransposeB(normOut, wK, kOut, seqLen, kDim, hiddenSize)
-	}
-
-	// Wv: [numKVHeads*headDim, hiddenSize] -> V: [seqLen, numKVHeads*headDim]
-	if !b.Wv.DevicePtr().IsNil() {
-		wV := tensor.ToFloat32Slice(b.Wv)
-		vDim := b.Wv.Shape().Dims()[0] // numKVHeads * headDim
-		b.backend.MatmulTransposeB(normOut, wV, vOut, seqLen, vDim, hiddenSize)
-	}
-
-	// 3. RoPE - Apply to Q and K
-	// Q is [seqLen, numHeads, headDim] flattened
-	// K is [seqLen, numKVHeads, headDim] flattened
-	// RoPE operates on each head vector independently, all heads at same seqPos use same RoPE
-	b.backend.RoPE(qOut, nil, headDim, numHeads, seqLen, pos, float32(b.RoPETheta))
-	b.backend.RoPE(kOut, nil, headDim, numKVHeads, seqLen, pos, float32(b.RoPETheta))
-
-	// 4. Multi-Head Attention with GQA
-	// For each query head, find its corresponding KV head and compute attention
-	// attnOut: [seqLen, numHeads, headDim]
-	attnOut := scratchData[offset : offset+qSize]
-	offset += qSize
-
-	// Per-head attention scores buffer (for single sequence: seqLen x seqLen per head)
-	scoresSize := seqLen * seqLen
-	scores := scratchData[offset : offset+scoresSize]
-	offset += scoresSize
-
-	// Scale factor for attention
-	scale := float32(1.0 / sqrt(float64(headDim)))
-
-	// Process each query head
-	for h := 0; h < numHeads; h++ {
-		// Which KV head does this query head use?
-		kvHead := h / headsPerKV
-
-		// Get pointers to this head's Q, K, V
-		qHead := qOut[h*headDim : (h+1)*headDim]           // [headDim] for seqLen=1
-		kHead := kOut[kvHead*headDim : (kvHead+1)*headDim] // [headDim]
-		vHead := vOut[kvHead*headDim : (kvHead+1)*headDim] // [headDim]
-
-		// For seqLen=1 (decode), attention is just: score = Q dot K, out = score * V
-		// For seqLen>1 (prefill), we need proper matrix attention
-		if seqLen == 1 {
-			// Dot product Q . K
-			var score float32
-			for d := 0; d < headDim; d++ {
-				score += qHead[d] * kHead[d]
-			}
-			score *= scale
-			// Softmax of single element = 1.0
-			// Output = V
-			outHead := attnOut[h*headDim : (h+1)*headDim]
-			for d := 0; d < headDim; d++ {
-				outHead[d] = vHead[d]
-			}
-		} else {
-			// Full attention for prefill: Q [seqLen, headDim], K [seqLen, headDim]
-			// This is more complex - compute QK^T, mask, softmax, multiply by V
-			// For now, simplified version without full causal masking
-			for i := 0; i < seqLen; i++ {
-				qRow := qOut[i*numHeads*headDim+h*headDim : i*numHeads*headDim+(h+1)*headDim]
-				for j := 0; j < seqLen; j++ {
-					kRow := kOut[j*numKVHeads*headDim+kvHead*headDim : j*numKVHeads*headDim+(kvHead+1)*headDim]
-					var dot float32
-					for d := 0; d < headDim; d++ {
-						dot += qRow[d] * kRow[d]
-					}
-					scores[i*seqLen+j] = dot * scale
-				}
-			}
-
-			// Apply causal mask (optional, set future to -inf)
-			for i := 0; i < seqLen; i++ {
-				for j := i + 1; j < seqLen; j++ {
-					scores[i*seqLen+j] = -1e9
-				}
-			}
-
-			// Softmax each row
-			b.backend.Softmax(scores, scores, seqLen, seqLen)
-
-			// Multiply by V: [seqLen, seqLen] x [seqLen, headDim] -> [seqLen, headDim]
-			for i := 0; i < seqLen; i++ {
-				outRow := attnOut[i*numHeads*headDim+h*headDim : i*numHeads*headDim+(h+1)*headDim]
-				for d := 0; d < headDim; d++ {
-					var sum float32
-					for j := 0; j < seqLen; j++ {
-						vVal := vOut[j*numKVHeads*headDim+kvHead*headDim+d]
-						sum += scores[i*seqLen+j] * vVal
-					}
-					outRow[d] = sum
-				}
-			}
-		}
-	}
-
-	// 5. Output Projection: attnOut [seqLen, numHeads*headDim] -> [seqLen, hiddenSize]
-	// Then add residual to x
-	if !b.Wo.DevicePtr().IsNil() {
-		wO := tensor.ToFloat32Slice(b.Wo)
-		oDim := b.Wo.Shape().Dims()[0] // hiddenSize
-		// Project and store in normOut temporarily (we can reuse it)
-		b.backend.MatmulTransposeB(attnOut, wO, normOut, seqLen, oDim, numHeads*headDim)
-		// Add residual: x = x + attn_out
-		for i := 0; i < seqLen*hiddenSize; i++ {
-			xData[i] += normOut[i]
-		}
-	}
-
-	// 6. FFN RMSNorm
-	wFFN := tensor.ToFloat32Slice(b.FFNNorm)
-	if wFFN != nil {
-		b.backend.RMSNorm(xData, wFFN, normOut, seqLen, hiddenSize, float32(b.RMSNormEPS))
-	} else {
-		copy(normOut, xData)
-	}
-
-	// 7. MLP: SwiGLU variant
-	// gate = SiLU(x @ W1^T)
-	// up = x @ W3^T
-	// out = (gate * up) @ W2^T
-
-	// Allocate intermediate buffers
-	gateOut := scratchData[offset : offset+seqLen*intermediateSize]
-	offset += seqLen * intermediateSize
-
-	upOut := scratchData[offset : offset+seqLen*intermediateSize]
-	offset += seqLen * intermediateSize
-
-	// Gate projection
-	if !b.W1.DevicePtr().IsNil() {
-		w1 := tensor.ToFloat32Slice(b.W1)
-		w1Dim := b.W1.Shape().Dims()[0] // intermediateSize
-		b.backend.MatmulTransposeB(normOut, w1, gateOut, seqLen, w1Dim, hiddenSize)
-	}
-
-	// Up projection
-	if !b.W3.DevicePtr().IsNil() {
-		w3 := tensor.ToFloat32Slice(b.W3)
-		w3Dim := b.W3.Shape().Dims()[0] // intermediateSize
-		b.backend.MatmulTransposeB(normOut, w3, upOut, seqLen, w3Dim, hiddenSize)
-	}
-
-	// SiLU on gate, then multiply with up
-	b.backend.SiLU(gateOut, gateOut, seqLen*intermediateSize)
-	for i := 0; i < seqLen*intermediateSize; i++ {
-		gateOut[i] *= upOut[i]
-	}
-
-	// Down projection and residual
-	if !b.W2.DevicePtr().IsNil() {
-		w2 := tensor.ToFloat32Slice(b.W2)
-		w2Dim := b.W2.Shape().Dims()[0] // hiddenSize
-		// Project to hidden size, store in normOut
-		b.backend.MatmulTransposeB(gateOut, w2, normOut, seqLen, w2Dim, intermediateSize)
-		// Add residual
-		for i := 0; i < seqLen*hiddenSize; i++ {
-			xData[i] += normOut[i]
-		}
-	}
-
-	return x, nil
-}
-
-// ExecuteWithPagedKV performs the forward pass using paged KV cache.
-// This is the production path that properly stores and retrieves from the KV cache.
-// x: Input tensor [seqLen, Hidden] (seqLen=1 for decode, seqLen>1 for prefill)
-// scratch: Temporary buffer
-// pagedCache: Paged KV cache manager
-// seqID: Sequence ID for this request
-// layerIdx: Index of this layer
-// startPos: Starting position for RoPE and cache storage (0 for prefill, pos for decode)
-func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *kv.PagedKVCache, seqID int64, layerIdx, startPos int) (tensor.Tensor, error) {
-	xData := tensor.ToFloat32Slice(x)
-	scratchData := tensor.ToFloat32Slice(scratch)
-
-	if xData == nil || scratchData == nil {
+	if xPtr.IsNil() || scratchPtr.IsNil() {
 		return x, nil
 	}
 
@@ -304,209 +72,124 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 	numKVHeads := b.NumKeyValueHeads
 	headDim := b.HeadDim
 	intermediateSize := b.IntermediateSize
-	headsPerKV := numHeads / numKVHeads
 
-	// Derived sizes
+	// Derived sizes (in float32 elements)
 	qSize := seqLen * numHeads * headDim
 	kvSize := seqLen * numKVHeads * headDim
 
-	// Scratch layout
-	offset := 0
+	// Calculate byte offsets for scratch regions
+	// Layout: [normOut][Q][K][V][attnOut][gate][up]
+	normOutBytes := seqLen * hiddenSize * 4
+	qBytes := qSize * 4
+	kvBytes := kvSize * 4
+	attnOutBytes := qSize * 4
+	gateBytes := seqLen * intermediateSize * 4
+	upBytes := seqLen * intermediateSize * 4
+
+	// Create sub-pointers into scratch buffer
+	offset := uintptr(0)
+	normOutPtr := tensor.DevicePtrOffset(scratchPtr, offset)
+	offset += uintptr(normOutBytes)
+	qPtr := tensor.DevicePtrOffset(scratchPtr, offset)
+	offset += uintptr(qBytes)
+	kPtr := tensor.DevicePtrOffset(scratchPtr, offset)
+	offset += uintptr(kvBytes)
+	vPtr := tensor.DevicePtrOffset(scratchPtr, offset)
+	offset += uintptr(kvBytes)
+	attnOutPtr := tensor.DevicePtrOffset(scratchPtr, offset)
+	offset += uintptr(attnOutBytes)
+	gatePtr := tensor.DevicePtrOffset(scratchPtr, offset)
+	offset += uintptr(gateBytes)
+	upPtr := tensor.DevicePtrOffset(scratchPtr, offset)
+	_ = upBytes // Used for allocation
 
 	// 1. RMSNorm (Attention)
-	normOut := scratchData[offset : offset+seqLen*hiddenSize]
-	offset += seqLen * hiddenSize
-
-	wNorm := tensor.ToFloat32Slice(b.AttnNorm)
-	if wNorm != nil {
-		b.backend.RMSNorm(xData, wNorm, normOut, seqLen, hiddenSize, float32(b.RMSNormEPS))
-	} else {
-		copy(normOut, xData)
+	if !b.AttnNorm.DevicePtr().IsNil() {
+		b.backend.RMSNorm(xPtr, b.AttnNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
 	}
 
 	// 2. Q/K/V Projections
-	qOut := scratchData[offset : offset+qSize]
-	offset += qSize
-
-	kOut := scratchData[offset : offset+kvSize]
-	offset += kvSize
-
-	vOut := scratchData[offset : offset+kvSize]
-	offset += kvSize
-
 	// Wq: [numHeads*headDim, hiddenSize] -> Q: [seqLen, numHeads*headDim]
 	if !b.Wq.DevicePtr().IsNil() {
-		wQ := tensor.ToFloat32Slice(b.Wq)
 		qDim := b.Wq.Shape().Dims()[0]
-		b.backend.MatmulTransposeB(normOut, wQ, qOut, seqLen, qDim, hiddenSize)
+		b.backend.MatMulTransposed(normOutPtr, b.Wq.DevicePtr(), qPtr, seqLen, qDim, hiddenSize)
 	}
 
 	// Wk: [numKVHeads*headDim, hiddenSize] -> K: [seqLen, numKVHeads*headDim]
 	if !b.Wk.DevicePtr().IsNil() {
-		wK := tensor.ToFloat32Slice(b.Wk)
 		kDim := b.Wk.Shape().Dims()[0]
-		b.backend.MatmulTransposeB(normOut, wK, kOut, seqLen, kDim, hiddenSize)
+		b.backend.MatMulTransposed(normOutPtr, b.Wk.DevicePtr(), kPtr, seqLen, kDim, hiddenSize)
 	}
 
 	// Wv: [numKVHeads*headDim, hiddenSize] -> V: [seqLen, numKVHeads*headDim]
 	if !b.Wv.DevicePtr().IsNil() {
-		wV := tensor.ToFloat32Slice(b.Wv)
 		vDim := b.Wv.Shape().Dims()[0]
-		b.backend.MatmulTransposeB(normOut, wV, vOut, seqLen, vDim, hiddenSize)
+		b.backend.MatMulTransposed(normOutPtr, b.Wv.DevicePtr(), vPtr, seqLen, vDim, hiddenSize)
 	}
 
-	// 3. RoPE - Apply to Q and K at positions [startPos, startPos+seqLen)
-	b.backend.RoPE(qOut, nil, headDim, numHeads, seqLen, startPos, float32(b.RoPETheta))
-	b.backend.RoPE(kOut, nil, headDim, numKVHeads, seqLen, startPos, float32(b.RoPETheta))
+	// 3. RoPE - Apply to Q and K
+	b.backend.RoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, pos, float32(b.RoPETheta))
 
-	// 4. Store K,V to PagedKVCache
-	if pagedCache != nil {
-		if seqLen == 1 {
-			// Single token (decode mode)
-			err := pagedCache.StoreKV(seqID, layerIdx, startPos, kOut, vOut)
-			if err != nil {
-				return x, fmt.Errorf("failed to store KV: %w", err)
-			}
-		} else {
-			// Multiple tokens (prefill mode)
-			err := pagedCache.StoreKVBatch(seqID, layerIdx, startPos, kOut, vOut, seqLen)
-			if err != nil {
-				return x, fmt.Errorf("failed to store KV batch: %w", err)
-			}
-		}
-	}
-
-	// 5. Multi-Head Attention
-	attnOut := scratchData[offset : offset+qSize]
-	offset += qSize
-
-	endPos := startPos + seqLen - 1 // Last position we're processing
-
-	if pagedCache != nil && seqLen == 1 {
-		// Decode mode: attend to all cached positions [0, endPos]
-		cachedK, cachedV := pagedCache.GetKVSliceForAttention(
-			seqID, layerIdx, endPos,
-			float32(b.RoPETheta),
-			b.backend.RoPEShift,
-		)
-		kvLen := endPos + 1
-
-		if len(cachedK) > 0 && len(cachedV) > 0 {
-			scale := float32(1.0 / sqrt(float64(headDim)))
-			b.backend.SDPA(qOut, cachedK, cachedV, attnOut, kvLen, numHeads, numKVHeads, headDim, scale)
-		} else {
-			copy(attnOut, vOut)
-		}
+	// 4. Attention
+	scale := float32(1.0 / sqrt(float64(headDim)))
+	if seqLen == 1 {
+		// Decode: use SDPA kernel (for single token, K/V are the current token only)
+		b.backend.SDPA(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
 	} else {
-		// Prefill mode: causal self-attention within the current batch
-		// Each query position i attends to positions 0..i (causal)
-		// For prefill starting at pos 0, this is standard causal attention
-		// Q: [seqLen, numHeads, headDim], K/V: [seqLen, numKVHeads, headDim]
-
-		scoresSize := seqLen * seqLen
-		scores := scratchData[offset : offset+scoresSize]
-		offset += scoresSize
-
-		scale := float32(1.0 / sqrt(float64(headDim)))
-
-		// Process each query head
-		for h := 0; h < numHeads; h++ {
-			kvHead := h / headsPerKV
-
-			// Compute attention scores: Q @ K^T
-			for i := 0; i < seqLen; i++ {
-				qRow := qOut[i*numHeads*headDim+h*headDim : i*numHeads*headDim+(h+1)*headDim]
-				for j := 0; j < seqLen; j++ {
-					kRow := kOut[j*numKVHeads*headDim+kvHead*headDim : j*numKVHeads*headDim+(kvHead+1)*headDim]
-					var dot float32
-					for d := 0; d < headDim; d++ {
-						dot += qRow[d] * kRow[d]
-					}
-					scores[i*seqLen+j] = dot * scale
-				}
-			}
-
-			// Apply causal mask (future positions set to -inf)
-			for i := 0; i < seqLen; i++ {
-				for j := i + 1; j < seqLen; j++ {
-					scores[i*seqLen+j] = -1e9
-				}
-			}
-
-			// Softmax each row
-			b.backend.Softmax(scores, scores, seqLen, seqLen)
-
-			// Compute output: scores @ V
-			for i := 0; i < seqLen; i++ {
-				outRow := attnOut[i*numHeads*headDim+h*headDim : i*numHeads*headDim+(h+1)*headDim]
-				for d := 0; d < headDim; d++ {
-					var sum float32
-					for j := 0; j < seqLen; j++ {
-						vVal := vOut[j*numKVHeads*headDim+kvHead*headDim+d]
-						sum += scores[i*seqLen+j] * vVal
-					}
-					outRow[d] = sum
-				}
-			}
-		}
+		// Prefill: use SDPAPrefill kernel with causal masking
+		b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
 	}
 
-	// 6. Output Projection: attnOut [seqLen, numHeads*headDim] -> [seqLen, hiddenSize]
+	// 5. Output Projection and residual
 	if !b.Wo.DevicePtr().IsNil() {
-		wO := tensor.ToFloat32Slice(b.Wo)
 		oDim := b.Wo.Shape().Dims()[0]
-		b.backend.MatmulTransposeB(attnOut, wO, normOut, seqLen, oDim, numHeads*headDim)
-		// Add residual: x = x + attn_out
-		for i := 0; i < seqLen*hiddenSize; i++ {
-			xData[i] += normOut[i]
-		}
+		b.backend.MatMulTransposed(attnOutPtr, b.Wo.DevicePtr(), normOutPtr, seqLen, oDim, numHeads*headDim)
+		// Add residual: x = x + normOut
+		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
 	}
 
-	// 7. FFN RMSNorm
-	wFFN := tensor.ToFloat32Slice(b.FFNNorm)
-	if wFFN != nil {
-		b.backend.RMSNorm(xData, wFFN, normOut, seqLen, hiddenSize, float32(b.RMSNormEPS))
-	} else {
-		copy(normOut, xData)
+	// 6. FFN RMSNorm
+	if !b.FFNNorm.DevicePtr().IsNil() {
+		b.backend.RMSNorm(xPtr, b.FFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
 	}
 
-	// 8. MLP: SwiGLU variant
-	gateOut := scratchData[offset : offset+seqLen*intermediateSize]
-	offset += seqLen * intermediateSize
-
-	upOut := scratchData[offset : offset+seqLen*intermediateSize]
-	offset += seqLen * intermediateSize
-
-	// Gate projection
+	// 7. MLP: SwiGLU variant
+	// Gate projection: gate = SiLU(normOut @ W1^T)
 	if !b.W1.DevicePtr().IsNil() {
-		w1 := tensor.ToFloat32Slice(b.W1)
 		w1Dim := b.W1.Shape().Dims()[0]
-		b.backend.MatmulTransposeB(normOut, w1, gateOut, seqLen, w1Dim, hiddenSize)
+		b.backend.MatMulTransposed(normOutPtr, b.W1.DevicePtr(), gatePtr, seqLen, w1Dim, hiddenSize)
 	}
 
-	// Up projection
+	// Up projection: up = normOut @ W3^T
 	if !b.W3.DevicePtr().IsNil() {
-		w3 := tensor.ToFloat32Slice(b.W3)
 		w3Dim := b.W3.Shape().Dims()[0]
-		b.backend.MatmulTransposeB(normOut, w3, upOut, seqLen, w3Dim, hiddenSize)
+		b.backend.MatMulTransposed(normOutPtr, b.W3.DevicePtr(), upPtr, seqLen, w3Dim, hiddenSize)
 	}
 
-	// SiLU on gate, then multiply with up
-	b.backend.SiLU(gateOut, gateOut, seqLen*intermediateSize)
-	for i := 0; i < seqLen*intermediateSize; i++ {
-		gateOut[i] *= upOut[i]
-	}
+	// SiLU on gate
+	b.backend.SiLU(gatePtr, gatePtr, seqLen*intermediateSize)
+
+	// Multiply gate * up
+	b.backend.Mul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
 
 	// Down projection and residual
 	if !b.W2.DevicePtr().IsNil() {
-		w2 := tensor.ToFloat32Slice(b.W2)
 		w2Dim := b.W2.Shape().Dims()[0]
-		b.backend.MatmulTransposeB(gateOut, w2, normOut, seqLen, w2Dim, intermediateSize)
-		// Add residual
-		for i := 0; i < seqLen*hiddenSize; i++ {
-			xData[i] += normOut[i]
-		}
+		b.backend.MatMulTransposed(gatePtr, b.W2.DevicePtr(), normOutPtr, seqLen, w2Dim, intermediateSize)
+		// Add residual: x = x + normOut
+		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
 	}
 
 	return x, nil
+}
+
+// ExecuteWithPagedKV performs the forward pass using paged KV cache.
+// This version uses DevicePtr for GPU execution.
+// NOTE: The paged KV cache integration needs to be refactored for GPU operation.
+// For now, this delegates to the basic Execute function.
+// TODO: Implement GPU-native KV cache with DevicePtr storage.
+func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *kv.PagedKVCache, seqID int64, layerIdx, startPos int) (tensor.Tensor, error) {
+	// For now, delegate to Execute which uses DevicePtr operations
+	// The KV cache integration needs separate refactoring for GPU
+	return b.Execute(x, scratch, nil, layerIdx, startPos)
 }

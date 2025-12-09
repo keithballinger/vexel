@@ -221,6 +221,87 @@ func (m *ModelRuntime) LoadWeightsSafetensors(path string) error {
 	return nil
 }
 
+// CopyWeightsToDevice copies all loaded weights to the backend device (GPU).
+// This should be called after LoadWeights if using GPU execution.
+// For CPU backend, this is a no-op since weights are already on CPU.
+func (m *ModelRuntime) CopyWeightsToDevice() error {
+	// Helper to copy a single tensor to device
+	copyToDevice := func(t *tensor.Tensor) error {
+		if t.DevicePtr().IsNil() {
+			return nil
+		}
+		// If already on the right device, skip
+		if t.DevicePtr().Location() == m.backend.Device().Location {
+			return nil
+		}
+
+		// Get size in bytes
+		numElements := t.Shape().NumElements()
+		sizeBytes := numElements * 4 // Assuming float32
+
+		// Allocate on device
+		devicePtr := m.backend.Alloc(sizeBytes)
+		if devicePtr.IsNil() {
+			return fmt.Errorf("failed to allocate %d bytes on device", sizeBytes)
+		}
+
+		// Copy data from CPU to device
+		cpuData := unsafe.Slice((*byte)(unsafe.Pointer(t.DevicePtr().Addr())), sizeBytes)
+		m.backend.ToDevice(devicePtr, cpuData)
+
+		// Update tensor with device pointer
+		*t = tensor.NewTensor(t.Shape(), m.config.DType, devicePtr)
+		return nil
+	}
+
+	// Copy global weights
+	if err := copyToDevice(&m.Embedding); err != nil {
+		return fmt.Errorf("embedding: %w", err)
+	}
+	if err := copyToDevice(&m.FinalNorm); err != nil {
+		return fmt.Errorf("final_norm: %w", err)
+	}
+	if err := copyToDevice(&m.OutputHead); err != nil {
+		return fmt.Errorf("output_head: %w", err)
+	}
+
+	// Copy layer weights
+	for i, layer := range m.layers {
+		if err := copyToDevice(&layer.AttnNorm); err != nil {
+			return fmt.Errorf("layer %d attn_norm: %w", i, err)
+		}
+		if err := copyToDevice(&layer.Wq); err != nil {
+			return fmt.Errorf("layer %d wq: %w", i, err)
+		}
+		if err := copyToDevice(&layer.Wk); err != nil {
+			return fmt.Errorf("layer %d wk: %w", i, err)
+		}
+		if err := copyToDevice(&layer.Wv); err != nil {
+			return fmt.Errorf("layer %d wv: %w", i, err)
+		}
+		if err := copyToDevice(&layer.Wo); err != nil {
+			return fmt.Errorf("layer %d wo: %w", i, err)
+		}
+		if err := copyToDevice(&layer.FFNNorm); err != nil {
+			return fmt.Errorf("layer %d ffn_norm: %w", i, err)
+		}
+		if err := copyToDevice(&layer.W1); err != nil {
+			return fmt.Errorf("layer %d w1: %w", i, err)
+		}
+		if err := copyToDevice(&layer.W2); err != nil {
+			return fmt.Errorf("layer %d w2: %w", i, err)
+		}
+		if err := copyToDevice(&layer.W3); err != nil {
+			return fmt.Errorf("layer %d w3: %w", i, err)
+		}
+	}
+
+	// Sync to ensure all copies complete
+	m.backend.Sync()
+
+	return nil
+}
+
 func (m *ModelRuntime) mapTensor(name string, t tensor.Tensor) {
 	// Global
 	if name == "model.embed_tokens.weight" {

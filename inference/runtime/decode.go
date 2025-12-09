@@ -1,176 +1,48 @@
 package runtime
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math"
+
 	"vexel/inference/memory"
 	"vexel/inference/tensor"
 )
 
-// DecodeStep performs a single decoding step for the batch.
-func (m *ModelRuntime) DecodeStep(inputs BatchRuntimeInputs) (tensor.Tensor, error) {
-	// 1. Prepare batch metadata
-	tokens := inputs.Tokens()
-	batchSize := len(tokens)
-	if batchSize == 0 {
-		return tensor.Tensor{}, nil
+// int32ToBytes converts []int to []byte (as int32 values)
+func int32ToBytes(tokens []int) []byte {
+	bytes := make([]byte, len(tokens)*4)
+	for i, tok := range tokens {
+		binary.LittleEndian.PutUint32(bytes[i*4:], uint32(int32(tok)))
 	}
-	
-	hiddenSize := m.config.HiddenSize
-	
-	// Create scratch buffer
-	scratchSize := m.config.ScratchBytes(batchSize)
-	// Add space for State [Batch, Hidden] and Logits [Batch, Vocab] and FinalNorm [Batch, Hidden]
-	// Ideally Arena handles this cumulatively.
-	
-	// Allocate from Arena
-	if m.ctx == nil {
-		// Test fallback for uninitialized runtime
-		return tensor.NewTensor(
-			tensor.NewShape(batchSize, m.config.VocabSize),
-			m.config.DType,
-			tensor.NewDevicePtr(tensor.CPU, 0),
-		), nil
-	}
-	arena := m.ctx.GetArena(memory.Scratch)
-	if arena == nil {
-		// Test fallback
-		return tensor.NewTensor(
-			tensor.NewShape(batchSize, m.config.VocabSize),
-			m.config.DType,
-			tensor.NewDevicePtr(tensor.CPU, 0),
-		), nil
-	}
-	
-	m.ctx.ResetScratch()
-	
-	// Helper to alloc tensor
-	allocTensor := func(shape []int) (tensor.Tensor, []float32, error) {
-		numElements := 1
-		for _, d := range shape {
-			numElements *= d
-		}
-		sizeBytes := numElements * 4 // Float32
-		ptr, err := arena.Alloc(sizeBytes)
-		if err != nil {
-			return tensor.Tensor{}, nil, err
-		}
-		t := tensor.NewTensor(tensor.NewShape(shape...), m.config.DType, ptr)
-		data := tensor.ToFloat32Slice(t)
-		return t, data, nil
-	}
-	
-	// 2. Embedding Lookup
-	// Allocate State [Batch, Hidden]
-	state, stateData, err := allocTensor([]int{batchSize, hiddenSize})
-	if err != nil {
-		return tensor.Tensor{}, err
-	}
-	
-	// Perform Lookup
-	if !m.Embedding.DevicePtr().IsNil() {
-		table := tensor.ToFloat32Slice(m.Embedding)
-		m.backend.Embedding(tokens, table, stateData, hiddenSize)
-	}
-	
-	// Allocate Scratch for Layers
-	// Note: Layers expect 'scratch' tensor which they sub-allocate/view manually?
-	// BlockRuntime.Execute splits scratch into Q,K,V etc.
-	// We need to pass a large enough buffer.
-	scratchBytes := scratchSize // Bytes
-	scratchPtr, err := arena.Alloc(int(scratchBytes))
-	if err != nil {
-		return tensor.Tensor{}, err
-	}
-	scratch := tensor.NewTensor(
-		tensor.NewShape(int(scratchBytes/4)), // float32 elements
-		m.config.DType,
-		scratchPtr,
-	)
-	
-	// Get position from inputs (default to 0 for backwards compatibility)
-	pos := 0
-	if positions := inputs.Positions(); len(positions) > 0 {
-		// For now, use position of first token in batch
-		// TODO: Support variable positions per sequence in batch
-		pos = positions[0]
-	}
-
-	// 3. Layer Loop
-	for i, layer := range m.layers {
-		state, err = layer.Execute(state, scratch, m.cache, i, pos)
-		if err != nil {
-			return tensor.Tensor{}, err
-		}
-	}
-	
-	// 4. Final Norm
-	// Allocate Output for Norm? Or in-place?
-	// RMSNorm can be in-place if x != out?
-	// stateData is reused.
-	// We need weights.
-	if !m.FinalNorm.DevicePtr().IsNil() {
-		normWeights := tensor.ToFloat32Slice(m.FinalNorm)
-		// In-place update of state
-		m.backend.RMSNorm(stateData, normWeights, stateData, batchSize, hiddenSize, float32(m.config.RMSNormEPS))
-	}
-	
-	// 5. Compute Logits (Output Head)
-	// Result shape: [Batch, Vocab]
-	logits, logitsData, err := allocTensor([]int{batchSize, m.config.VocabSize})
-	if err != nil {
-		return tensor.Tensor{}, err
-	}
-	
-	if !m.OutputHead.DevicePtr().IsNil() {
-		headWeights := tensor.ToFloat32Slice(m.OutputHead)
-		// State [Batch, Hidden] * Head^T [Hidden, Vocab] -> [Batch, Vocab]
-		// Head weights are [Vocab, Hidden] usually (Out, In).
-		// So we use MatmulTransposeB.
-		m.backend.MatmulTransposeB(stateData, headWeights, logitsData, batchSize, m.config.VocabSize, hiddenSize)
-	}
-
-	return logits, nil
+	return bytes
 }
 
-// DecodeStepWithPagedKV performs a single decoding step using paged KV cache.
-// This is the production path that properly utilizes KV caching for autoregressive generation.
-// For prefill (multiple tokens), use PrefillWithPagedKV instead.
-func (m *ModelRuntime) DecodeStepWithPagedKV(inputs BatchRuntimeInputs) (tensor.Tensor, error) {
+// bytesToFloat32 converts []byte to []float32
+func bytesToFloat32(data []byte) []float32 {
+	result := make([]float32, len(data)/4)
+	for i := range result {
+		result[i] = math.Float32frombits(binary.LittleEndian.Uint32(data[i*4:]))
+	}
+	return result
+}
+
+// DecodeStep performs a single decoding step using DevicePtr operations.
+// All tensors are allocated on the backend device.
+func (m *ModelRuntime) DecodeStep(inputs BatchRuntimeInputs) (tensor.Tensor, error) {
 	tokens := inputs.Tokens()
 	batchSize := len(tokens)
 	if batchSize == 0 {
 		return tensor.Tensor{}, nil
 	}
 
-	// Currently only support batch size 1 for decode
-	if batchSize != 1 {
-		return tensor.Tensor{}, fmt.Errorf("paged KV cache decode currently only supports batch size 1, got %d", batchSize)
-	}
-
 	hiddenSize := m.config.HiddenSize
+	vocabSize := m.config.VocabSize
 
-	// Verify we have paged cache
-	if m.pagedCache == nil {
-		return tensor.Tensor{}, fmt.Errorf("paged KV cache not initialized")
-	}
-
-	// Get sequence ID
-	seqIDs := inputs.SeqIDs()
-	if len(seqIDs) == 0 {
-		return tensor.Tensor{}, fmt.Errorf("sequence IDs required for paged KV cache")
-	}
-	seqID := seqIDs[0]
-
-	// Get position
-	pos := 0
-	if positions := inputs.Positions(); len(positions) > 0 {
-		pos = positions[0]
-	}
-
+	// Allocate from Arena
 	if m.ctx == nil {
 		return tensor.Tensor{}, fmt.Errorf("inference context not initialized")
 	}
-
 	arena := m.ctx.GetArena(memory.Scratch)
 	if arena == nil {
 		return tensor.Tensor{}, fmt.Errorf("scratch arena not initialized")
@@ -178,79 +50,87 @@ func (m *ModelRuntime) DecodeStepWithPagedKV(inputs BatchRuntimeInputs) (tensor.
 
 	m.ctx.ResetScratch()
 
-	// Helper to alloc tensor
-	allocTensor := func(shape []int) (tensor.Tensor, []float32, error) {
-		numElements := 1
-		for _, d := range shape {
-			numElements *= d
-		}
-		sizeBytes := numElements * 4 // Float32
-		ptr, err := arena.Alloc(sizeBytes)
-		if err != nil {
-			return tensor.Tensor{}, nil, err
-		}
-		t := tensor.NewTensor(tensor.NewShape(shape...), m.config.DType, ptr)
-		data := tensor.ToFloat32Slice(t)
-		return t, data, nil
+	// Helper to allocate DevicePtr
+	allocPtr := func(bytes int) (tensor.DevicePtr, error) {
+		return arena.Alloc(bytes)
 	}
 
-	// 1. Embedding Lookup
-	state, stateData, err := allocTensor([]int{batchSize, hiddenSize})
+	// 1. Copy token IDs to device
+	tokenBytes := int32ToBytes(tokens)
+	tokenPtr, err := allocPtr(len(tokenBytes))
 	if err != nil {
 		return tensor.Tensor{}, err
 	}
+	m.backend.ToDevice(tokenPtr, tokenBytes)
 
+	// 2. Allocate State [Batch, Hidden]
+	statePtr, err := allocPtr(batchSize * hiddenSize * 4)
+	if err != nil {
+		return tensor.Tensor{}, err
+	}
+	state := tensor.NewTensor(tensor.NewShape(batchSize, hiddenSize), m.config.DType, statePtr)
+
+	// 3. Embedding Lookup
 	if !m.Embedding.DevicePtr().IsNil() {
-		table := tensor.ToFloat32Slice(m.Embedding)
-		m.backend.Embedding(tokens, table, stateData, hiddenSize)
+		m.backend.Embedding(tokenPtr, batchSize, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
 	}
 
-	// Allocate Scratch for Layers
-	scratchSize := m.config.ScratchBytes(batchSize)
-	scratchPtr, err := arena.Alloc(int(scratchSize))
+	// 4. Allocate Scratch for Layers
+	scratchBytes := m.config.ScratchBytes(batchSize)
+	scratchPtr, err := allocPtr(int(scratchBytes))
 	if err != nil {
 		return tensor.Tensor{}, err
 	}
-	scratch := tensor.NewTensor(
-		tensor.NewShape(int(scratchSize/4)),
-		m.config.DType,
-		scratchPtr,
-	)
+	scratch := tensor.NewTensor(tensor.NewShape(int(scratchBytes/4)), m.config.DType, scratchPtr)
 
-	// 2. Layer Loop with Paged KV Cache
+	// Get position from inputs
+	pos := 0
+	if positions := inputs.Positions(); len(positions) > 0 {
+		pos = positions[0]
+	}
+
+	// 5. Layer Loop
 	for i, layer := range m.layers {
-		state, err = layer.ExecuteWithPagedKV(state, scratch, m.pagedCache, seqID, i, pos)
+		state, err = layer.Execute(state, scratch, m.cache, i, pos)
 		if err != nil {
-			return tensor.Tensor{}, fmt.Errorf("layer %d: %w", i, err)
+			return tensor.Tensor{}, err
 		}
 	}
 
-	// 3. Final Norm
+	// 6. Final Norm (in-place on state)
 	if !m.FinalNorm.DevicePtr().IsNil() {
-		normWeights := tensor.ToFloat32Slice(m.FinalNorm)
-		m.backend.RMSNorm(stateData, normWeights, stateData, batchSize, hiddenSize, float32(m.config.RMSNormEPS))
+		m.backend.RMSNorm(statePtr, m.FinalNorm.DevicePtr(), statePtr, batchSize, hiddenSize, float32(m.config.RMSNormEPS))
 	}
 
-	// 4. Compute Logits
-	logits, logitsData, err := allocTensor([]int{batchSize, m.config.VocabSize})
+	// 7. Compute Logits: state @ OutputHead^T
+	logitsPtr, err := allocPtr(batchSize * vocabSize * 4)
 	if err != nil {
 		return tensor.Tensor{}, err
 	}
+	logits := tensor.NewTensor(tensor.NewShape(batchSize, vocabSize), m.config.DType, logitsPtr)
 
 	if !m.OutputHead.DevicePtr().IsNil() {
-		headWeights := tensor.ToFloat32Slice(m.OutputHead)
-		m.backend.MatmulTransposeB(stateData, headWeights, logitsData, batchSize, m.config.VocabSize, hiddenSize)
+		m.backend.MatMulTransposed(statePtr, m.OutputHead.DevicePtr(), logitsPtr, batchSize, vocabSize, hiddenSize)
 	}
+
+	// Sync to ensure all operations complete
+	m.backend.Sync()
 
 	return logits, nil
 }
 
-// PrefillWithPagedKV processes multiple tokens in a single forward pass (batched prefill).
-// This is much faster than processing tokens one at a time.
-// Returns logits only for the LAST token (used to sample the first generated token).
-// tokens: slice of token IDs to process
-// seqID: sequence ID in the paged cache
-// startPos: position of the first token (usually 0 for initial prefill)
+// DecodeStepWithPagedKV performs a single decoding step using paged KV cache.
+// This version uses DevicePtr operations for GPU execution.
+// NOTE: The paged KV cache integration needs refactoring for GPU operation.
+func (m *ModelRuntime) DecodeStepWithPagedKV(inputs BatchRuntimeInputs) (tensor.Tensor, error) {
+	// For now, delegate to the basic DecodeStep
+	// Full KV cache integration requires separate GPU-native implementation
+	return m.DecodeStep(inputs)
+}
+
+// PrefillWithPagedKV processes multiple tokens in a single forward pass.
+// This version uses DevicePtr operations for GPU execution.
+// Returns logits only for the LAST token.
 func (m *ModelRuntime) PrefillWithPagedKV(tokens []int, seqID int64, startPos int) (tensor.Tensor, error) {
 	seqLen := len(tokens)
 	if seqLen == 0 {
@@ -258,11 +138,7 @@ func (m *ModelRuntime) PrefillWithPagedKV(tokens []int, seqID int64, startPos in
 	}
 
 	hiddenSize := m.config.HiddenSize
-
-	// Verify we have paged cache
-	if m.pagedCache == nil {
-		return tensor.Tensor{}, fmt.Errorf("paged KV cache not initialized")
-	}
+	vocabSize := m.config.VocabSize
 
 	if m.ctx == nil {
 		return tensor.Tensor{}, fmt.Errorf("inference context not initialized")
@@ -275,49 +151,39 @@ func (m *ModelRuntime) PrefillWithPagedKV(tokens []int, seqID int64, startPos in
 
 	m.ctx.ResetScratch()
 
-	// Helper to alloc tensor
-	allocTensor := func(shape []int) (tensor.Tensor, []float32, error) {
-		numElements := 1
-		for _, d := range shape {
-			numElements *= d
-		}
-		sizeBytes := numElements * 4 // Float32
-		ptr, err := arena.Alloc(sizeBytes)
-		if err != nil {
-			return tensor.Tensor{}, nil, err
-		}
-		t := tensor.NewTensor(tensor.NewShape(shape...), m.config.DType, ptr)
-		data := tensor.ToFloat32Slice(t)
-		return t, data, nil
+	allocPtr := func(bytes int) (tensor.DevicePtr, error) {
+		return arena.Alloc(bytes)
 	}
 
-	// 1. Embedding Lookup for all tokens
-	state, stateData, err := allocTensor([]int{seqLen, hiddenSize})
+	// 1. Copy token IDs to device
+	tokenBytes := int32ToBytes(tokens)
+	tokenPtr, err := allocPtr(len(tokenBytes))
 	if err != nil {
 		return tensor.Tensor{}, err
 	}
+	m.backend.ToDevice(tokenPtr, tokenBytes)
 
+	// 2. Allocate State [seqLen, Hidden]
+	statePtr, err := allocPtr(seqLen * hiddenSize * 4)
+	if err != nil {
+		return tensor.Tensor{}, err
+	}
+	state := tensor.NewTensor(tensor.NewShape(seqLen, hiddenSize), m.config.DType, statePtr)
+
+	// 3. Embedding Lookup
 	if !m.Embedding.DevicePtr().IsNil() {
-		table := tensor.ToFloat32Slice(m.Embedding)
-		m.backend.Embedding(tokens, table, stateData, hiddenSize)
+		m.backend.Embedding(tokenPtr, seqLen, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
 	}
 
-	// Allocate Scratch for Layers (need more for batched prefill)
-	// Scratch needs to accommodate seqLen tokens worth of intermediate tensors
-	scratchSize := m.config.ScratchBytes(seqLen)
-	// Add extra for attention scores matrix [seqLen, seqLen]
-	scratchSize += int64(seqLen * seqLen * 4)
-	scratchPtr, err := arena.Alloc(int(scratchSize))
+	// 4. Allocate Scratch (need more for prefill)
+	scratchBytes := m.config.ScratchBytes(seqLen) + int64(seqLen*seqLen*4)
+	scratchPtr, err := allocPtr(int(scratchBytes))
 	if err != nil {
 		return tensor.Tensor{}, err
 	}
-	scratch := tensor.NewTensor(
-		tensor.NewShape(int(scratchSize/4)),
-		m.config.DType,
-		scratchPtr,
-	)
+	scratch := tensor.NewTensor(tensor.NewShape(int(scratchBytes/4)), m.config.DType, scratchPtr)
 
-	// 2. Layer Loop with Paged KV Cache (batched)
+	// 5. Layer Loop
 	for i, layer := range m.layers {
 		state, err = layer.ExecuteWithPagedKV(state, scratch, m.pagedCache, seqID, i, startPos)
 		if err != nil {
@@ -325,27 +191,24 @@ func (m *ModelRuntime) PrefillWithPagedKV(tokens []int, seqID int64, startPos in
 		}
 	}
 
-	// 3. Final Norm (only need last token's state for logits)
-	// Extract last token's hidden state
-	lastTokenStart := (seqLen - 1) * hiddenSize
-	lastTokenState := stateData[lastTokenStart : lastTokenStart+hiddenSize]
-
+	// 6. Final Norm on last token only
+	lastTokenPtr := tensor.DevicePtrOffset(statePtr, uintptr((seqLen-1)*hiddenSize*4))
 	if !m.FinalNorm.DevicePtr().IsNil() {
-		normWeights := tensor.ToFloat32Slice(m.FinalNorm)
-		// In-place norm on last token
-		m.backend.RMSNorm(lastTokenState, normWeights, lastTokenState, 1, hiddenSize, float32(m.config.RMSNormEPS))
+		m.backend.RMSNorm(lastTokenPtr, m.FinalNorm.DevicePtr(), lastTokenPtr, 1, hiddenSize, float32(m.config.RMSNormEPS))
 	}
 
-	// 4. Compute Logits for last token only
-	logits, logitsData, err := allocTensor([]int{1, m.config.VocabSize})
+	// 7. Compute Logits for last token
+	logitsPtr, err := allocPtr(vocabSize * 4)
 	if err != nil {
 		return tensor.Tensor{}, err
 	}
+	logits := tensor.NewTensor(tensor.NewShape(1, vocabSize), m.config.DType, logitsPtr)
 
 	if !m.OutputHead.DevicePtr().IsNil() {
-		headWeights := tensor.ToFloat32Slice(m.OutputHead)
-		m.backend.MatmulTransposeB(lastTokenState, headWeights, logitsData, 1, m.config.VocabSize, hiddenSize)
+		m.backend.MatMulTransposed(lastTokenPtr, m.OutputHead.DevicePtr(), logitsPtr, 1, vocabSize, hiddenSize)
 	}
+
+	m.backend.Sync()
 
 	return logits, nil
 }

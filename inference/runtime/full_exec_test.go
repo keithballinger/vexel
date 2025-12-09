@@ -19,7 +19,7 @@ func TestDecodeStepExecution(t *testing.T) {
 	cfg.IntermediateSize = 384
 	cfg.VocabSize = 256
 
-	b := cpu.NewBackend()
+	b := cpu.NewCPUBackend()
 	ctx := memory.NewInferenceContext(tensor.CPU)
 	ctx.AddArena(memory.Scratch, 1024*1024) // 1MB scratch
 	cache := &kv.KVCache{}

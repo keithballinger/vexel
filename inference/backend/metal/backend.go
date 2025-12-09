@@ -12,8 +12,12 @@ import (
 	"fmt"
 	"unsafe"
 
+	"vexel/inference/backend"
 	"vexel/inference/tensor"
 )
+
+// Ensure Backend implements the interface
+var _ backend.Backend = (*Backend)(nil)
 
 // Backend implements GPU acceleration using Apple Metal.
 type Backend struct {
@@ -95,33 +99,40 @@ func (b *Backend) Device() tensor.Device {
 	return tensor.NewDevice(tensor.Metal, b.deviceID)
 }
 
-// CreateStream creates a command queue (Metal's equivalent of a stream).
-func (b *Backend) CreateStream() (interface{}, error) {
-	queue := C.metal_create_command_queue(b.device)
-	if queue == nil {
-		return nil, fmt.Errorf("failed to create command queue")
+// =============================================================================
+// Memory Management
+// =============================================================================
+
+// Alloc allocates a Metal buffer and returns a DevicePtr.
+func (b *Backend) Alloc(bytes int) tensor.DevicePtr {
+	buf := C.metal_alloc_buffer(b.device, C.size_t(bytes))
+	if buf == nil {
+		return tensor.DevicePtr{}
 	}
-	return queue, nil
+	return tensor.NewDevicePtr(tensor.Metal, uintptr(buf))
 }
 
-// AllocBuffer allocates a Metal buffer.
-func (b *Backend) AllocBuffer(size int) unsafe.Pointer {
-	return C.metal_alloc_buffer(b.device, C.size_t(size))
+// Free releases a Metal buffer.
+func (b *Backend) Free(ptr tensor.DevicePtr) {
+	if !ptr.IsNil() {
+		C.metal_release(unsafe.Pointer(ptr.Addr()))
+	}
 }
 
-// FreeBuffer releases a Metal buffer.
-func (b *Backend) FreeBuffer(buf unsafe.Pointer) {
-	C.metal_release(buf)
+// ToDevice copies data from host to device.
+func (b *Backend) ToDevice(dst tensor.DevicePtr, src []byte) {
+	if dst.IsNil() || len(src) == 0 {
+		return
+	}
+	C.metal_copy_to_buffer(unsafe.Pointer(dst.Addr()), unsafe.Pointer(&src[0]), C.size_t(len(src)))
 }
 
-// CopyToDevice copies data from host to device.
-func (b *Backend) CopyToDevice(dst unsafe.Pointer, src []float32) {
-	C.metal_copy_to_buffer(dst, unsafe.Pointer(&src[0]), C.size_t(len(src)*4))
-}
-
-// CopyFromDevice copies data from device to host.
-func (b *Backend) CopyFromDevice(dst []float32, src unsafe.Pointer) {
-	C.metal_copy_from_buffer(unsafe.Pointer(&dst[0]), src, C.size_t(len(dst)*4))
+// ToHost copies data from device to host.
+func (b *Backend) ToHost(dst []byte, src tensor.DevicePtr) {
+	if src.IsNil() || len(dst) == 0 {
+		return
+	}
+	C.metal_copy_from_buffer(unsafe.Pointer(&dst[0]), unsafe.Pointer(src.Addr()), C.size_t(len(dst)))
 }
 
 // Sync waits for all pending GPU operations to complete.
@@ -129,81 +140,102 @@ func (b *Backend) Sync() {
 	C.metal_sync(b.queue)
 }
 
-// MatMul performs C = A @ B^T
-func (b *Backend) MatMul(a, bMat, c unsafe.Pointer, M, N, K int) {
-	C.metal_matmul_f32(b.queue, b.matmulPipeline, a, bMat, c, C.int(M), C.int(N), C.int(K))
+// =============================================================================
+// Compute Kernels
+// =============================================================================
+
+// MatMul performs C = A @ B where A is [M,K], B is [K,N], C is [M,N].
+func (b *Backend) MatMul(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	C.metal_matmul_f32(b.queue, b.matmulPipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(m), C.int(n), C.int(k))
+}
+
+// MatMulTransposed performs C = A @ B^T where A is [M,K], B is [N,K], C is [M,N].
+func (b *Backend) MatMulTransposed(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	C.metal_matmul_f32(b.queue, b.matmulPipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(m), C.int(n), C.int(k))
 }
 
 // RMSNorm performs RMS normalization.
-func (b *Backend) RMSNorm(x, weight, out unsafe.Pointer, batchSize, dim int, eps float32) {
-	C.metal_rmsnorm_f32(b.queue, b.rmsnormPipeline, x, weight, out,
-		C.int(batchSize), C.int(dim), C.float(eps))
+func (b *Backend) RMSNorm(x, weight, out tensor.DevicePtr, rows, cols int, eps float32) {
+	C.metal_rmsnorm_f32(b.queue, b.rmsnormPipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(weight.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(rows), C.int(cols), C.float(eps))
 }
 
 // RoPE applies rotary position encoding.
-func (b *Backend) RoPE(q, k unsafe.Pointer, batchSize, seqLen, numHeads, headDim, startPos int, theta float32) {
-	C.metal_rope_f32(b.queue, b.ropePipeline, q, k,
-		C.int(batchSize), C.int(seqLen), C.int(numHeads), C.int(headDim),
-		C.int(startPos), C.float(theta))
+func (b *Backend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos int, theta float32) {
+	// Use GQA-aware RoPE kernel if Q and K have different head counts
+	if numHeads != numKVHeads && !k.IsNil() {
+		// Need a separate dispatch for K with different head count
+		// For now, use separate calls
+		C.metal_rope_f32(b.queue, b.ropePipeline,
+			unsafe.Pointer(q.Addr()), unsafe.Pointer(q.Addr()), // Q only
+			C.int(1), C.int(seqLen), C.int(numHeads), C.int(headDim),
+			C.int(startPos), C.float(theta))
+		if !k.IsNil() {
+			C.metal_rope_f32(b.queue, b.ropePipeline,
+				unsafe.Pointer(k.Addr()), unsafe.Pointer(k.Addr()), // K only
+				C.int(1), C.int(seqLen), C.int(numKVHeads), C.int(headDim),
+				C.int(startPos), C.float(theta))
+		}
+	} else {
+		C.metal_rope_f32(b.queue, b.ropePipeline,
+			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+			C.int(1), C.int(seqLen), C.int(numHeads), C.int(headDim),
+			C.int(startPos), C.float(theta))
+	}
 }
 
-// Softmax applies softmax along the last dimension.
-func (b *Backend) Softmax(x, out unsafe.Pointer, batchSize, dim int) {
-	C.metal_softmax_f32(b.queue, b.softmaxPipeline, x, out, C.int(batchSize), C.int(dim))
+// Softmax applies softmax row-wise.
+func (b *Backend) Softmax(x, out tensor.DevicePtr, rows, cols int) {
+	C.metal_softmax_f32(b.queue, b.softmaxPipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(rows), C.int(cols))
 }
 
 // SiLU applies the SiLU activation function.
-func (b *Backend) SiLU(x, out unsafe.Pointer, n int) {
-	C.metal_silu_f32(b.queue, b.siluPipeline, x, out, C.int(n))
+func (b *Backend) SiLU(x, out tensor.DevicePtr, n int) {
+	C.metal_silu_f32(b.queue, b.siluPipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
 
 // Add performs element-wise addition.
-func (b *Backend) Add(a, bIn, out unsafe.Pointer, n int) {
-	C.metal_add_f32(b.queue, b.addPipeline, a, bIn, out, C.int(n))
+func (b *Backend) Add(a, bIn, out tensor.DevicePtr, n int) {
+	C.metal_add_f32(b.queue, b.addPipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bIn.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
 
 // Mul performs element-wise multiplication.
-func (b *Backend) Mul(a, bIn, out unsafe.Pointer, n int) {
-	C.metal_mul_f32(b.queue, b.mulPipeline, a, bIn, out, C.int(n))
+func (b *Backend) Mul(a, bIn, out tensor.DevicePtr, n int) {
+	C.metal_mul_f32(b.queue, b.mulPipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bIn.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
 
 // Embedding performs embedding lookup.
-func (b *Backend) Embedding(tokens []int, table, out unsafe.Pointer, vocabSize, dim int) {
-	// Convert tokens to C int array
-	cTokens := make([]C.int, len(tokens))
-	for i, t := range tokens {
-		cTokens[i] = C.int(t)
-	}
-	C.metal_embedding_f32(b.queue, (*C.int)(&cTokens[0]), table, out,
-		C.int(len(tokens)), C.int(vocabSize), C.int(dim))
+// ids should be int32 values in an MTLBuffer on device
+func (b *Backend) Embedding(ids tensor.DevicePtr, numTokens int, table, out tensor.DevicePtr, vocabSize, dim int) {
+	C.metal_embedding_f32(b.queue,
+		unsafe.Pointer(ids.Addr()), unsafe.Pointer(table.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(numTokens), C.int(vocabSize), C.int(dim))
 }
 
-// SDPADecode performs scaled dot-product attention for decode (single query token).
-// Q: [numQHeads, headDim] - single query token
-// K: [kvLen, numKVHeads, headDim] - key cache
-// V: [kvLen, numKVHeads, headDim] - value cache
-// out: [numQHeads, headDim] - output
-func (b *Backend) SDPADecode(q, k, v, out unsafe.Pointer,
-	kvLen, numQHeads, numKVHeads, headDim int, scale float32) {
-	C.metal_sdpa_decode_f32(b.queue, b.sdpaDecodePipeline, q, k, v, out,
+// SDPA performs scaled dot-product attention for decode (single query token).
+func (b *Backend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	C.metal_sdpa_decode_f32(b.queue, b.sdpaDecodePipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
 		C.float(scale))
 }
 
-// SDPAPrefill performs scaled dot-product attention for prefill with causal masking.
-// Q: [seqLen, numQHeads, headDim]
-// K: [seqLen, numKVHeads, headDim]
-// V: [seqLen, numKVHeads, headDim]
-// out: [seqLen, numQHeads, headDim]
-func (b *Backend) SDPAPrefill(q, k, v, out unsafe.Pointer,
-	seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
-	C.metal_sdpa_prefill_f32(b.queue, b.sdpaPrefillPipeline, q, k, v, out,
+// SDPAPrefill performs SDPA for prefill with causal masking.
+func (b *Backend) SDPAPrefill(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	C.metal_sdpa_prefill_f32(b.queue, b.sdpaPrefillPipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
 		C.float(scale))
-}
-
-// ScaledDotProductAttention is deprecated, use SDPADecode or SDPAPrefill instead.
-func (b *Backend) ScaledDotProductAttention(q, k, v, out unsafe.Pointer,
-	batchSize, numHeads, seqLen, headDim int, scale float32, causal bool) {
-	// Legacy interface - does nothing
 }

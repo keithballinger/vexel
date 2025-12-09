@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"vexel/inference/backend/cpu"
 	"vexel/inference/cmd/vexel/internal"
 	"vexel/inference/memory"
 	"vexel/inference/pkg/gguf"
@@ -20,6 +19,8 @@ import (
 	"vexel/inference/tensor"
 )
 
+// Use the new unified Backend interface via CPUBackend
+
 func main() {
 	modelPath := flag.String("model", "", "Path to model file (.gguf or .safetensors) or directory")
 	temperature := flag.Float64("temp", 0.7, "Sampling temperature (0 = greedy)")
@@ -27,6 +28,7 @@ func main() {
 	topP := flag.Float64("top-p", 0.9, "Top-P nucleus sampling (0 = disabled)")
 	maxTokens := flag.Int("max-tokens", 256, "Maximum tokens to generate per response")
 	completionMode := flag.Bool("completion", false, "Use completion mode (no chat template)")
+	useGPU := flag.Bool("gpu", false, "Use GPU acceleration (Metal on macOS, requires -tags metal)")
 	flag.Parse()
 
 	fmt.Println("Vexel Inference Engine - Interactive Mode")
@@ -89,8 +91,20 @@ func main() {
 	}
 
 	// Initialize backend and context
-	backend := cpu.NewBackend()
-	ctx := memory.NewInferenceContext(tensor.CPU)
+	backend, loc, err := createBackend(*useGPU)
+	if err != nil {
+		log.Fatalf("Failed to create backend: %v", err)
+	}
+	if *useGPU && backend == nil {
+		log.Println("GPU not available (build with -tags metal). Using CPU backend.")
+		backend, loc, _ = createBackend(false)
+	}
+	if *useGPU && gpuAvailable() {
+		fmt.Println("Using GPU (Metal) backend")
+	} else {
+		fmt.Println("Using CPU backend")
+	}
+	ctx := memory.NewInferenceContext(loc)
 
 	// Allocate scratch arena for batched prefill
 	maxPrefillTokens := 256
@@ -98,7 +112,13 @@ func main() {
 	logitsSize := int64(cfg.VocabSize) * 4
 	attnScoresSize := int64(maxPrefillTokens * maxPrefillTokens * 4)
 	totalScratch := scratchSize + logitsSize*2 + attnScoresSize
-	ctx.AddArena(memory.Scratch, int(totalScratch))
+
+	// Use backend-aware allocation for GPU
+	if *useGPU && gpuAvailable() {
+		ctx.AddArenaWithBackend(memory.Scratch, int(totalScratch), backend.Alloc)
+	} else {
+		ctx.AddArena(memory.Scratch, int(totalScratch))
+	}
 	fmt.Printf("Scratch arena: %d MB\n", totalScratch/(1024*1024))
 
 	// Create runtime
@@ -115,6 +135,14 @@ func main() {
 	// Load weights (auto-detects format from extension)
 	if err := rt.LoadWeights(weightsPath); err != nil {
 		log.Fatalf("Failed to load weights: %v", err)
+	}
+
+	// Copy weights to GPU if using GPU backend
+	if *useGPU && gpuAvailable() {
+		fmt.Println("Copying weights to GPU...")
+		if err := rt.CopyWeightsToDevice(); err != nil {
+			log.Fatalf("Failed to copy weights to GPU: %v", err)
+		}
 	}
 	fmt.Println("Model loaded successfully.")
 
