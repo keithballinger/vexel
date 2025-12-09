@@ -1,14 +1,21 @@
-//go:build metal
+//go:build metal && darwin && cgo
 
 package metal
 
+/*
+#cgo CFLAGS: -I${SRCDIR}/cgo
+#include "metal_bridge.h"
+*/
+import "C"
 import (
 	"fmt"
+	"unsafe"
+
 	"vexel/inference/tensor"
 )
 
 // HostToDevice copies data from host memory to device memory.
-func (b *metalBackend) HostToDevice(dst tensor.DevicePtr, src []byte) error {
+func (b *Backend) HostToDevice(dst tensor.DevicePtr, src []byte) error {
 	if dst.Location() != tensor.Metal {
 		return fmt.Errorf("destination pointer is not on Metal device")
 	}
@@ -16,13 +23,13 @@ func (b *metalBackend) HostToDevice(dst tensor.DevicePtr, src []byte) error {
 		return nil
 	}
 
-	// TODO: Implement actual memcpy (via MTLBuffer.contents())
-	// Metal uses unified memory (mostly), so this might be a direct copy or a managed buffer copy.
+	// Metal uses shared memory, so we can copy directly
+	C.metal_copy_to_buffer(unsafe.Pointer(dst.Address()), unsafe.Pointer(&src[0]), C.size_t(len(src)))
 	return nil
 }
 
 // DeviceToHost copies data from device memory to host memory.
-func (b *metalBackend) DeviceToHost(dst []byte, src tensor.DevicePtr) error {
+func (b *Backend) DeviceToHost(dst []byte, src tensor.DevicePtr) error {
 	if src.Location() != tensor.Metal {
 		return fmt.Errorf("source pointer is not on Metal device")
 	}
@@ -30,6 +37,6 @@ func (b *metalBackend) DeviceToHost(dst []byte, src tensor.DevicePtr) error {
 		return nil
 	}
 
-	// TODO: Implement actual memcpy
+	C.metal_copy_from_buffer(unsafe.Pointer(&dst[0]), unsafe.Pointer(src.Address()), C.size_t(len(dst)))
 	return nil
 }

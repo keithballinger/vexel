@@ -7,10 +7,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"vexel/inference/backend/cpu"
 	"vexel/inference/cmd/vexel/internal"
 	"vexel/inference/memory"
+	"vexel/inference/pkg/gguf"
 	"vexel/inference/pkg/sampler"
 	"vexel/inference/pkg/tokenizer"
 	"vexel/inference/runtime"
@@ -19,83 +21,104 @@ import (
 )
 
 func main() {
-	modelDir := flag.String("model", "models", "Directory containing model files")
+	modelPath := flag.String("model", "", "Path to model file (.gguf or .safetensors) or directory")
 	temperature := flag.Float64("temp", 0.7, "Sampling temperature (0 = greedy)")
 	topK := flag.Int("top-k", 40, "Top-K sampling (0 = disabled)")
 	topP := flag.Float64("top-p", 0.9, "Top-P nucleus sampling (0 = disabled)")
 	maxTokens := flag.Int("max-tokens", 256, "Maximum tokens to generate per response")
+	completionMode := flag.Bool("completion", false, "Use completion mode (no chat template)")
 	flag.Parse()
 
 	fmt.Println("Vexel Inference Engine - Interactive Mode")
 	fmt.Println("Loading model...")
 
-	// 1. Load Config
-	configPath := filepath.Join(*modelDir, "tiny_config.json") // Adjust name if needed
-	// ... (Load logic same as before) ...
-	configFile, err := os.Open(configPath)
-	// Fallback logic
+	// Determine model file and type
+	weightsPath, isGGUF, err := resolveModelPath(*modelPath)
 	if err != nil {
-		configPath = filepath.Join(*modelDir, "config.json")
-		configFile, _ = os.Open(configPath)
+		log.Fatalf("Failed to find model: %v", err)
 	}
-	if configFile != nil {
-		configFile.Close()
+	fmt.Printf("Model file: %s\n", weightsPath)
+
+	// Load config - either from GGUF metadata or use defaults
+	var cfg runtime.ModelConfig
+	var tok *tokenizer.Tokenizer
+
+	if isGGUF {
+		// Load config from GGUF file
+		gf, err := gguf.Open(weightsPath)
+		if err != nil {
+			log.Fatalf("Failed to open GGUF file: %v", err)
+		}
+		gf.PrintSummary()
+		cfg = runtime.ModelConfigFromGGUF(gf.GetModelConfig())
+		gf.Close()
+
+		fmt.Printf("Config loaded from GGUF: %d layers, %d hidden, %d heads\n",
+			cfg.NumHiddenLayers, cfg.HiddenSize, cfg.NumAttentionHeads)
+	} else {
+		// Default config for TinyLlama (SafeTensors mode)
+		cfg = runtime.ModelConfig{
+			HiddenSize:        2048,
+			IntermediateSize:  5632,
+			NumHiddenLayers:   22,
+			NumAttentionHeads: 32,
+			NumKeyValueHeads:  4,
+			VocabSize:         32000,
+			MaxSeqLen:         2048,
+			RoPETheta:         10000.0,
+			RMSNormEPS:        1e-5,
+			DType:             tensor.Float32,
+		}
 	}
 
-	// Hardcoded config for demo
-	cfg := runtime.ModelConfig{
-		HiddenSize:        2048,
-		IntermediateSize:  5632, 
-		NumHiddenLayers:   22,
-		NumAttentionHeads: 32,
-		NumKeyValueHeads:  4,
-		VocabSize:         32000,
-		MaxSeqLen:         2048,
-		RoPETheta:         10000.0,
-		RMSNormEPS:        1e-5,
-		DType:             tensor.Float32,
+	// Load tokenizer (look for tokenizer.json in same directory as model)
+	modelDir := filepath.Dir(weightsPath)
+	tokPaths := []string{
+		filepath.Join(modelDir, "tokenizer.json"),
+		filepath.Join(modelDir, "tiny_tokenizer.json"),
+	}
+	for _, tokPath := range tokPaths {
+		tok, err = tokenizer.Load(tokPath)
+		if err == nil {
+			fmt.Printf("Tokenizer loaded from: %s\n", tokPath)
+			break
+		}
+	}
+	if tok == nil {
+		log.Printf("Warning: No tokenizer found in %s", modelDir)
 	}
 
-	// 2. Load Tokenizer
-	tokPath := filepath.Join(*modelDir, "tiny_tokenizer.json")
-	tok, err := tokenizer.Load(tokPath)
-	if err != nil {
-		log.Printf("Warning: Failed to load tokenizer: %v", err)
-	}
-
-	// 3. Initialize Runtime
+	// Initialize backend and context
 	backend := cpu.NewBackend()
-	
-	// Create context with Scratch Arena
 	ctx := memory.NewInferenceContext(tensor.CPU)
-	// Allocate scratch for batched prefill (up to 256 tokens at once)
+
+	// Allocate scratch arena for batched prefill
 	maxPrefillTokens := 256
 	scratchSize := cfg.ScratchBytes(maxPrefillTokens)
-	// Add buffer for logits (VocabSize * 4 bytes) plus attention scores (seqLen^2)
 	logitsSize := int64(cfg.VocabSize) * 4
 	attnScoresSize := int64(maxPrefillTokens * maxPrefillTokens * 4)
 	totalScratch := scratchSize + logitsSize*2 + attnScoresSize
 	ctx.AddArena(memory.Scratch, int(totalScratch))
-	fmt.Printf("Scratch arena: %d MB (supports up to %d token prefill)\n", totalScratch/(1024*1024), maxPrefillTokens)
-	
+	fmt.Printf("Scratch arena: %d MB\n", totalScratch/(1024*1024))
+
+	// Create runtime
 	rt, err := runtime.NewModelRuntime(backend, ctx, nil, cfg)
 	if err != nil {
 		log.Fatalf("Failed to create runtime: %v", err)
 	}
 
 	// Create paged KV cache
-	maxBlocks := 256 // Enough for 4096 tokens with block size 16
+	maxBlocks := 256
 	pagedCache := rt.CreatePagedKVCache(maxBlocks)
-	fmt.Printf("Paged KV cache: %d blocks available\n", pagedCache.FreeBlocks())
+	fmt.Printf("Paged KV cache: %d blocks\n", pagedCache.FreeBlocks())
 
-	// 4. Load Weights
-	weightsPath := filepath.Join(*modelDir, "tiny_model.safetensors")
+	// Load weights (auto-detects format from extension)
 	if err := rt.LoadWeights(weightsPath); err != nil {
 		log.Fatalf("Failed to load weights: %v", err)
 	}
-	fmt.Println("Model loaded.")
+	fmt.Println("Model loaded successfully.")
 
-	// 5. Start Scheduler
+	// Create scheduler
 	schedCfg := scheduler.Config{
 		MaxBatchSize: 1,
 		MaxSequences: 1,
@@ -110,11 +133,60 @@ func main() {
 	fmt.Printf("Sampling: temp=%.2f, top-k=%d, top-p=%.2f, max-tokens=%d\n",
 		*temperature, *topK, *topP, *maxTokens)
 
-	// 6. Run Scheduler
+	// Start scheduler
 	go func() {
 		sched.Run(context.Background())
 	}()
 
-	// 7. Interactive Loop
-	internal.RunChatLoop(os.Stdin, os.Stdout, sched)
+	// Run interactive loop
+	replConfig := internal.DefaultREPLConfig()
+	if *completionMode {
+		replConfig.ChatMode = false
+	}
+	internal.RunChatLoopWithConfig(os.Stdin, os.Stdout, sched, replConfig)
+}
+
+// resolveModelPath finds the model file from the given path.
+// Returns the full path, whether it's GGUF format, and any error.
+func resolveModelPath(path string) (string, bool, error) {
+	if path == "" {
+		path = "models"
+	}
+
+	// Check if path is a file
+	info, err := os.Stat(path)
+	if err == nil && !info.IsDir() {
+		isGGUF := strings.HasSuffix(strings.ToLower(path), ".gguf")
+		return path, isGGUF, nil
+	}
+
+	// Path is a directory - look for model files
+	dir := path
+
+	// Try GGUF files first (preferred)
+	ggufFiles, _ := filepath.Glob(filepath.Join(dir, "*.gguf"))
+	if len(ggufFiles) > 0 {
+		return ggufFiles[0], true, nil
+	}
+
+	// Try SafeTensors files
+	stFiles, _ := filepath.Glob(filepath.Join(dir, "*.safetensors"))
+	if len(stFiles) > 0 {
+		return stFiles[0], false, nil
+	}
+
+	// Try specific known filenames
+	knownNames := []string{
+		"tiny_model.safetensors",
+		"model.safetensors",
+		"pytorch_model.safetensors",
+	}
+	for _, name := range knownNames {
+		p := filepath.Join(dir, name)
+		if _, err := os.Stat(p); err == nil {
+			return p, false, nil
+		}
+	}
+
+	return "", false, fmt.Errorf("no model file found in %s", dir)
 }

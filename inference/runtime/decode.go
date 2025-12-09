@@ -23,10 +23,8 @@ func (m *ModelRuntime) DecodeStep(inputs BatchRuntimeInputs) (tensor.Tensor, err
 	// Ideally Arena handles this cumulatively.
 	
 	// Allocate from Arena
-	// We assume ctx has a Scratch arena.
 	if m.ctx == nil {
-		fmt.Println("[DEBUG] Context is NIL!")
-		// Mock/Test fallback for uninitialized runtime
+		// Test fallback for uninitialized runtime
 		return tensor.NewTensor(
 			tensor.NewShape(batchSize, m.config.VocabSize),
 			m.config.DType,
@@ -35,8 +33,7 @@ func (m *ModelRuntime) DecodeStep(inputs BatchRuntimeInputs) (tensor.Tensor, err
 	}
 	arena := m.ctx.GetArena(memory.Scratch)
 	if arena == nil {
-		fmt.Println("[DEBUG] Arena is NIL!")
-		// Mock/Test fallback
+		// Test fallback
 		return tensor.NewTensor(
 			tensor.NewShape(batchSize, m.config.VocabSize),
 			m.config.DType,
@@ -121,10 +118,8 @@ func (m *ModelRuntime) DecodeStep(inputs BatchRuntimeInputs) (tensor.Tensor, err
 	// Result shape: [Batch, Vocab]
 	logits, logitsData, err := allocTensor([]int{batchSize, m.config.VocabSize})
 	if err != nil {
-		fmt.Printf("DecodeStep Alloc Logits Failed: %v\n", err)
 		return tensor.Tensor{}, err
 	}
-	// fmt.Printf("DecodeStep Logits Ptr: %v, Len: %d\n", logits.DevicePtr(), len(logitsData))
 	
 	if !m.OutputHead.DevicePtr().IsNil() {
 		headWeights := tensor.ToFloat32Slice(m.OutputHead)

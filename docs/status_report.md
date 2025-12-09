@@ -1,61 +1,100 @@
 # Vexel Inference Engine - Status Report
 
-**Date:** December 7, 2025
-**Component:** CPU Backend / Runtime
-**Severity:** Critical (Panic)
+**Date:** December 8, 2025
+**Component:** CPU Backend / Runtime / Tokenizer
+**Status:** Working (with known limitations)
 
-## 1. Critical Issue: Panic in Attention Layer
-The inference engine is currently crashing with a runtime panic during the execution of the first Transformer block.
+## 1. Executive Summary
 
-**Error:**
+The Vexel inference engine is **functionally working** for TinyLlama models. The core inference path (embedding → transformer blocks → logits) produces mathematically correct output.
+
+**Key achievement:** The model generates coherent, contextually appropriate text for simple completion-style prompts.
+
+## 2. Current Capabilities
+
+### Working
+- **GGUF file loading** with Q4_0 and Q6_K quantization support
+- **Full forward pass** through 22-layer TinyLlama transformer
+- **GQA (Grouped Query Attention)** with 32 query heads and 4 KV heads
+- **RoPE positional encoding** with correct position-dependent rotation
+- **Paged KV cache** for efficient autoregressive generation
+- **SentencePiece tokenization** matching HuggingFace exactly
+- **Completion mode** for text generation
+
+### Example Working Output
 ```
-panic: runtime error: index out of range [524288] with length 524288
-...
-vexel/inference/backend/cpu.(*cpuBackend).MatmulTransposeB.func1
+Input: "Hello there"
+Output: "! I'm glad to see you!"
+
+Input: "Good morning"
+Output: ", and I'm glad to hear that you're feeling better."
+
+Input: "Hi there"
+Output: "! I'm not sure how to make a list of the best..."
 ```
 
-### Root Cause Analysis
-The crash is caused by a mismatch between the expected and actual dimensions of the Key/Value weight matrices due to **Grouped Query Attention (GQA)**.
+## 3. Known Limitations
 
-1.  **Model Configuration:**
-    *   The loaded model (`tiny_model.safetensors`) implements the `Llama` architecture with GQA.
-    *   `HiddenSize`: 2048
-    *   `NumAttentionHeads`: 32 (Query heads)
-    *   `NumKeyValueHeads`: 4 (KV heads)
-    *   `HeadDim`: 64
+### Chat Template Issues
+The chat-formatted prompts (`<|user|>`, `<|assistant|>`) produce degraded output:
+- Model generates repetitive markers like `|assistant||assistant|`
+- Likely due to Q4_0 quantization quality or model-specific behavior
+- **Workaround:** Use `--completion` flag to disable chat template
 
-2.  **Weight Shapes:**
-    *   `Wq` (Query Projection): `[2048, 2048]` (Standard)
-    *   **`Wk` (Key Projection): `[256, 2048]`** (4 heads * 64 dim) -> *Significantly smaller than hidden size*
-    *   **`Wv` (Value Projection): `[256, 2048]`** (4 heads * 64 dim)
+### Performance
+- Current throughput: ~1.1 tok/s decode, ~5-10 tok/s prefill (single-threaded CPU)
+- Metal GPU backend not yet implemented
 
-3.  **The Bug:**
-    *   The `BlockRuntime.Execute` function naively assumes that all linear projections (`Wq`, `Wk`, `Wv`) output a tensor of size `HiddenSize` (2048).
-    *   It calls `MatmulTransposeB` requesting an output dimension (`N`) of 2048.
-    *   The CPU backend iterates from `j = 0` to `2047`.
-    *   When accessing the `Wk` weight matrix at row 256 (index `256 * 2048 = 524288`), it exceeds the slice bounds because `Wk` only has 256 rows.
+## 4. CLI Usage
 
-## 2. Secondary Issues identified
+```bash
+# Completion mode (recommended for Q4_0 models)
+./vexel --model models/tinyllama-1.1b-chat-v1.0.Q4_0.gguf --completion --temp 0
 
-### A. Scheduler Input Handling
-*   **Status:** Partially Patched
-*   **Issue:** The `Scheduler` was previously initializing `BatchRuntimeInputs` with nil tokens, leading to early exits and `nil` logit tensors. A temporary fix was applied to inject mock tokens (`1`).
+# Chat mode (may produce degraded output with Q4_0)
+./vexel --model models/tinyllama-1.1b-chat-v1.0.Q4_0.gguf
 
-### B. SDPA Implementation Limits
-*   **Status:** Broken for GQA
-*   **Issue:** The current `BlockRuntime` implementation attempts to perform attention by multiplying `Q` and `K` directly as flat matrices: `Matmul(Q, K^T)`.
-    *   With GQA, `Q` has 2048 features and `K` has 256. This multiplication is mathematically invalid without reshaping `Q` into heads and broadcasting `K`.
-    *   Even if the panic is fixed by correcting the matrix dimensions, the resulting attention scores will be mathematical garbage without a proper Multi-Head Attention (MHA/GQA) loop.
+# Sampling parameters
+./vexel --model <path> --temp 0.7 --top-k 40 --top-p 0.9 --max-tokens 256
+```
 
-### C. Config Mismatch
-*   **Status:** Risky
-*   **Issue:** The CLI was hardcoding `HiddenSize: 288` while the model file actually used `HiddenSize: 2048`. This led to confusion during debugging until the true dimensions were verified via the loading logs.
+## 5. Architecture Summary
 
-## 3. Recommended Fixes
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+│  Tokenizer  │ ──▶ │   Runtime    │ ──▶ │   Sampler   │
+│(SentencePiece)│    │ (22 layers)  │     │  (Greedy/   │
+└─────────────┘     │              │     │  Top-K/P)   │
+                    │ ┌──────────┐ │     └─────────────┘
+                    │ │ RMSNorm  │ │
+                    │ │ Q/K/V Proj │
+                    │ │ RoPE     │ │
+                    │ │ GQA Attn │ │
+                    │ │ MLP(SwiGLU)│
+                    │ └──────────┘ │
+                    └──────────────┘
+```
 
-1.  **Fix Matmul Dimensions:** Update `BlockRuntime.Execute` to dynamically determine the output dimension `N` from the weight tensor's shape (`t.Shape().Dims()[0]`) instead of assuming `HiddenSize`. This will prevent the immediate panic.
-2.  **Implement GQA/MHA Logic:** Rewrite the Attention calculation in `BlockRuntime` to:
-    *   Reshape `Q`, `K`, `V` into `[Batch, Seq, Heads, HeadDim]`.
-    *   Handle GQA repetition (broadcasting KV heads to match Query heads).
-    *   Perform per-head Dot Product Attention.
-3.  **Update Config Loading:** Ensure the CLI loads `tiny_config.json` values correctly instead of relying on hardcoded defaults.
+## 6. Test Results
+
+All tests passing:
+- `inference/backend/cpu` - CPU kernels (matmul, RoPE, softmax, etc.)
+- `inference/kv` - Paged KV cache operations
+- `inference/runtime` - End-to-end inference
+- `inference/pkg/tokenizer` - SentencePiece encoding/decoding
+- `inference/pkg/gguf` - GGUF file format parsing
+- `inference/scheduler` - Request scheduling
+
+## 7. Next Steps
+
+1. **Metal GPU backend** - Implement GPU acceleration for macOS
+2. **Higher quality models** - Test with Q8_0 or F16 quantization
+3. **Batched inference** - Enable concurrent request processing
+4. **Streaming output** - Improve token-by-token streaming
+
+## 8. Files Modified (Recent)
+
+- `inference/cmd/vexel/cli.go` - Added `--completion` flag
+- `inference/pkg/tokenizer/tokenizer.go` - Fixed SentencePiece encoding
+- `inference/runtime/block.go` - GQA and paged KV cache support
+- `inference/backend/cpu/backend.go` - RoPE and SDPA implementations

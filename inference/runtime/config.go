@@ -1,6 +1,9 @@
 package runtime
 
-import "vexel/inference/tensor"
+import (
+	"vexel/inference/pkg/gguf"
+	"vexel/inference/tensor"
+)
 
 // ModelConfig defines the hyperparameters for the model architecture.
 type ModelConfig struct {
@@ -154,11 +157,38 @@ func (c ModelConfig) MemoryPlan(batchSize int, contextLen int, weightsProfile te
 	// For KV cache, assuming standard precision (BF16) for now as we don't pass separate profile yet
 	kv := c.KVBytes(batchSize, contextLen, tensor.QuantNone)
 	scratch := c.ScratchBytes(batchSize)
-	
+
 	return MemoryPlan{
 		Weights: weights,
 		KV:      kv,
 		Scratch: scratch,
 		Total:   weights + kv + scratch,
+	}
+}
+
+// ModelConfigFromGGUF creates a ModelConfig from GGUF file configuration.
+func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
+	// Use extracted values, with sensible defaults for missing data
+	maxSeqLen := g.ContextLength
+	if maxSeqLen == 0 {
+		maxSeqLen = 2048 // Default context length
+	}
+
+	ropeTheta := float64(g.RoPETheta)
+	if ropeTheta == 0 {
+		ropeTheta = 10000.0 // Default RoPE theta
+	}
+
+	return ModelConfig{
+		HiddenSize:        g.HiddenSize,
+		IntermediateSize:  g.IntermediateSize,
+		NumHiddenLayers:   g.NumLayers,
+		NumAttentionHeads: g.NumHeads,
+		NumKeyValueHeads:  g.NumKVHeads,
+		VocabSize:         g.VocabSize,
+		MaxSeqLen:         maxSeqLen,
+		RoPETheta:         ropeTheta,
+		RMSNormEPS:        1e-5, // Standard default
+		DType:             tensor.Float32, // We dequantize to F32 for CPU
 	}
 }

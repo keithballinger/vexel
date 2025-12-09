@@ -4,6 +4,7 @@ import (
 	"vexel/inference/backend/cpu"
 	"vexel/inference/kv"
 	"vexel/inference/memory"
+	"vexel/inference/pkg/gguf"
 	"vexel/inference/tensor"
 )
 
@@ -23,6 +24,9 @@ type ModelRuntime struct {
 
 	// Keep mapped file alive
 	mappedFile interface{ Close() error }
+
+	// GGUF loader (kept open for potential streaming access)
+	ggufLoader *gguf.TensorLoader
 
 	// Keep converted weight slices alive to prevent GC
 	keepAlive [][]float32

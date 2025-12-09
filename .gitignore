@@ -1,0 +1,7 @@
+
+# Model files
+models/
+*.gguf
+*.safetensors
+vexel
+inference/vexel

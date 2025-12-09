@@ -20,9 +20,29 @@ type Config struct {
 
 // SchedulerMetrics holds performance indicators.
 type SchedulerMetrics struct {
-	ActiveSequences int
+	ActiveSequences    int
 	CompletedSequences int
-	TotalTokens int
+	TotalTokens        int
+	PrefillTokens      int           // Tokens processed during prefill
+	DecodeTokens       int           // Tokens generated during decode
+	PrefillTime        time.Duration // Total time spent in prefill
+	DecodeTime         time.Duration // Total time spent in decode
+}
+
+// TokensPerSecond returns the decode tok/s rate.
+func (m SchedulerMetrics) TokensPerSecond() float64 {
+	if m.DecodeTime == 0 {
+		return 0
+	}
+	return float64(m.DecodeTokens) / m.DecodeTime.Seconds()
+}
+
+// PrefillTokensPerSecond returns the prefill tok/s rate.
+func (m SchedulerMetrics) PrefillTokensPerSecond() float64 {
+	if m.PrefillTime == 0 {
+		return 0
+	}
+	return float64(m.PrefillTokens) / m.PrefillTime.Seconds()
 }
 
 // Scheduler manages the execution of sequences.
@@ -172,6 +192,8 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 	var logits tensor.Tensor
 	var err error
 
+	startTime := time.Now()
+
 	if usePagedCache {
 		inputs := runtime.NewBatchRuntimeInputsFull(tokens, positions, seqIDs)
 		logits, err = s.runtime.DecodeStepWithPagedKV(inputs)
@@ -180,12 +202,16 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 		logits, err = s.runtime.DecodeStep(inputs)
 	}
 
+	decodeTime := time.Since(startTime)
+
 	if err != nil {
 		return err
 	}
 
 	// Update metrics
 	s.metrics.TotalTokens += len(decodeSeqs)
+	s.metrics.DecodeTokens += len(decodeSeqs)
+	s.metrics.DecodeTime += decodeTime
 
 	// Sample and Decode
 	logitsData := tensor.ToFloat32Slice(logits)
@@ -254,7 +280,10 @@ func (s *Scheduler) runBatchedPrefill(seq *Sequence) error {
 	}
 
 	// Run prefill with all tokens at once
+	startTime := time.Now()
 	logits, err := s.runtime.PrefillWithPagedKV(promptTokens, seq.KVSeqID(), 0)
+	prefillTime := time.Since(startTime)
+
 	if err != nil {
 		return fmt.Errorf("prefill failed: %w", err)
 	}
@@ -264,6 +293,8 @@ func (s *Scheduler) runBatchedPrefill(seq *Sequence) error {
 
 	// Update metrics
 	s.metrics.TotalTokens += len(promptTokens)
+	s.metrics.PrefillTokens += len(promptTokens)
+	s.metrics.PrefillTime += prefillTime
 
 	// Sample from the logits (which are for the last prompt token)
 	logitsData := tensor.ToFloat32Slice(logits)

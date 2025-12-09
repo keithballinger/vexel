@@ -2,16 +2,128 @@ package runtime
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unsafe"
 	"vexel/inference/pkg/bf16"
+	"vexel/inference/pkg/gguf"
 	"vexel/inference/pkg/safetensors"
 	"vexel/inference/tensor"
 )
 
-// LoadWeights loads model weights from a safetensors file.
+// LoadWeights loads model weights from a file (auto-detects format).
 func (m *ModelRuntime) LoadWeights(path string) error {
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext == ".gguf" {
+		return m.LoadWeightsGGUF(path)
+	}
+	return m.LoadWeightsSafetensors(path)
+}
+
+// LoadWeightsGGUF loads model weights from a GGUF file.
+func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
+	loader, err := gguf.NewTensorLoader(path)
+	if err != nil {
+		return fmt.Errorf("failed to open GGUF file: %w", err)
+	}
+	// Keep loader open for potential future use
+	m.ggufLoader = loader
+
+	// Print stats
+	loader.PrintTensorStats()
+
+	// Load each required tensor
+	tensorNames := m.requiredTensorNames()
+	loadedCount := 0
+	for _, hfName := range tensorNames {
+		ggufName := gguf.GetLayerTensorName(hfName)
+
+		data, dims, err := loader.LoadTensor(ggufName)
+		if err != nil {
+			// Try alternative naming patterns
+			altNames := m.alternativeGGUFNames(ggufName)
+			loaded := false
+			for _, altName := range altNames {
+				data, dims, err = loader.LoadTensor(altName)
+				if err == nil {
+					loaded = true
+					break
+				}
+			}
+			if !loaded {
+				fmt.Printf("Warning: tensor %s (%s) not found\n", hfName, ggufName)
+				continue
+			}
+		}
+
+		// Create tensor from data
+		// Note: GGUF loader already transposes 2D matrices and swaps dimensions
+		t := tensor.NewTensor(
+			tensor.NewShape(dims...),
+			m.config.DType,
+			tensor.NewDevicePtr(tensor.CPU, uintptr(unsafe.Pointer(&data[0]))),
+		)
+
+		// Keep reference to prevent GC
+		m.keepAlive = append(m.keepAlive, data)
+
+		// Map to struct
+		m.mapTensor(hfName, t)
+		loadedCount++
+	}
+
+	fmt.Printf("Loaded %d/%d tensors from GGUF\n", loadedCount, len(tensorNames))
+
+	return nil
+}
+
+// requiredTensorNames returns the list of tensor names needed for the model.
+func (m *ModelRuntime) requiredTensorNames() []string {
+	names := []string{
+		"model.embed_tokens.weight",
+		"model.norm.weight",
+		"lm_head.weight",
+	}
+
+	for i := 0; i < m.config.NumHiddenLayers; i++ {
+		prefix := fmt.Sprintf("model.layers.%d.", i)
+		names = append(names,
+			prefix+"self_attn.q_proj.weight",
+			prefix+"self_attn.k_proj.weight",
+			prefix+"self_attn.v_proj.weight",
+			prefix+"self_attn.o_proj.weight",
+			prefix+"mlp.gate_proj.weight",
+			prefix+"mlp.up_proj.weight",
+			prefix+"mlp.down_proj.weight",
+			prefix+"input_layernorm.weight",
+			prefix+"post_attention_layernorm.weight",
+		)
+	}
+
+	return names
+}
+
+// alternativeGGUFNames returns alternative names to try for a tensor.
+func (m *ModelRuntime) alternativeGGUFNames(name string) []string {
+	// Some GGUF files use slightly different naming
+	alts := []string{}
+
+	// Try without .weight suffix
+	if strings.HasSuffix(name, ".weight") {
+		alts = append(alts, strings.TrimSuffix(name, ".weight"))
+	}
+
+	// Try with model. prefix
+	if !strings.HasPrefix(name, "model.") {
+		alts = append(alts, "model."+name)
+	}
+
+	return alts
+}
+
+// LoadWeightsSafetensors loads model weights from a safetensors file.
+func (m *ModelRuntime) LoadWeightsSafetensors(path string) error {
 	mapped, err := safetensors.Mmap(path)
 	if err != nil {
 		return fmt.Errorf("failed to mmap weights file: %w", err)
