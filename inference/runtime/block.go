@@ -273,11 +273,8 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 		b.matMulTransposed(normOutPtr, b.W3, upPtr, seqLen, w3Dim, hiddenSize)
 	}
 
-	// SiLU on gate
-	b.backend.SiLU(gatePtr, gatePtr, seqLen*intermediateSize)
-
-	// Multiply gate * up
-	b.backend.Mul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
+	// Fused SiLU+Mul: gate = silu(gate) * up
+	b.backend.SiLUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
 
 	// Down projection and residual
 	if !b.W2.DevicePtr().IsNil() {
@@ -471,9 +468,8 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 	}
 	// No sync - W1/W3 must complete before SiLU can read gatePtr/upPtr (serialized)
 
-	b.backend.SiLU(gatePtr, gatePtr, seqLen*intermediateSize)
-	b.backend.Mul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
-	// No sync - SiLU/Mul must complete before W2 can read gatePtr (serialized)
+	b.backend.SiLUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
+	// No sync - SiLUMul must complete before W2 can read gatePtr (serialized)
 
 	if !b.W2.DevicePtr().IsNil() {
 		w2Dim := b.W2.Shape().Dims()[0]

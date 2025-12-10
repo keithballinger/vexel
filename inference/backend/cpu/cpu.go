@@ -279,6 +279,19 @@ func (b *CPUBackend) SiLU(x, out tensor.DevicePtr, n int) {
 	}
 }
 
+// SiLUMul performs fused silu(gate) * up operation.
+func (b *CPUBackend) SiLUMul(gate, up, out tensor.DevicePtr, n int) {
+	gateData := ptrToFloat32Slice(gate, n)
+	upData := ptrToFloat32Slice(up, n)
+	outData := ptrToFloat32Slice(out, n)
+
+	for i := 0; i < n; i++ {
+		g := gateData[i]
+		sigmoid := 1.0 / (1.0 + float32(math.Exp(float64(-g))))
+		outData[i] = (g * sigmoid) * upData[i]
+	}
+}
+
 // Softmax applies the softmax function row-wise.
 func (b *CPUBackend) Softmax(x, out tensor.DevicePtr, rows, cols int) {
 	xData := ptrToFloat32Slice(x, rows*cols)

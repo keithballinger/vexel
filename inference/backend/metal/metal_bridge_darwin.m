@@ -623,6 +623,19 @@ kernel void mul_f32(
     out[gid] = a[gid] * b[gid];
 }
 
+// Fused SiLU+Mul: out = silu(gate) * up
+// Combines activation and multiplication into single kernel
+kernel void silu_mul_f32(
+    device const float* gate [[buffer(0)]],
+    device const float* up [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    float g = gate[gid];
+    float silu_g = g / (1.0f + exp(-g));
+    out[gid] = silu_g * up[gid];
+}
+
 // Embedding lookup
 kernel void embedding_f32(
     device const int* tokens [[buffer(0)]],
@@ -1356,6 +1369,21 @@ void metal_silu_f32(void* queuePtr, void* pipelinePtr,
 
     NSArray* buffers = @[
         (__bridge id<MTLBuffer>)x,
+        (__bridge id<MTLBuffer>)out
+    ];
+
+    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+// Fused SiLU+Mul: out = silu(gate) * up
+void metal_silu_mul_f32(void* queuePtr, void* pipelinePtr,
+                        void* gate, void* up, void* out, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)gate,
+        (__bridge id<MTLBuffer>)up,
         (__bridge id<MTLBuffer>)out
     ];
 

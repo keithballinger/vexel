@@ -55,6 +55,7 @@ type Backend struct {
 	ropePipeline             unsafe.Pointer
 	ropeGQAPipeline          unsafe.Pointer
 	siluPipeline             unsafe.Pointer
+	siluMulPipeline          unsafe.Pointer
 	addPipeline              unsafe.Pointer
 	mulPipeline              unsafe.Pointer
 	sdpaDecodePipeline       unsafe.Pointer
@@ -96,6 +97,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.ropePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_f32"))
 	b.ropeGQAPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_gqa_f32"))
 	b.siluPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_f32"))
+	b.siluMulPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_mul_f32"))
 	b.addPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_f32"))
 	b.mulPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("mul_f32"))
 	b.sdpaDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_gqa_f32"))
@@ -280,6 +282,12 @@ func (b *Backend) Softmax(x, out tensor.DevicePtr, rows, cols int) {
 func (b *Backend) SiLU(x, out tensor.DevicePtr, n int) {
 	C.metal_silu_f32(b.queue, b.siluPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
+}
+
+// SiLUMul performs fused silu(gate) * up operation.
+func (b *Backend) SiLUMul(gate, up, out tensor.DevicePtr, n int) {
+	C.metal_silu_mul_f32(b.queue, b.siluMulPipeline,
+		unsafe.Pointer(gate.Addr()), unsafe.Pointer(up.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
 
 // Add performs element-wise addition.

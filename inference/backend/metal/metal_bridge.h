@@ -76,6 +76,9 @@ void metal_softmax_f32(void* queue, void* pipeline,
 void metal_silu_f32(void* queue, void* pipeline,
                     void* x, void* out, int n);
 
+void metal_silu_mul_f32(void* queue, void* pipeline,
+                        void* gate, void* up, void* out, int n);
+
 void metal_add_f32(void* queue, void* pipeline,
                    void* a, void* b, void* out, int n);
 

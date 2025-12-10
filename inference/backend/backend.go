@@ -72,6 +72,10 @@ type Backend interface {
 	// x: [n], out: [n]
 	SiLU(x, out tensor.DevicePtr, n int)
 
+	// SiLUMul performs fused silu(gate) * up operation.
+	// gate: [n], up: [n], out: [n]
+	SiLUMul(gate, up, out tensor.DevicePtr, n int)
+
 	// Softmax applies softmax row-wise.
 	// x: [rows, cols], out: [rows, cols]
 	Softmax(x, out tensor.DevicePtr, rows, cols int)
