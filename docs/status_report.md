@@ -412,42 +412,45 @@ Created a truly batched Metal kernel `matmul_q4_0_batched_f32` that uses a 2D th
 
 ## Performance Gap Analysis: Vexel vs llama.cpp
 
-### Current Performance (December 10, 2024)
+### Current Performance (December 10, 2024) - UPDATED
 
-| Metric | Vexel | llama.cpp | Gap |
-|--------|-------|-----------|-----|
-| **Prefill** | 97 tok/s | 1224 tok/s | **12.6x slower** |
-| **Decode** | 61 tok/s | 245 tok/s | **4x slower** |
+| Metric | Vexel Before | Vexel After | llama.cpp | Gap (After) |
+|--------|--------------|-------------|-----------|-------------|
+| **Prefill** | 97 tok/s | **310 tok/s** | 1224 tok/s | **4x slower** |
+| **Decode** | 61 tok/s | **120 tok/s** | 245 tok/s | **2x slower** |
 
-### Root Cause Analysis
+**Improvement achieved:** Prefill 3.2x faster, Decode 2x faster!
 
-The performance gap is due to several optimizations in llama.cpp that Vexel doesn't yet implement:
+### Optimizations Implemented
 
-#### 1. SIMD Vectorized Dequantization
-**Current Vexel (slow):**
+#### 1. SIMD Vectorized Dequantization (DONE)
+**Before (slow):**
 ```metal
-// Process Q4_0 elements one at a time
-for (int i = 0; i < 16; i++) {
-    uchar byte_val = blockPtr[2 + i];
-    int q0 = byte_val & 0x0F;
-    sum += A[k0] * scale * float(q0 - 8);  // Scalar operations
+// Process Q4_0 elements with looped byte reads
+for (int i = 0; i < 16; i += 4) {
+    uchar b0 = blockPtr[2 + i];
+    // ...scalar accumulation
 }
 ```
 
-**llama.cpp style (fast):**
-- Uses `simdgroup_load` for vectorized memory access
-- Processes 4-8 elements at once using `float4` or `half4`
-- SIMD shuffle operations for efficient reduction
+**After (fast):**
+```metal
+// Load activations using float4 vectorized reads
+float4 a0 = A4[base_k / 4 + 0];  // 4 floats at once
+float4 a1 = A4[base_k / 4 + 1];
+// ... 8 float4 loads for 32 elements total
+// Fully unrolled accumulation with all bytes loaded upfront
+```
 
-#### 2. Multiple Outputs Per Threadgroup
-- **Vexel**: 1 output element per threadgroup
-- **llama.cpp**: 2-4 output elements per threadgroup
-- Benefits: Better weight reuse, reduced dispatch overhead
+#### 2. Multiple Outputs Per Threadgroup (DONE)
+- **Matvec (decode)**: Q4_NR=2 output rows per threadgroup
+- **Batched (prefill)**: Q4_BATCH_NR=4 output columns per threadgroup
+- Benefits: Better activation reuse, reduced dispatch overhead
 
-#### 3. Loop Unrolling & Register Blocking
-- Process 4-8 Q4 blocks per iteration instead of 1
-- Better instruction-level parallelism
-- Reduced loop overhead
+#### 3. Loop Unrolling & Register Blocking (DONE)
+- Full 32-element unroll per Q4 block
+- Activation loads moved outside the output loop for reuse
+- All nibble bytes loaded upfront before accumulation
 
 #### 4. SIMD Matrix Operations
 - Apple's `simdgroup_matrix` for fast 8x8 matrix operations

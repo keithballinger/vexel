@@ -109,10 +109,14 @@ kernel void matvec_transposed_f32(
 // Q4_0 Matrix-vector multiplication: C = A @ B^T where B is Q4_0 quantized
 // A: [1, K] in float32, B: [N, K] in Q4_0 format, C: [1, N] in float32
 // Q4_0 format: 18 bytes per 32 elements (2 byte f16 scale + 16 bytes of nibbles)
-// Each thread computes one output element (simd parallel dot product)
-constant int Q4_MV_THREADGROUP_SIZE = 256;
+//
+// OPTIMIZED VERSION: Uses SIMD for parallel reduction
+// - Each simdgroup processes Q4_NR output rows
+// - Better ILP with unrolled inner loop
+constant int Q4_MV_SIMD_SIZE = 32;     // One simdgroup for matvec
 constant int Q4_BLOCK_SIZE = 32;
 constant int Q4_BYTES_PER_BLOCK = 18;
+constant int Q4_NR = 2;  // Number of output rows per simdgroup (decode)
 
 // Helper to convert f16 to f32 using software (avoids alignment issues)
 inline float q4_f16_to_f32(ushort h) {
@@ -144,66 +148,130 @@ kernel void matvec_q4_0_transposed_f32(
     uint simd_lane [[thread_index_in_simdgroup]],
     uint simd_group [[simdgroup_index_in_threadgroup]]
 ) {
-    // Each threadgroup computes one output element C[gid]
-    if (gid >= (uint)N) return;
+    // Each threadgroup (one simdgroup) handles Q4_NR=2 output rows
+    const int r0 = gid * Q4_NR;
+    if (r0 >= N) return;
 
-    float sum = 0.0f;
+    const int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
 
-    // Calculate Q4_0 row offset for row gid
-    int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
-    device const uchar* b_row = B + gid * numBlocks * Q4_BYTES_PER_BLOCK;
+    // Accumulators for each output row
+    float sumf[Q4_NR] = {0.0f};
 
-    // Each thread handles some blocks
-    for (int block = tid; block < numBlocks; block += Q4_MV_THREADGROUP_SIZE) {
-        device const uchar* blockPtr = b_row + block * Q4_BYTES_PER_BLOCK;
+    // Pointers to weight rows
+    device const uchar* bx[Q4_NR];
+    for (int row = 0; row < Q4_NR; ++row) {
+        bx[row] = (r0 + row < N) ? B + (r0 + row) * numBlocks * Q4_BYTES_PER_BLOCK : nullptr;
+    }
 
-        // Read f16 scale
-        ushort scale_u16 = ((ushort)blockPtr[1] << 8) | blockPtr[0];
-        float scale = q4_f16_to_f32(scale_u16);
+    // Pointer for vectorized activation reads
+    device const float4* A4 = (device const float4*)A;
 
+    // Each thread handles different blocks, stride by simdgroup size
+    for (int block = simd_lane; block < numBlocks; block += 32) {
         int base_k = block * Q4_BLOCK_SIZE;
 
-        // Process 16 bytes = 32 nibbles
-        for (int i = 0; i < 16 && base_k + i < K; i++) {
-            uchar byte_val = blockPtr[2 + i];
+        // Load activations for this block using float4 (8 float4s = 32 elements)
+        float4 a0 = A4[base_k / 4 + 0];  // k: 0-3
+        float4 a1 = A4[base_k / 4 + 1];  // k: 4-7
+        float4 a2 = A4[base_k / 4 + 2];  // k: 8-11
+        float4 a3 = A4[base_k / 4 + 3];  // k: 12-15
+        float4 a4 = A4[base_k / 4 + 4];  // k: 16-19
+        float4 a5 = A4[base_k / 4 + 5];  // k: 20-23
+        float4 a6 = A4[base_k / 4 + 6];  // k: 24-27
+        float4 a7 = A4[base_k / 4 + 7];  // k: 28-31
 
-            // Low nibble -> position i
-            int k0 = base_k + i;
-            int q0 = byte_val & 0x0F;
-            sum += A[k0] * scale * float(q0 - 8);
+        // Process each output row
+        for (int row = 0; row < Q4_NR; ++row) {
+            if (r0 + row >= N || bx[row] == nullptr) continue;
 
-            // High nibble -> position i + 16
-            int k1 = base_k + i + 16;
-            if (k1 < K) {
-                int q1 = (byte_val >> 4) & 0x0F;
-                sum += A[k1] * scale * float(q1 - 8);
-            }
+            device const uchar* blockPtr = bx[row] + block * Q4_BYTES_PER_BLOCK;
+
+            // Read f16 scale
+            ushort scale_u16 = ((ushort)blockPtr[1] << 8) | blockPtr[0];
+            float scale = q4_f16_to_f32(scale_u16);
+
+            // Load nibble data as uint4 for vectorized read (16 bytes)
+            // Note: offset +2 for scale bytes, need to read via uchar due to alignment
+            uchar b0  = blockPtr[2];  uchar b1  = blockPtr[3];
+            uchar b2  = blockPtr[4];  uchar b3  = blockPtr[5];
+            uchar b4  = blockPtr[6];  uchar b5  = blockPtr[7];
+            uchar b6  = blockPtr[8];  uchar b7  = blockPtr[9];
+            uchar b8  = blockPtr[10]; uchar b9  = blockPtr[11];
+            uchar b10 = blockPtr[12]; uchar b11 = blockPtr[13];
+            uchar b12 = blockPtr[14]; uchar b13 = blockPtr[15];
+            uchar b14 = blockPtr[16]; uchar b15 = blockPtr[17];
+
+            // Dequantize and accumulate
+            // Low nibbles map to k: 0-15, high nibbles map to k: 16-31
+            float acc = 0.0f;
+
+            // k: 0-3 (low nibbles of b0-b3)
+            acc += a0.x * float((b0  & 0x0F) - 8);
+            acc += a0.y * float((b1  & 0x0F) - 8);
+            acc += a0.z * float((b2  & 0x0F) - 8);
+            acc += a0.w * float((b3  & 0x0F) - 8);
+
+            // k: 4-7 (low nibbles of b4-b7)
+            acc += a1.x * float((b4  & 0x0F) - 8);
+            acc += a1.y * float((b5  & 0x0F) - 8);
+            acc += a1.z * float((b6  & 0x0F) - 8);
+            acc += a1.w * float((b7  & 0x0F) - 8);
+
+            // k: 8-11 (low nibbles of b8-b11)
+            acc += a2.x * float((b8  & 0x0F) - 8);
+            acc += a2.y * float((b9  & 0x0F) - 8);
+            acc += a2.z * float((b10 & 0x0F) - 8);
+            acc += a2.w * float((b11 & 0x0F) - 8);
+
+            // k: 12-15 (low nibbles of b12-b15)
+            acc += a3.x * float((b12 & 0x0F) - 8);
+            acc += a3.y * float((b13 & 0x0F) - 8);
+            acc += a3.z * float((b14 & 0x0F) - 8);
+            acc += a3.w * float((b15 & 0x0F) - 8);
+
+            // k: 16-19 (high nibbles of b0-b3)
+            acc += a4.x * float((b0  >> 4) - 8);
+            acc += a4.y * float((b1  >> 4) - 8);
+            acc += a4.z * float((b2  >> 4) - 8);
+            acc += a4.w * float((b3  >> 4) - 8);
+
+            // k: 20-23 (high nibbles of b4-b7)
+            acc += a5.x * float((b4  >> 4) - 8);
+            acc += a5.y * float((b5  >> 4) - 8);
+            acc += a5.z * float((b6  >> 4) - 8);
+            acc += a5.w * float((b7  >> 4) - 8);
+
+            // k: 24-27 (high nibbles of b8-b11)
+            acc += a6.x * float((b8  >> 4) - 8);
+            acc += a6.y * float((b9  >> 4) - 8);
+            acc += a6.z * float((b10 >> 4) - 8);
+            acc += a6.w * float((b11 >> 4) - 8);
+
+            // k: 28-31 (high nibbles of b12-b15)
+            acc += a7.x * float((b12 >> 4) - 8);
+            acc += a7.y * float((b13 >> 4) - 8);
+            acc += a7.z * float((b14 >> 4) - 8);
+            acc += a7.w * float((b15 >> 4) - 8);
+
+            sumf[row] += scale * acc;
         }
     }
 
-    // Warp-level reduction
-    sum = simd_sum(sum);
-
-    // Store warp results to shared memory
-    if (simd_lane == 0) {
-        shared[simd_group] = sum;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Final reduction by first warp
-    if (simd_group == 0) {
-        int num_warps = (Q4_MV_THREADGROUP_SIZE + 31) / 32;
-        float warp_sum = (simd_lane < (uint)num_warps) ? shared[simd_lane] : 0.0f;
-        warp_sum = simd_sum(warp_sum);
-        if (tid == 0) {
-            C[gid] = warp_sum;
+    // SIMD reduction and output
+    for (int row = 0; row < Q4_NR; ++row) {
+        float tot = simd_sum(sumf[row]);
+        if (simd_lane == 0 && r0 + row < N) {
+            C[r0 + row] = tot;
         }
     }
 }
 
 // True batched Q4_0 matmul: C[m,n] = A[m,k] @ B[n,k]^T
-// Uses 2D grid: gid.x = output column (N), gid.y = input row (M)
-// Single dispatch for all M*N output elements
+// OPTIMIZED: Uses vectorized float4 loads for activations
+// Each threadgroup (1 simdgroup of 32 threads) handles Q4_BATCH_NR output columns for one row
+// Grid: (N/Q4_BATCH_NR, M) threadgroups
+constant int Q4_BATCH_NR = 4;  // Number of output columns per threadgroup
+
 kernel void matmul_q4_0_batched_f32(
     device const float* A [[buffer(0)]],           // [M, K] activations
     device const uchar* B [[buffer(1)]],           // [N, K] in Q4_0 format
@@ -217,66 +285,119 @@ kernel void matmul_q4_0_batched_f32(
     uint simd_lane [[thread_index_in_simdgroup]],
     uint simd_group [[simdgroup_index_in_threadgroup]]
 ) {
-    // gid.x = output column (n), gid.y = input row (m)
-    int n = gid.x;
+    // gid.x = tile index in N dimension, gid.y = input row (m)
+    int n0 = gid.x * Q4_BATCH_NR;
     int m = gid.y;
 
-    if (n >= N || m >= M) return;
+    if (m >= M) return;
 
-    float sum = 0.0f;
+    const int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
 
-    // A row pointer: A[m, :]
-    device const float* a_row = A + m * K;
+    // A row pointer as float4 for vectorized reads
+    device const float4* A4 = (device const float4*)(A + m * K);
 
-    // B row pointer in Q4_0 format: B[n, :]
-    int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
-    device const uchar* b_row = B + n * numBlocks * Q4_BYTES_PER_BLOCK;
+    // Accumulators for Q4_BATCH_NR output columns
+    float sumf[Q4_BATCH_NR] = {0.0f};
 
-    // Each thread handles some blocks
-    for (int block = tid; block < numBlocks; block += Q4_MV_THREADGROUP_SIZE) {
-        device const uchar* blockPtr = b_row + block * Q4_BYTES_PER_BLOCK;
+    // Pointers to weight rows
+    device const uchar* bx[Q4_BATCH_NR];
+    for (int col = 0; col < Q4_BATCH_NR; ++col) {
+        bx[col] = (n0 + col < N) ? B + (n0 + col) * numBlocks * Q4_BYTES_PER_BLOCK : nullptr;
+    }
 
-        // Read f16 scale
-        ushort scale_u16 = ((ushort)blockPtr[1] << 8) | blockPtr[0];
-        float scale = q4_f16_to_f32(scale_u16);
-
+    // Each thread handles different blocks, stride by simdgroup size
+    for (int block = simd_lane; block < numBlocks; block += 32) {
         int base_k = block * Q4_BLOCK_SIZE;
 
-        // Process 16 bytes = 32 nibbles
-        for (int i = 0; i < 16 && base_k + i < K; i++) {
-            uchar byte_val = blockPtr[2 + i];
+        // Load activations for this block using float4 (8 float4s = 32 elements)
+        float4 a0 = A4[base_k / 4 + 0];  // k: 0-3
+        float4 a1 = A4[base_k / 4 + 1];  // k: 4-7
+        float4 a2 = A4[base_k / 4 + 2];  // k: 8-11
+        float4 a3 = A4[base_k / 4 + 3];  // k: 12-15
+        float4 a4 = A4[base_k / 4 + 4];  // k: 16-19
+        float4 a5 = A4[base_k / 4 + 5];  // k: 20-23
+        float4 a6 = A4[base_k / 4 + 6];  // k: 24-27
+        float4 a7 = A4[base_k / 4 + 7];  // k: 28-31
 
-            // Low nibble -> position i
-            int k0 = base_k + i;
-            int q0 = byte_val & 0x0F;
-            sum += a_row[k0] * scale * float(q0 - 8);
+        // Process each output column
+        for (int col = 0; col < Q4_BATCH_NR; ++col) {
+            if (n0 + col >= N || bx[col] == nullptr) continue;
 
-            // High nibble -> position i + 16
-            int k1 = base_k + i + 16;
-            if (k1 < K) {
-                int q1 = (byte_val >> 4) & 0x0F;
-                sum += a_row[k1] * scale * float(q1 - 8);
-            }
+            device const uchar* blockPtr = bx[col] + block * Q4_BYTES_PER_BLOCK;
+
+            // Read f16 scale
+            ushort scale_u16 = ((ushort)blockPtr[1] << 8) | blockPtr[0];
+            float scale = q4_f16_to_f32(scale_u16);
+
+            // Load all 16 nibble bytes
+            uchar b0  = blockPtr[2];  uchar b1  = blockPtr[3];
+            uchar b2  = blockPtr[4];  uchar b3  = blockPtr[5];
+            uchar b4  = blockPtr[6];  uchar b5  = blockPtr[7];
+            uchar b6  = blockPtr[8];  uchar b7  = blockPtr[9];
+            uchar b8  = blockPtr[10]; uchar b9  = blockPtr[11];
+            uchar b10 = blockPtr[12]; uchar b11 = blockPtr[13];
+            uchar b12 = blockPtr[14]; uchar b13 = blockPtr[15];
+            uchar b14 = blockPtr[16]; uchar b15 = blockPtr[17];
+
+            float acc = 0.0f;
+
+            // k: 0-3 (low nibbles of b0-b3)
+            acc += a0.x * float((b0  & 0x0F) - 8);
+            acc += a0.y * float((b1  & 0x0F) - 8);
+            acc += a0.z * float((b2  & 0x0F) - 8);
+            acc += a0.w * float((b3  & 0x0F) - 8);
+
+            // k: 4-7 (low nibbles of b4-b7)
+            acc += a1.x * float((b4  & 0x0F) - 8);
+            acc += a1.y * float((b5  & 0x0F) - 8);
+            acc += a1.z * float((b6  & 0x0F) - 8);
+            acc += a1.w * float((b7  & 0x0F) - 8);
+
+            // k: 8-11 (low nibbles of b8-b11)
+            acc += a2.x * float((b8  & 0x0F) - 8);
+            acc += a2.y * float((b9  & 0x0F) - 8);
+            acc += a2.z * float((b10 & 0x0F) - 8);
+            acc += a2.w * float((b11 & 0x0F) - 8);
+
+            // k: 12-15 (low nibbles of b12-b15)
+            acc += a3.x * float((b12 & 0x0F) - 8);
+            acc += a3.y * float((b13 & 0x0F) - 8);
+            acc += a3.z * float((b14 & 0x0F) - 8);
+            acc += a3.w * float((b15 & 0x0F) - 8);
+
+            // k: 16-19 (high nibbles of b0-b3)
+            acc += a4.x * float((b0  >> 4) - 8);
+            acc += a4.y * float((b1  >> 4) - 8);
+            acc += a4.z * float((b2  >> 4) - 8);
+            acc += a4.w * float((b3  >> 4) - 8);
+
+            // k: 20-23 (high nibbles of b4-b7)
+            acc += a5.x * float((b4  >> 4) - 8);
+            acc += a5.y * float((b5  >> 4) - 8);
+            acc += a5.z * float((b6  >> 4) - 8);
+            acc += a5.w * float((b7  >> 4) - 8);
+
+            // k: 24-27 (high nibbles of b8-b11)
+            acc += a6.x * float((b8  >> 4) - 8);
+            acc += a6.y * float((b9  >> 4) - 8);
+            acc += a6.z * float((b10 >> 4) - 8);
+            acc += a6.w * float((b11 >> 4) - 8);
+
+            // k: 28-31 (high nibbles of b12-b15)
+            acc += a7.x * float((b12 >> 4) - 8);
+            acc += a7.y * float((b13 >> 4) - 8);
+            acc += a7.z * float((b14 >> 4) - 8);
+            acc += a7.w * float((b15 >> 4) - 8);
+
+            sumf[col] += scale * acc;
         }
     }
 
-    // Warp-level reduction
-    sum = simd_sum(sum);
-
-    // Store warp results to shared memory
-    if (simd_lane == 0) {
-        shared[simd_group] = sum;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Final reduction by first warp
-    if (simd_group == 0) {
-        int num_warps = (Q4_MV_THREADGROUP_SIZE + 31) / 32;
-        float warp_sum = (simd_lane < (uint)num_warps) ? shared[simd_lane] : 0.0f;
-        warp_sum = simd_sum(warp_sum);
-        if (tid == 0) {
-            // Output: C[m, n]
-            C[m * N + n] = warp_sum;
+    // SIMD reduction and output
+    for (int col = 0; col < Q4_BATCH_NR; ++col) {
+        float tot = simd_sum(sumf[col]);
+        if (simd_lane == 0 && n0 + col < N) {
+            C[m * N + n0 + col] = tot;
         }
     }
 }
@@ -989,6 +1110,7 @@ void metal_matvec_transposed_f32(void* queuePtr, void* pipelinePtr,
 }
 
 // Q4_0 quantized matrix-vector multiply: C = A @ B^T where B is Q4_0
+// OPTIMIZED: Each simdgroup (32 threads) processes Q4_NR=2 output rows
 void metal_matvec_q4_0_transposed_f32(void* queuePtr, void* pipelinePtr,
                                        void* A, void* B, void* C,
                                        int N, int K) {
@@ -1005,13 +1127,16 @@ void metal_matvec_q4_0_transposed_f32(void* queuePtr, void* pipelinePtr,
     [encoder setBytes:&N length:sizeof(N) atIndex:3];
     [encoder setBytes:&K length:sizeof(K) atIndex:4];
 
-    int threadgroupSize = 256;  // Must match Q4_MV_THREADGROUP_SIZE in shader
-    int numWarps = (threadgroupSize + 31) / 32;
-    int sharedMemSize = numWarps * sizeof(float);
+    // Optimized kernel: 32 threads per threadgroup (1 simdgroup)
+    // Each threadgroup processes Q4_NR=2 output rows
+    int threadgroupSize = 32;
+    int Q4_NR = 2;  // Must match shader constant
+    int numThreadgroups = (N + Q4_NR - 1) / Q4_NR;
+    int sharedMemSize = sizeof(float);  // Minimal shared mem needed
 
     [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
 
-    MTLSize threadgroups = MTLSizeMake(N, 1, 1);
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
     MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
@@ -1020,16 +1145,18 @@ void metal_matvec_q4_0_transposed_f32(void* queuePtr, void* pipelinePtr,
 }
 
 // True batched Q4_0 matmul: single dispatch for all M*N outputs
-// Uses 2D grid: (N, M) threadgroups, each computing one output element
+// OPTIMIZED: Uses 32 threads per threadgroup (1 simdgroup)
+// Each threadgroup handles Q4_BATCH_NR=4 output columns for one row
+// Grid: (ceil(N/4), M) threadgroups
 void metal_matmul_q4_0_batched_f32(void* queuePtr, void* pipelinePtr,
                                     void* A, void* B, void* C,
                                     int M, int N, int K) {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
     id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
 
-    int threadgroupSize = 256;
-    int numWarps = (threadgroupSize + 31) / 32;
-    int sharedMemSize = numWarps * sizeof(float);
+    int threadgroupSize = 32;  // One simdgroup
+    int Q4_BATCH_NR = 4;       // Must match shader constant
+    int sharedMemSize = sizeof(float);  // Minimal shared mem
 
     id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
@@ -1043,8 +1170,9 @@ void metal_matmul_q4_0_batched_f32(void* queuePtr, void* pipelinePtr,
     [encoder setBytes:&K length:sizeof(K) atIndex:5];
     [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
 
-    // 2D grid: (N, M) threadgroups - one per output element
-    MTLSize threadgroups = MTLSizeMake(N, M, 1);
+    // 2D grid: (ceil(N/Q4_BATCH_NR), M) threadgroups
+    int numColTiles = (N + Q4_BATCH_NR - 1) / Q4_BATCH_NR;
+    MTLSize threadgroups = MTLSizeMake(numColTiles, M, 1);
     MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
