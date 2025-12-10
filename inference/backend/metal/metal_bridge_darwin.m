@@ -201,6 +201,86 @@ kernel void matvec_q4_0_transposed_f32(
     }
 }
 
+// True batched Q4_0 matmul: C[m,n] = A[m,k] @ B[n,k]^T
+// Uses 2D grid: gid.x = output column (N), gid.y = input row (M)
+// Single dispatch for all M*N output elements
+kernel void matmul_q4_0_batched_f32(
+    device const float* A [[buffer(0)]],           // [M, K] activations
+    device const uchar* B [[buffer(1)]],           // [N, K] in Q4_0 format
+    device float* C [[buffer(2)]],                 // [M, N] output
+    constant int& M [[buffer(3)]],                 // Number of input rows
+    constant int& N [[buffer(4)]],                 // Number of output columns
+    constant int& K [[buffer(5)]],                 // Inner dimension
+    threadgroup float* shared [[threadgroup(0)]],
+    uint2 gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    // gid.x = output column (n), gid.y = input row (m)
+    int n = gid.x;
+    int m = gid.y;
+
+    if (n >= N || m >= M) return;
+
+    float sum = 0.0f;
+
+    // A row pointer: A[m, :]
+    device const float* a_row = A + m * K;
+
+    // B row pointer in Q4_0 format: B[n, :]
+    int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
+    device const uchar* b_row = B + n * numBlocks * Q4_BYTES_PER_BLOCK;
+
+    // Each thread handles some blocks
+    for (int block = tid; block < numBlocks; block += Q4_MV_THREADGROUP_SIZE) {
+        device const uchar* blockPtr = b_row + block * Q4_BYTES_PER_BLOCK;
+
+        // Read f16 scale
+        ushort scale_u16 = ((ushort)blockPtr[1] << 8) | blockPtr[0];
+        float scale = q4_f16_to_f32(scale_u16);
+
+        int base_k = block * Q4_BLOCK_SIZE;
+
+        // Process 16 bytes = 32 nibbles
+        for (int i = 0; i < 16 && base_k + i < K; i++) {
+            uchar byte_val = blockPtr[2 + i];
+
+            // Low nibble -> position i
+            int k0 = base_k + i;
+            int q0 = byte_val & 0x0F;
+            sum += a_row[k0] * scale * float(q0 - 8);
+
+            // High nibble -> position i + 16
+            int k1 = base_k + i + 16;
+            if (k1 < K) {
+                int q1 = (byte_val >> 4) & 0x0F;
+                sum += a_row[k1] * scale * float(q1 - 8);
+            }
+        }
+    }
+
+    // Warp-level reduction
+    sum = simd_sum(sum);
+
+    // Store warp results to shared memory
+    if (simd_lane == 0) {
+        shared[simd_group] = sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Final reduction by first warp
+    if (simd_group == 0) {
+        int num_warps = (Q4_MV_THREADGROUP_SIZE + 31) / 32;
+        float warp_sum = (simd_lane < (uint)num_warps) ? shared[simd_lane] : 0.0f;
+        warp_sum = simd_sum(warp_sum);
+        if (tid == 0) {
+            // Output: C[m, n]
+            C[m * N + n] = warp_sum;
+        }
+    }
+}
+
 // RMSNorm with threadgroup parallelism
 // Each threadgroup processes one row using parallel reduction
 constant int RMSNORM_THREADGROUP_SIZE = 256;
@@ -939,7 +1019,8 @@ void metal_matvec_q4_0_transposed_f32(void* queuePtr, void* pipelinePtr,
     [cmdBuffer commit];
 }
 
-// Batched Q4_0 matmul: dispatches matvec kernel M times with buffer offsets
+// True batched Q4_0 matmul: single dispatch for all M*N outputs
+// Uses 2D grid: (N, M) threadgroups, each computing one output element
 void metal_matmul_q4_0_batched_f32(void* queuePtr, void* pipelinePtr,
                                     void* A, void* B, void* C,
                                     int M, int N, int K) {
@@ -950,28 +1031,23 @@ void metal_matmul_q4_0_batched_f32(void* queuePtr, void* pipelinePtr,
     int numWarps = (threadgroupSize + 31) / 32;
     int sharedMemSize = numWarps * sizeof(float);
 
-    size_t aRowBytes = K * sizeof(float);
-    size_t cRowBytes = N * sizeof(float);
-
-    // Use a single command buffer with multiple dispatches for efficiency
     id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
 
     [encoder setComputePipelineState:pipeline];
-    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];  // B is same for all rows
-    [encoder setBytes:&N length:sizeof(N) atIndex:3];
-    [encoder setBytes:&K length:sizeof(K) atIndex:4];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:0 atIndex:2];
+    [encoder setBytes:&M length:sizeof(M) atIndex:3];
+    [encoder setBytes:&N length:sizeof(N) atIndex:4];
+    [encoder setBytes:&K length:sizeof(K) atIndex:5];
     [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
 
-    MTLSize threadgroups = MTLSizeMake(N, 1, 1);
+    // 2D grid: (N, M) threadgroups - one per output element
+    MTLSize threadgroups = MTLSizeMake(N, M, 1);
     MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
 
-    for (int row = 0; row < M; row++) {
-        [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:row * aRowBytes atIndex:0];
-        [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:row * cRowBytes atIndex:2];
-        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
-    }
-
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
     [encoder endEncoding];
     [cmdBuffer commit];
 }

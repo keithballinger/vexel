@@ -384,6 +384,32 @@ These are acceptable - the top token matches consistently, which is what matters
 
 ---
 
+## Prefill Optimization (December 10, 2024)
+
+### Problem
+After the RoPE fix, prefill performance was poor: **10.9 tok/s** for processing input tokens.
+
+### Root Cause
+The batched Q4_0 matmul was dispatching M separate GPU commands in a for loop. For a 37-token prompt with 22 layers and 154 matmuls, this created **5,698 separate dispatches**.
+
+### Solution
+Created a truly batched Metal kernel `matmul_q4_0_batched_f32` that uses a 2D thread grid:
+- Each thread computes one element C[row, col]
+- Single dispatch handles all M rows at once
+- Grid dimensions: [N, M] threadgroups
+
+### Results
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| Prefill | 10.9 tok/s | 90-97 tok/s | **8-9x faster** |
+| Decode | ~61 tok/s | ~61 tok/s | No change |
+
+### Code Changes
+- `metal_bridge_darwin.m`: Added `matmul_q4_0_batched_f32` kernel with 2D grid
+- `backend.go`: Added `matmulQ4BatchedPipeline` and use for M > 1 case
+
+---
+
 ## Test Scripts Reference
 
 Test scripts are stored in `/tmp/` and can be run with `go run`:

@@ -60,6 +60,7 @@ type Backend struct {
 	sdpaDecodePipeline       unsafe.Pointer
 	sdpaFlashDecodePipeline  unsafe.Pointer
 	sdpaPrefillPipeline      unsafe.Pointer
+	matmulQ4BatchedPipeline  unsafe.Pointer
 }
 
 // NewBackend creates a new Metal backend.
@@ -100,6 +101,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.sdpaDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_gqa_f32"))
 	b.sdpaFlashDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f32"))
 	b.sdpaPrefillPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_prefill_f32"))
+	b.matmulQ4BatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_batched_f32"))
 
 	return b, nil
 }
@@ -244,8 +246,8 @@ func (b *Backend) MatMulQ4_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(n), C.int(k))
 	} else {
-		// Multiple rows - use batched version with buffer offsets
-		C.metal_matmul_q4_0_batched_f32(b.queue, b.matvecQ4Pipeline,
+		// Multiple rows - use truly batched kernel with 2D grid (single dispatch)
+		C.metal_matmul_q4_0_batched_f32(b.queue, b.matmulQ4BatchedPipeline,
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(m), C.int(n), C.int(k))
 	}
