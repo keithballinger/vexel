@@ -108,7 +108,9 @@ func (t *Tokenizer) Encode(text string) ([]int, error) {
 		} else {
 			// Each segment after a special token starts at a word boundary
 			atWordBoundary := i == 0 || (i > 0 && segments[i-1].isSpecial)
-			segTokens, _ := t.encodeSegment(seg.text, atWordBoundary)
+			// isAbsoluteStart is true only for the very first segment (no prior tokens)
+			isAbsoluteStart := i == 0 && len(tokens) == 0
+			segTokens, _ := t.encodeSegment(seg.text, atWordBoundary, isAbsoluteStart)
 			tokens = append(tokens, segTokens...)
 		}
 	}
@@ -173,7 +175,8 @@ func (t *Tokenizer) splitOnSpecialTokens(text string) []segment {
 
 // encodeSegment encodes a segment of text (not containing special tokens)
 // atWordBoundary indicates if this segment starts at a word boundary (start of text or after special token)
-func (t *Tokenizer) encodeSegment(text string, atWordBoundary bool) ([]int, error) {
+// isAbsoluteStart indicates if this is the very beginning of the input (no prior tokens)
+func (t *Tokenizer) encodeSegment(text string, atWordBoundary bool, isAbsoluteStart bool) ([]int, error) {
 	if text == "" {
 		return nil, nil
 	}
@@ -197,11 +200,29 @@ func (t *Tokenizer) encodeSegment(text string, atWordBoundary bool) ([]int, erro
 		const spUnderscore = "▁"
 		spLen := len(spUnderscore) // 3 bytes in UTF-8
 
-		isStart := len(tokens) == 0 && atWordBoundary
+		isFirstToken := len(tokens) == 0
+		isStart := isFirstToken && atWordBoundary
 		hasLeadingSpace := len(remaining) > 0 && remaining[0] == ' '
 
-		// At word boundary, try ▁ prefix FIRST (preferred for SentencePiece)
-		if isStart && !hasLeadingSpace {
+		// At absolute start of input with special chars like <, try plain text match FIRST (no ▁ prefix)
+		// This is important for chat templates like <|system|> which shouldn't have leading space
+		startsWithSpecialChar := len(remaining) > 0 && (remaining[0] == '<' || remaining[0] == '[' || remaining[0] == '{')
+		if isFirstToken && isAbsoluteStart && !hasLeadingSpace && startsWithSpecialChar {
+			for l := min(len(remaining), 20); l > 0; l-- {
+				candidate := remaining[:l]
+				if id, ok := t.vocab[candidate]; ok {
+					bestLen = l
+					bestID = id
+					break
+				}
+			}
+		}
+
+		// At word boundary, try ▁ prefix (preferred for SentencePiece)
+		// BUT: don't add ▁ prefix if starting with newline or special chars at absolute start
+		startsWithNewline := len(remaining) > 0 && remaining[0] == '\n'
+		skipSpacePrefix := startsWithNewline || (isAbsoluteStart && startsWithSpecialChar)
+		if bestID < 0 && isStart && !hasLeadingSpace && !skipSpacePrefix {
 			prefixed := spUnderscore + remaining
 			foundPrefixed := false
 			for l := min(len(prefixed), 20+spLen); l > spLen; l-- {
@@ -348,14 +369,14 @@ type ChatTemplate struct {
 }
 
 // TinyLlamaChatTemplate returns the chat template for TinyLlama models.
-// Note: AssistantPrefix has NO trailing newline - the model generates content directly after it.
+// Note: AssistantPrefix has trailing newline to match llama.cpp format.
 func TinyLlamaChatTemplate() ChatTemplate {
 	return ChatTemplate{
 		SystemPrefix:    "<|system|>\n",
 		SystemSuffix:    "</s>\n",
 		UserPrefix:      "<|user|>\n",
 		UserSuffix:      "</s>\n",
-		AssistantPrefix: "<|assistant|>",  // No trailing newline for generation prompt
+		AssistantPrefix: "<|assistant|>\n", // Trailing newline to match llama.cpp
 		AssistantSuffix: "</s>\n",
 	}
 }

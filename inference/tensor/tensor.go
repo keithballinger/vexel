@@ -3,9 +3,10 @@ package tensor
 // Tensor represents a multi-dimensional array of elements.
 // It holds metadata about the shape and data type, and a pointer to the underlying memory.
 type Tensor struct {
-	shape     Shape
-	dtype     DType
-	devicePtr DevicePtr
+	shape        Shape
+	dtype        DType
+	devicePtr    DevicePtr
+	quantProfile QuantProfile // QuantNone for unquantized, Q4_0/Q8_0 for quantized
 }
 
 // NewTensor creates a new Tensor.
@@ -40,4 +41,24 @@ func (t Tensor) Location() Location {
 // NumElements returns the total number of elements in the tensor.
 func (t Tensor) NumElements() int {
 	return t.shape.NumElements()
+}
+
+// QuantProfile returns the quantization profile of the tensor.
+func (t Tensor) QuantProfile() QuantProfile {
+	return t.quantProfile
+}
+
+// IsQuantized returns true if the tensor uses block quantization.
+func (t Tensor) IsQuantized() bool {
+	return t.quantProfile != QuantNone
+}
+
+// NewQuantTensor creates a new quantized Tensor.
+func NewQuantTensor(shape Shape, dtype DType, ptr DevicePtr, profile QuantProfile) Tensor {
+	return Tensor{
+		shape:        shape,
+		dtype:        dtype,
+		devicePtr:    ptr,
+		quantProfile: profile,
+	}
 }

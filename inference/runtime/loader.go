@@ -22,6 +22,8 @@ func (m *ModelRuntime) LoadWeights(path string) error {
 }
 
 // LoadWeightsGGUF loads model weights from a GGUF file.
+// For GPU backends with QuantizedMatMul support, Q4_0 tensors are kept in raw format.
+// Otherwise, all tensors are dequantized to F32.
 func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 	loader, err := gguf.NewTensorLoader(path)
 	if err != nil {
@@ -36,46 +38,144 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 	// Load each required tensor
 	tensorNames := m.requiredTensorNames()
 	loadedCount := 0
+	q4Count := 0
 	for _, hfName := range tensorNames {
 		ggufName := gguf.GetLayerTensorName(hfName)
 
-		data, dims, err := loader.LoadTensor(ggufName)
-		if err != nil {
+		// First, check the tensor type to decide loading strategy
+		info, found := loader.GetTensorInfo(ggufName)
+		if !found {
 			// Try alternative naming patterns
 			altNames := m.alternativeGGUFNames(ggufName)
-			loaded := false
 			for _, altName := range altNames {
-				data, dims, err = loader.LoadTensor(altName)
-				if err == nil {
-					loaded = true
+				info, found = loader.GetTensorInfo(altName)
+				if found {
+					ggufName = altName
 					break
 				}
 			}
-			if !loaded {
-				fmt.Printf("Warning: tensor %s (%s) not found\n", hfName, ggufName)
-				continue
-			}
+		}
+		if !found {
+			fmt.Printf("Warning: tensor %s (%s) not found\n", hfName, ggufName)
+			continue
 		}
 
-		// Create tensor from data
-		// Note: GGUF loader already transposes 2D matrices and swaps dimensions
-		t := tensor.NewTensor(
-			tensor.NewShape(dims...),
-			m.config.DType,
-			tensor.NewDevicePtr(tensor.CPU, uintptr(unsafe.Pointer(&data[0]))),
-		)
+		var t tensor.Tensor
 
-		// Keep reference to prevent GC
-		m.keepAlive = append(m.keepAlive, data)
+		// For Q4_0 weight matrices (not embeddings/norms), keep raw format
+		// This enables GPU-native quantized inference
+		if info.Type == gguf.TensorTypeQ4_0 && m.isWeightMatrix(hfName) {
+			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
+			if err != nil {
+				fmt.Printf("Warning: failed to load raw tensor %s: %v\n", hfName, err)
+				continue
+			}
+
+			// Create quantized tensor with raw Q4_0 data
+			t = tensor.NewQuantTensor(
+				tensor.NewShape(dims...),
+				m.config.DType,
+				tensor.NewDevicePtr(tensor.CPU, uintptr(unsafe.Pointer(&rawData[0]))),
+				tensor.Q4_0,
+			)
+			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
+			q4Count++
+		} else {
+			// Dequantize to F32 for embeddings, norms, or non-Q4_0 types
+			data, dims, err := loader.LoadTensor(ggufName)
+			if err != nil {
+				fmt.Printf("Warning: failed to load tensor %s: %v\n", hfName, err)
+				continue
+			}
+
+			t = tensor.NewTensor(
+				tensor.NewShape(dims...),
+				m.config.DType,
+				tensor.NewDevicePtr(tensor.CPU, uintptr(unsafe.Pointer(&data[0]))),
+			)
+			m.keepAlive = append(m.keepAlive, data)
+		}
 
 		// Map to struct
 		m.mapTensor(hfName, t)
 		loadedCount++
 	}
 
-	fmt.Printf("Loaded %d/%d tensors from GGUF\n", loadedCount, len(tensorNames))
+	fmt.Printf("Loaded %d/%d tensors from GGUF (%d Q4_0 raw)\n", loadedCount, len(tensorNames), q4Count)
 
 	return nil
+}
+
+// LoadWeightsF32 loads weights and forces F32 dequantization (no Q4_0 raw).
+// Useful for debugging/comparing against quantized path.
+func (m *ModelRuntime) LoadWeightsF32(path string) error {
+	loader, err := gguf.NewTensorLoader(path)
+	if err != nil {
+		return fmt.Errorf("failed to open GGUF file: %w", err)
+	}
+	m.ggufLoader = loader
+
+	loader.PrintTensorStats()
+
+	tensorNames := m.requiredTensorNames()
+	loadedCount := 0
+	for _, hfName := range tensorNames {
+		ggufName := gguf.GetLayerTensorName(hfName)
+
+		info, found := loader.GetTensorInfo(ggufName)
+		if !found {
+			altNames := m.alternativeGGUFNames(ggufName)
+			for _, altName := range altNames {
+				info, found = loader.GetTensorInfo(altName)
+				if found {
+					ggufName = altName
+					break
+				}
+			}
+		}
+		if !found {
+			fmt.Printf("Warning: tensor %s (%s) not found\n", hfName, ggufName)
+			continue
+		}
+		_ = info // Unused but needed for consistency
+
+		// Always dequantize to F32
+		data, dims, err := loader.LoadTensor(ggufName)
+		if err != nil {
+			fmt.Printf("Warning: failed to load tensor %s: %v\n", hfName, err)
+			continue
+		}
+
+		t := tensor.NewTensor(
+			tensor.NewShape(dims...),
+			m.config.DType,
+			tensor.NewDevicePtr(tensor.CPU, uintptr(unsafe.Pointer(&data[0]))),
+		)
+		m.keepAlive = append(m.keepAlive, data)
+
+		m.mapTensor(hfName, t)
+		loadedCount++
+	}
+
+	fmt.Printf("Loaded %d/%d tensors from GGUF (all F32 dequantized)\n", loadedCount, len(tensorNames))
+	return nil
+}
+
+// isWeightMatrix returns true for tensors that can use quantized matmul.
+// These are the projection matrices (Q/K/V/O, FFN), not embeddings or norms.
+func (m *ModelRuntime) isWeightMatrix(name string) bool {
+	// Embeddings and norms should be F32
+	if name == "model.embed_tokens.weight" || name == "lm_head.weight" {
+		return false
+	}
+	if strings.HasSuffix(name, "_layernorm.weight") || strings.HasSuffix(name, ".norm.weight") {
+		return false
+	}
+	// Layer weight matrices
+	if strings.Contains(name, "self_attn.") || strings.Contains(name, "mlp.") {
+		return true
+	}
+	return false
 }
 
 // requiredTensorNames returns the list of tensor names needed for the model.
@@ -235,12 +335,26 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 			return nil
 		}
 
-		// Get size in bytes
-		numElements := t.Shape().NumElements()
-		sizeBytes := numElements * 4 // Assuming float32
+		// Calculate size in bytes based on quantization profile
+		var sizeBytes int
+		if t.IsQuantized() && t.QuantProfile() == tensor.Q4_0 {
+			// Q4_0: 18 bytes per 32 elements (2 byte scale + 16 bytes nibbles)
+			numElements := t.Shape().NumElements()
+			numBlocks := (numElements + 31) / 32
+			sizeBytes = numBlocks * 18
+		} else {
+			// F32: 4 bytes per element
+			numElements := t.Shape().NumElements()
+			sizeBytes = numElements * 4
+		}
 
-		// Allocate on device
-		devicePtr := m.backend.Alloc(sizeBytes)
+		// Allocate on device (use permanent allocation for weights)
+		var devicePtr tensor.DevicePtr
+		if allocPerm, ok := m.backend.(interface{ AllocPermanent(int) tensor.DevicePtr }); ok {
+			devicePtr = allocPerm.AllocPermanent(sizeBytes)
+		} else {
+			devicePtr = m.backend.Alloc(sizeBytes)
+		}
 		if devicePtr.IsNil() {
 			return fmt.Errorf("failed to allocate %d bytes on device", sizeBytes)
 		}
@@ -249,8 +363,12 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 		cpuData := unsafe.Slice((*byte)(unsafe.Pointer(t.DevicePtr().Addr())), sizeBytes)
 		m.backend.ToDevice(devicePtr, cpuData)
 
-		// Update tensor with device pointer
-		*t = tensor.NewTensor(t.Shape(), m.config.DType, devicePtr)
+		// Update tensor with device pointer, preserving quant profile
+		if t.IsQuantized() {
+			*t = tensor.NewQuantTensor(t.Shape(), m.config.DType, devicePtr, t.QuantProfile())
+		} else {
+			*t = tensor.NewTensor(t.Shape(), m.config.DType, devicePtr)
+		}
 		return nil
 	}
 

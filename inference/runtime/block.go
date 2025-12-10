@@ -1,12 +1,62 @@
 package runtime
 
 import (
+	"encoding/binary"
+	"fmt"
 	"math"
+	"unsafe"
 
 	"vexel/inference/backend"
 	"vexel/inference/kv"
 	"vexel/inference/tensor"
 )
+
+// debugBlockTensor prints stats about a tensor for block debugging
+func (b *BlockRuntime) debugBlockTensor(name string, ptr tensor.DevicePtr, numElements int) {
+	if !debugDecode || ptr.IsNil() || numElements == 0 {
+		return
+	}
+
+	data := make([]byte, numElements*4)
+	toHost, ok := b.backend.(interface {
+		ToHost([]byte, tensor.DevicePtr)
+		Sync()
+	})
+	if !ok {
+		return
+	}
+	toHost.ToHost(data, ptr)
+	toHost.Sync()
+
+	values := make([]float32, numElements)
+	for i := range values {
+		values[i] = math.Float32frombits(binary.LittleEndian.Uint32(data[i*4:]))
+	}
+
+	min, max, sum := values[0], values[0], float32(0)
+	nanCount := 0
+	for _, v := range values {
+		if math.IsNaN(float64(v)) {
+			nanCount++
+		} else {
+			if v < min {
+				min = v
+			}
+			if v > max {
+				max = v
+			}
+			sum += v
+		}
+	}
+	mean := sum / float32(numElements-nanCount)
+
+	n := 8
+	if n > len(values) {
+		n = len(values)
+	}
+	fmt.Printf("[BLOCK] %s [%d]: min=%.4f max=%.4f mean=%.4f nan=%d first%d=%v\n",
+		name, len(values), min, max, mean, nanCount, n, values[:n])
+}
 
 // sqrt is a helper for float64 square root
 func sqrt(x float64) float64 {
@@ -33,12 +83,15 @@ type BlockRuntime struct {
 
 	FFNNorm    tensor.Tensor
 	W1, W2, W3 tensor.Tensor // Gate, Down, Up
+
+	// Cached interface check for quantized matmul
+	quantMatMul backend.QuantizedMatMul
 }
 
 // NewBlockRuntime creates a new block runtime with config.
 func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 	headDim := config.HiddenSize / config.NumAttentionHeads
-	return &BlockRuntime{
+	br := &BlockRuntime{
 		backend:           b,
 		NumAttentionHeads: config.NumAttentionHeads,
 		NumKeyValueHeads:  config.NumKeyValueHeads,
@@ -47,6 +100,22 @@ func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 		IntermediateSize:  config.IntermediateSize,
 		RoPETheta:         config.RoPETheta,
 		RMSNormEPS:        config.RMSNormEPS,
+	}
+
+	// Cache quantized matmul interface check
+	br.quantMatMul, _ = b.(backend.QuantizedMatMul)
+
+	return br
+}
+
+// matMulTransposed performs C = A @ W^T, dispatching to quantized kernel if supported.
+func (b *BlockRuntime) matMulTransposed(a tensor.DevicePtr, w tensor.Tensor, out tensor.DevicePtr, m, n, k int) {
+	if w.IsQuantized() && w.QuantProfile() == tensor.Q4_0 && b.quantMatMul != nil {
+		// Use GPU-native Q4_0 kernel
+		b.quantMatMul.MatMulQ4_0(a, w.DevicePtr(), out, m, n, k)
+	} else {
+		// Fall back to F32 matmul
+		b.backend.MatMulTransposed(a, w.DevicePtr(), out, m, n, k)
 	}
 }
 
@@ -119,28 +188,50 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 		upPtr = b.backend.Alloc(upBytes)
 	}
 
+	// Debug: print input to layer (only for layer 0)
+	if debugDecode && layerIdx == 0 {
+		b.debugBlockTensor("L0 Input (x)", xPtr, seqLen*hiddenSize)
+		b.debugBlockTensor("L0 AttnNorm weights", b.AttnNorm.DevicePtr(), hiddenSize)
+	}
+
 	// 1. RMSNorm (Attention)
 	if !b.AttnNorm.DevicePtr().IsNil() {
 		b.backend.RMSNorm(xPtr, b.AttnNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
 	}
+	b.backend.Sync()
 
-	// 2. Q/K/V Projections
+	// Debug: print norm output for layer 0
+	if debugDecode && layerIdx == 0 {
+		b.debugBlockTensor("L0 RMSNorm out", normOutPtr, seqLen*hiddenSize)
+	}
+
+	// 2. Q/K/V Projections (using quantized matmul if available)
 	// Wq: [numHeads*headDim, hiddenSize] -> Q: [seqLen, numHeads*headDim]
+	if debugDecode && layerIdx == 0 {
+		fmt.Printf("[BLOCK] L0 Wq: shape=%v quantized=%v profile=%v\n",
+			b.Wq.Shape().Dims(), b.Wq.IsQuantized(), b.Wq.QuantProfile())
+	}
 	if !b.Wq.DevicePtr().IsNil() {
 		qDim := b.Wq.Shape().Dims()[0]
-		b.backend.MatMulTransposed(normOutPtr, b.Wq.DevicePtr(), qPtr, seqLen, qDim, hiddenSize)
+		b.matMulTransposed(normOutPtr, b.Wq, qPtr, seqLen, qDim, hiddenSize)
+	}
+	b.backend.Sync()
+
+	// Debug: print Q projection for layer 0
+	if debugDecode && layerIdx == 0 {
+		b.debugBlockTensor("L0 After Wq", qPtr, qSize)
 	}
 
 	// Wk: [numKVHeads*headDim, hiddenSize] -> K: [seqLen, numKVHeads*headDim]
 	if !b.Wk.DevicePtr().IsNil() {
 		kDim := b.Wk.Shape().Dims()[0]
-		b.backend.MatMulTransposed(normOutPtr, b.Wk.DevicePtr(), kPtr, seqLen, kDim, hiddenSize)
+		b.matMulTransposed(normOutPtr, b.Wk, kPtr, seqLen, kDim, hiddenSize)
 	}
 
 	// Wv: [numKVHeads*headDim, hiddenSize] -> V: [seqLen, numKVHeads*headDim]
 	if !b.Wv.DevicePtr().IsNil() {
 		vDim := b.Wv.Shape().Dims()[0]
-		b.backend.MatMulTransposed(normOutPtr, b.Wv.DevicePtr(), vPtr, seqLen, vDim, hiddenSize)
+		b.matMulTransposed(normOutPtr, b.Wv, vPtr, seqLen, vDim, hiddenSize)
 	}
 
 	// 3. RoPE - Apply to Q and K
@@ -159,7 +250,7 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 	// 5. Output Projection and residual
 	if !b.Wo.DevicePtr().IsNil() {
 		oDim := b.Wo.Shape().Dims()[0]
-		b.backend.MatMulTransposed(attnOutPtr, b.Wo.DevicePtr(), normOutPtr, seqLen, oDim, numHeads*headDim)
+		b.matMulTransposed(attnOutPtr, b.Wo, normOutPtr, seqLen, oDim, numHeads*headDim)
 		// Add residual: x = x + normOut
 		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
 	}
@@ -173,13 +264,13 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 	// Gate projection: gate = SiLU(normOut @ W1^T)
 	if !b.W1.DevicePtr().IsNil() {
 		w1Dim := b.W1.Shape().Dims()[0]
-		b.backend.MatMulTransposed(normOutPtr, b.W1.DevicePtr(), gatePtr, seqLen, w1Dim, hiddenSize)
+		b.matMulTransposed(normOutPtr, b.W1, gatePtr, seqLen, w1Dim, hiddenSize)
 	}
 
 	// Up projection: up = normOut @ W3^T
 	if !b.W3.DevicePtr().IsNil() {
 		w3Dim := b.W3.Shape().Dims()[0]
-		b.backend.MatMulTransposed(normOutPtr, b.W3.DevicePtr(), upPtr, seqLen, w3Dim, hiddenSize)
+		b.matMulTransposed(normOutPtr, b.W3, upPtr, seqLen, w3Dim, hiddenSize)
 	}
 
 	// SiLU on gate
@@ -191,7 +282,7 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 	// Down projection and residual
 	if !b.W2.DevicePtr().IsNil() {
 		w2Dim := b.W2.Shape().Dims()[0]
-		b.backend.MatMulTransposed(gatePtr, b.W2.DevicePtr(), normOutPtr, seqLen, w2Dim, intermediateSize)
+		b.matMulTransposed(gatePtr, b.W2, normOutPtr, seqLen, w2Dim, intermediateSize)
 		// Add residual: x = x + normOut
 		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
 	}
@@ -200,12 +291,343 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 }
 
 // ExecuteWithPagedKV performs the forward pass using paged KV cache.
-// This version uses DevicePtr for GPU execution.
-// NOTE: The paged KV cache integration needs to be refactored for GPU operation.
-// For now, this delegates to the basic Execute function.
-// TODO: Implement GPU-native KV cache with DevicePtr storage.
+// This version stores K/V during prefill and retrieves them during decode.
 func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *kv.PagedKVCache, seqID int64, layerIdx, startPos int) (tensor.Tensor, error) {
-	// For now, delegate to Execute which uses DevicePtr operations
-	// The KV cache integration needs separate refactoring for GPU
-	return b.Execute(x, scratch, nil, layerIdx, startPos)
+	xPtr := x.DevicePtr()
+	scratchPtr := scratch.DevicePtr()
+
+	if xPtr.IsNil() || scratchPtr.IsNil() {
+		return x, nil
+	}
+
+	// Dimensions from config
+	seqLen := x.Shape().NumElements() / b.HiddenSize
+	hiddenSize := b.HiddenSize
+	numHeads := b.NumAttentionHeads
+	numKVHeads := b.NumKeyValueHeads
+	headDim := b.HeadDim
+	intermediateSize := b.IntermediateSize
+
+	// Derived sizes (in float32 elements)
+	qSize := seqLen * numHeads * headDim
+	kvSize := seqLen * numKVHeads * headDim
+
+	// Calculate sizes for intermediates
+	normOutBytes := seqLen * hiddenSize * 4
+	qBytes := qSize * 4
+	kvBytes := kvSize * 4
+	attnOutBytes := qSize * 4
+	gateBytes := seqLen * intermediateSize * 4
+	upBytes := seqLen * intermediateSize * 4
+
+	// Allocate intermediate buffers
+	var normOutPtr, qPtr, kPtr, vPtr, attnOutPtr, gatePtr, upPtr tensor.DevicePtr
+
+	if scratchPtr.Location() == tensor.CPU {
+		offset := uintptr(0)
+		normOutPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(normOutBytes)
+		qPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(qBytes)
+		kPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(kvBytes)
+		vPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(kvBytes)
+		attnOutPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(attnOutBytes)
+		gatePtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(gateBytes)
+		upPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		_ = upBytes
+	} else {
+		normOutPtr = b.backend.Alloc(normOutBytes)
+		qPtr = b.backend.Alloc(qBytes)
+		kPtr = b.backend.Alloc(kvBytes)
+		vPtr = b.backend.Alloc(kvBytes)
+		attnOutPtr = b.backend.Alloc(attnOutBytes)
+		gatePtr = b.backend.Alloc(gateBytes)
+		upPtr = b.backend.Alloc(upBytes)
+	}
+
+	// 1. RMSNorm (Attention)
+	if !b.AttnNorm.DevicePtr().IsNil() {
+		b.backend.RMSNorm(xPtr, b.AttnNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+	}
+	// No sync - operations serialized in Metal command queue
+
+	// 2. Q/K/V Projections
+	if !b.Wq.DevicePtr().IsNil() {
+		qDim := b.Wq.Shape().Dims()[0]
+		b.matMulTransposed(normOutPtr, b.Wq, qPtr, seqLen, qDim, hiddenSize)
+	}
+	// No sync - operations serialized in Metal command queue
+
+	if !b.Wk.DevicePtr().IsNil() {
+		kDim := b.Wk.Shape().Dims()[0]
+		b.matMulTransposed(normOutPtr, b.Wk, kPtr, seqLen, kDim, hiddenSize)
+	}
+
+	if !b.Wv.DevicePtr().IsNil() {
+		vDim := b.Wv.Shape().Dims()[0]
+		b.matMulTransposed(normOutPtr, b.Wv, vPtr, seqLen, vDim, hiddenSize)
+	}
+
+	// 3. RoPE - Apply to Q and K
+	b.backend.RoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, startPos, float32(b.RoPETheta))
+
+	// 4. Store current K/V in cache and compute attention
+	var fullKPtr, fullVPtr tensor.DevicePtr
+	var fullSeqLen int
+
+	if pagedCache != nil {
+		// Copy K/V from device to CPU for cache storage
+		kData := make([]float32, kvSize)
+		vData := make([]float32, kvSize)
+
+		if kPtr.Location() == tensor.CPU {
+			kSlice := (*[1 << 28]float32)(unsafe.Pointer(kPtr.Addr()))[:kvSize:kvSize]
+			vSlice := (*[1 << 28]float32)(unsafe.Pointer(vPtr.Addr()))[:kvSize:kvSize]
+			copy(kData, kSlice)
+			copy(vData, vSlice)
+		} else {
+			kBytes := make([]byte, kvSize*4)
+			vBytes := make([]byte, kvSize*4)
+			b.backend.Sync() // Ensure RoPE/projections complete before reading
+			b.backend.ToHost(kBytes, kPtr)
+			b.backend.ToHost(vBytes, vPtr)
+			b.backend.Sync()
+			kData = bytesToFloat32(kBytes)
+			vData = bytesToFloat32(vBytes)
+		}
+
+		// Store in cache
+		err := pagedCache.StoreKVBatch(seqID, layerIdx, startPos, kData, vData, seqLen)
+		if err != nil {
+			return x, fmt.Errorf("failed to store KV: %w", err)
+		}
+
+		// Get full K/V sequence from cache for attention
+		currentPos := startPos + seqLen - 1
+		fullK, fullV := pagedCache.GetKVSlice(seqID, layerIdx, currentPos)
+		fullSeqLen = len(fullK) / (numKVHeads * headDim)
+
+		// Allocate GPU buffers for full K/V and copy
+		fullKBytes := len(fullK) * 4
+		fullVBytes := len(fullV) * 4
+
+		if scratchPtr.Location() == tensor.CPU {
+			fullKPtr = tensor.NewDevicePtr(tensor.CPU, uintptr(unsafePointer(&fullK[0])))
+			fullVPtr = tensor.NewDevicePtr(tensor.CPU, uintptr(unsafePointer(&fullV[0])))
+		} else {
+			fullKPtr = b.backend.Alloc(fullKBytes)
+			fullVPtr = b.backend.Alloc(fullVBytes)
+			b.backend.ToDevice(fullKPtr, float32ToBytes(fullK))
+			b.backend.ToDevice(fullVPtr, float32ToBytes(fullV))
+			b.backend.Sync()
+		}
+	} else {
+		// No cache - use current K/V only (for prefill self-attention)
+		fullKPtr = kPtr
+		fullVPtr = vPtr
+		fullSeqLen = seqLen
+	}
+
+	// 5. Attention: Q @ K^T -> softmax -> @ V
+	scale := float32(1.0 / sqrt(float64(headDim)))
+
+	if seqLen == 1 {
+		// Decode: single query against full KV sequence
+		// SDPA expects kvLen as the KV sequence length
+		b.backend.SDPA(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale)
+	} else {
+		// Prefill: use causal SDPAPrefill
+		b.backend.SDPAPrefill(qPtr, fullKPtr, fullVPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+	}
+	// No sync - SDPA must complete before Wo can read attnOut (serialized in queue)
+
+	// 6. Output Projection and residual
+	if !b.Wo.DevicePtr().IsNil() {
+		oDim := b.Wo.Shape().Dims()[0]
+		b.matMulTransposed(attnOutPtr, b.Wo, normOutPtr, seqLen, oDim, numHeads*headDim)
+		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
+	}
+	// No sync - operations serialized in command queue
+
+	// 7. FFN RMSNorm
+	if !b.FFNNorm.DevicePtr().IsNil() {
+		b.backend.RMSNorm(xPtr, b.FFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+	}
+	// No sync - RMSNorm must complete before W1/W3 can read normOut (serialized in queue)
+
+	// 8. MLP: SwiGLU variant
+	if !b.W1.DevicePtr().IsNil() {
+		w1Dim := b.W1.Shape().Dims()[0]
+		b.matMulTransposed(normOutPtr, b.W1, gatePtr, seqLen, w1Dim, hiddenSize)
+	}
+
+	if !b.W3.DevicePtr().IsNil() {
+		w3Dim := b.W3.Shape().Dims()[0]
+		b.matMulTransposed(normOutPtr, b.W3, upPtr, seqLen, w3Dim, hiddenSize)
+	}
+	// No sync - W1/W3 must complete before SiLU can read gatePtr/upPtr (serialized)
+
+	b.backend.SiLU(gatePtr, gatePtr, seqLen*intermediateSize)
+	b.backend.Mul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
+	// No sync - SiLU/Mul must complete before W2 can read gatePtr (serialized)
+
+	if !b.W2.DevicePtr().IsNil() {
+		w2Dim := b.W2.Shape().Dims()[0]
+		b.matMulTransposed(gatePtr, b.W2, normOutPtr, seqLen, w2Dim, intermediateSize)
+		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
+	}
+	// No sync - next layer's RMSNorm is serialized in queue
+
+	return x, nil
+}
+
+// ExecuteWithGPUKV performs the forward pass using GPU-resident KV cache.
+// This avoids CPU roundtrips for KV data during decode, providing significant speedup.
+func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUKVCache, layerIdx, startPos int) (tensor.Tensor, error) {
+	xPtr := x.DevicePtr()
+	scratchPtr := scratch.DevicePtr()
+
+	if xPtr.IsNil() || scratchPtr.IsNil() {
+		return x, nil
+	}
+
+	// Dimensions from config
+	seqLen := x.Shape().NumElements() / b.HiddenSize
+	hiddenSize := b.HiddenSize
+	numHeads := b.NumAttentionHeads
+	numKVHeads := b.NumKeyValueHeads
+	headDim := b.HeadDim
+	intermediateSize := b.IntermediateSize
+
+	// Derived sizes (in float32 elements)
+	qSize := seqLen * numHeads * headDim
+	kvSize := seqLen * numKVHeads * headDim
+
+	// Calculate sizes for intermediates
+	normOutBytes := seqLen * hiddenSize * 4
+	qBytes := qSize * 4
+	kvBytes := kvSize * 4
+	attnOutBytes := qSize * 4
+	gateBytes := seqLen * intermediateSize * 4
+	upBytes := seqLen * intermediateSize * 4
+
+	// Allocate intermediate buffers from scratch space
+	var normOutPtr, qPtr, kPtr, vPtr, attnOutPtr, gatePtr, upPtr tensor.DevicePtr
+
+	if scratchPtr.Location() == tensor.CPU {
+		offset := uintptr(0)
+		normOutPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(normOutBytes)
+		qPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(qBytes)
+		kPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(kvBytes)
+		vPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(kvBytes)
+		attnOutPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(attnOutBytes)
+		gatePtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		offset += uintptr(gateBytes)
+		upPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		_ = upBytes
+	} else {
+		normOutPtr = b.backend.Alloc(normOutBytes)
+		qPtr = b.backend.Alloc(qBytes)
+		kPtr = b.backend.Alloc(kvBytes)
+		vPtr = b.backend.Alloc(kvBytes)
+		attnOutPtr = b.backend.Alloc(attnOutBytes)
+		gatePtr = b.backend.Alloc(gateBytes)
+		upPtr = b.backend.Alloc(upBytes)
+	}
+
+	// 1. RMSNorm (Attention)
+	if !b.AttnNorm.DevicePtr().IsNil() {
+		b.backend.RMSNorm(xPtr, b.AttnNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+	}
+
+	// 2. Q/K/V Projections
+	if !b.Wq.DevicePtr().IsNil() {
+		qDim := b.Wq.Shape().Dims()[0]
+		b.matMulTransposed(normOutPtr, b.Wq, qPtr, seqLen, qDim, hiddenSize)
+	}
+
+	if !b.Wk.DevicePtr().IsNil() {
+		kDim := b.Wk.Shape().Dims()[0]
+		b.matMulTransposed(normOutPtr, b.Wk, kPtr, seqLen, kDim, hiddenSize)
+	}
+
+	if !b.Wv.DevicePtr().IsNil() {
+		vDim := b.Wv.Shape().Dims()[0]
+		b.matMulTransposed(normOutPtr, b.Wv, vPtr, seqLen, vDim, hiddenSize)
+	}
+
+	// 3. RoPE - Apply to Q and K
+	b.backend.RoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, startPos, float32(b.RoPETheta))
+
+	// 4. Append K/V to GPU cache and get pointers for SDPA
+	// This uses GPU-to-GPU copy - no CPU roundtrip!
+	fullKPtr, fullVPtr, fullSeqLen := gpuCache.AppendKV(layerIdx, kPtr, vPtr, seqLen)
+
+	// 5. Attention: Q @ K^T -> softmax -> @ V
+	scale := float32(1.0 / sqrt(float64(headDim)))
+
+	if seqLen == 1 {
+		// Decode: single query against full KV sequence
+		b.backend.SDPA(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale)
+	} else {
+		// Prefill: use causal SDPAPrefill with just current K/V
+		b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+	}
+
+	// 6. Output Projection and residual
+	if !b.Wo.DevicePtr().IsNil() {
+		oDim := b.Wo.Shape().Dims()[0]
+		b.matMulTransposed(attnOutPtr, b.Wo, normOutPtr, seqLen, oDim, numHeads*headDim)
+		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
+	}
+
+	// 7. FFN RMSNorm
+	if !b.FFNNorm.DevicePtr().IsNil() {
+		b.backend.RMSNorm(xPtr, b.FFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+	}
+
+	// 8. MLP: SwiGLU variant
+	if !b.W1.DevicePtr().IsNil() {
+		w1Dim := b.W1.Shape().Dims()[0]
+		b.matMulTransposed(normOutPtr, b.W1, gatePtr, seqLen, w1Dim, hiddenSize)
+	}
+
+	if !b.W3.DevicePtr().IsNil() {
+		w3Dim := b.W3.Shape().Dims()[0]
+		b.matMulTransposed(normOutPtr, b.W3, upPtr, seqLen, w3Dim, hiddenSize)
+	}
+
+	b.backend.SiLU(gatePtr, gatePtr, seqLen*intermediateSize)
+	b.backend.Mul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
+
+	if !b.W2.DevicePtr().IsNil() {
+		w2Dim := b.W2.Shape().Dims()[0]
+		b.matMulTransposed(gatePtr, b.W2, normOutPtr, seqLen, w2Dim, intermediateSize)
+		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
+	}
+
+	return x, nil
+}
+
+// unsafePointer returns an unsafe.Pointer from the first element
+func unsafePointer(p *float32) unsafe.Pointer {
+	return unsafe.Pointer(p)
+}
+
+// float32ToBytes converts []float32 to []byte
+func float32ToBytes(data []float32) []byte {
+	result := make([]byte, len(data)*4)
+	for i, v := range data {
+		binary.LittleEndian.PutUint32(result[i*4:], math.Float32bits(v))
+	}
+	return result
 }

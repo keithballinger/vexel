@@ -58,6 +58,28 @@ func (l *TensorLoader) LoadTensor(name string) ([]float32, []int, error) {
 	return f32Data, dims, nil
 }
 
+// LoadTensorRaw loads a tensor without dequantizing - returns raw bytes and type.
+// This is used for GPU quantized inference where dequantization happens on GPU.
+func (l *TensorLoader) LoadTensorRaw(name string) ([]byte, []int, TensorType, error) {
+	info, ok := l.file.GetTensor(name)
+	if !ok {
+		return nil, nil, 0, fmt.Errorf("tensor not found: %s", name)
+	}
+
+	data, err := l.file.ReadTensorData(info)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("failed to read tensor data: %w", err)
+	}
+
+	// Convert dimensions to []int, reversing order from GGUF's ne order to row-major
+	dims := make([]int, len(info.Dimensions))
+	for i, d := range info.Dimensions {
+		dims[len(dims)-1-i] = int(d)
+	}
+
+	return data, dims, info.Type, nil
+}
+
 // TensorNameMapping maps HuggingFace-style names to GGUF-style names.
 // GGUF uses a different naming convention based on llama.cpp.
 var TensorNameMapping = map[string]string{

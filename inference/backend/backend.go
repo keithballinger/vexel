@@ -3,6 +3,26 @@ package backend
 
 import "vexel/inference/tensor"
 
+// PoolResetter is an optional interface for backends that support buffer pooling.
+// Call ResetPool at the start of each forward pass to reuse temporary buffers.
+type PoolResetter interface {
+	ResetPool()
+}
+
+// BufferCopier is an optional interface for backends that support GPU-to-GPU buffer copies.
+// This avoids roundtripping through CPU memory.
+type BufferCopier interface {
+	CopyBuffer(src tensor.DevicePtr, srcOffset int, dst tensor.DevicePtr, dstOffset int, size int)
+}
+
+// QuantizedMatMul is an optional interface for backends that support quantized matrix operations.
+// Backends that don't implement this will fall back to dequantized (F32) operations.
+type QuantizedMatMul interface {
+	// MatMulQ4_0 performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q4_0 format.
+	// B contains raw Q4_0 data (18 bytes per 32 elements: 2 byte f16 scale + 16 bytes nibbles).
+	MatMulQ4_0(a, b, out tensor.DevicePtr, m, n, k int)
+}
+
 // Backend represents a compute backend that can execute tensor operations.
 // All compute operations use DevicePtr for device-agnostic memory access.
 // This interface is implemented by CPU, Metal, and CUDA backends.

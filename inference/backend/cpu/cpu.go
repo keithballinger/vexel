@@ -14,6 +14,7 @@ import (
 
 // Ensure Backend implements the interface
 var _ backend.Backend = (*CPUBackend)(nil)
+var _ backend.QuantizedMatMul = (*CPUBackend)(nil)
 
 // CPUBackend implements the Backend interface using CPU execution.
 type CPUBackend struct{}
@@ -87,7 +88,17 @@ func ptrToFloat32Slice(ptr tensor.DevicePtr, n int) []float32 {
 // =============================================================================
 
 // MatMul performs C = A @ B where A is [M,K], B is [K,N], C is [M,N].
+// Uses Accelerate framework on macOS for optimal performance.
 func (b *CPUBackend) MatMul(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	if useAccelerate {
+		b.MatMulAccelerate(a, bMat, out, m, n, k)
+		return
+	}
+	b.matMulNaive(a, bMat, out, m, n, k)
+}
+
+// matMulNaive is the fallback implementation without BLAS.
+func (b *CPUBackend) matMulNaive(a, bMat, out tensor.DevicePtr, m, n, k int) {
 	aData := ptrToFloat32Slice(a, m*k)
 	bData := ptrToFloat32Slice(bMat, k*n)
 	outData := ptrToFloat32Slice(out, m*n)
@@ -129,7 +140,17 @@ func (b *CPUBackend) MatMul(a, bMat, out tensor.DevicePtr, m, n, k int) {
 }
 
 // MatMulTransposed performs C = A @ B^T where A is [M,K], B is [N,K], C is [M,N].
+// Uses Accelerate framework on macOS for optimal performance.
 func (b *CPUBackend) MatMulTransposed(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	if useAccelerate {
+		b.MatMulTransposedAccelerate(a, bMat, out, m, n, k)
+		return
+	}
+	b.matMulTransposedNaive(a, bMat, out, m, n, k)
+}
+
+// matMulTransposedNaive is the fallback implementation without BLAS.
+func (b *CPUBackend) matMulTransposedNaive(a, bMat, out tensor.DevicePtr, m, n, k int) {
 	aData := ptrToFloat32Slice(a, m*k)
 	bData := ptrToFloat32Slice(bMat, n*k)
 	outData := ptrToFloat32Slice(out, m*n)
@@ -451,4 +472,121 @@ func (b *CPUBackend) SDPAPrefill(q, k, v, out tensor.DevicePtr, seqLen, numQHead
 			}
 		}
 	}
+}
+
+// MatMulQ4_0 performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q4_0 format.
+// Q4_0 format: 32 elements per block, 18 bytes per block (2 byte f16 scale + 16 bytes nibbles).
+// Nibble ordering (matching llama.cpp):
+// - Low nibbles (bits 0-3) go to positions 0..15
+// - High nibbles (bits 4-7) go to positions 16..31
+func (b *CPUBackend) MatMulQ4_0(a, bQ4, out tensor.DevicePtr, m, n, k int) {
+	aData := ptrToFloat32Slice(a, m*k)
+	outData := ptrToFloat32Slice(out, m*n)
+	bRaw := ptrToByteSlice(bQ4, n*k/32*18) // 18 bytes per 32 elements
+
+	// Zero output
+	for i := range outData {
+		outData[i] = 0
+	}
+
+	const blockSize = 32
+	const blockBytes = 18 // 2 bytes f16 scale + 16 bytes nibbles
+	blocksPerRow := k / blockSize
+
+	numWorkers := runtime.NumCPU()
+	if m < numWorkers {
+		numWorkers = m
+	}
+
+	var wg sync.WaitGroup
+	chunkSize := (m + numWorkers - 1) / numWorkers
+
+	for w := 0; w < numWorkers; w++ {
+		startRow := w * chunkSize
+		endRow := startRow + chunkSize
+		if endRow > m {
+			endRow = m
+		}
+
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			for i := start; i < end; i++ {
+				aRow := aData[i*k : (i+1)*k]
+
+				for j := 0; j < n; j++ {
+					var sum float32
+					bRowOffset := j * blocksPerRow * blockBytes
+
+					for blk := 0; blk < blocksPerRow; blk++ {
+						blockOffset := bRowOffset + blk*blockBytes
+
+						// Read scale (float16 -> float32)
+						scaleF16 := uint16(bRaw[blockOffset]) | uint16(bRaw[blockOffset+1])<<8
+						scale := float16ToFloat32(scaleF16)
+
+						// Dequantize following llama.cpp nibble ordering:
+						// Low nibbles -> positions 0..15, High nibbles -> positions 16..31
+						baseIdx := blk * 32
+						for byteI := 0; byteI < 16; byteI++ {
+							byteVal := bRaw[blockOffset+2+byteI]
+
+							// Low nibble -> position byteI
+							lowNibble := int(byteVal & 0x0F)
+							dequantLow := float32(lowNibble-8) * scale
+							sum += aRow[baseIdx+byteI] * dequantLow
+
+							// High nibble -> position byteI + 16
+							highNibble := int((byteVal >> 4) & 0x0F)
+							dequantHigh := float32(highNibble-8) * scale
+							sum += aRow[baseIdx+byteI+16] * dequantHigh
+						}
+					}
+					outData[i*n+j] = sum
+				}
+			}
+		}(startRow, endRow)
+	}
+	wg.Wait()
+}
+
+// ptrToByteSlice converts a DevicePtr to a byte slice.
+func ptrToByteSlice(ptr tensor.DevicePtr, n int) []byte {
+	if ptr.IsNil() {
+		return nil
+	}
+	return unsafe.Slice((*byte)(unsafe.Pointer(ptr.Addr())), n)
+}
+
+// float16ToFloat32 converts a float16 value (stored as uint16) to float32.
+func float16ToFloat32(h uint16) float32 {
+	sign := uint32((h >> 15) & 1)
+	exp := uint32((h >> 10) & 0x1F)
+	frac := uint32(h & 0x3FF)
+
+	if exp == 0 {
+		if frac == 0 {
+			// Zero
+			return math.Float32frombits(sign << 31)
+		}
+		// Denormalized number
+		exp = 1
+		for (frac & 0x400) == 0 {
+			frac <<= 1
+			exp--
+		}
+		frac &= 0x3FF
+	} else if exp == 31 {
+		if frac == 0 {
+			// Infinity
+			return math.Float32frombits((sign << 31) | 0x7F800000)
+		}
+		// NaN
+		return math.Float32frombits((sign << 31) | 0x7FC00000 | (frac << 13))
+	}
+
+	exp = exp + (127 - 15)
+	frac = frac << 13
+
+	return math.Float32frombits((sign << 31) | (exp << 23) | frac)
 }

@@ -127,10 +127,17 @@ func main() {
 		log.Fatalf("Failed to create runtime: %v", err)
 	}
 
-	// Create paged KV cache
-	maxBlocks := 256
-	pagedCache := rt.CreatePagedKVCache(maxBlocks)
-	fmt.Printf("Paged KV cache: %d blocks\n", pagedCache.FreeBlocks())
+	// Create KV cache - GPU resident for GPU backend, paged for CPU
+	if *useGPU && gpuAvailable() {
+		maxSeqLen := 512 // Max sequence length for GPU KV cache
+		gpuCache := rt.CreateGPUKVCache(maxSeqLen)
+		fmt.Printf("GPU KV cache: max seq len %d\n", maxSeqLen)
+		_ = gpuCache // Stored in runtime
+	} else {
+		maxBlocks := 256
+		pagedCache := rt.CreatePagedKVCache(maxBlocks)
+		fmt.Printf("Paged KV cache: %d blocks\n", pagedCache.FreeBlocks())
+	}
 
 	// Load weights (auto-detects format from extension)
 	if err := rt.LoadWeights(weightsPath); err != nil {

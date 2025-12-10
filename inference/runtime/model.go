@@ -14,6 +14,7 @@ type ModelRuntime struct {
 	ctx        *memory.InferenceContext
 	cache      *kv.KVCache      // Legacy simple cache
 	pagedCache *kv.PagedKVCache // Production paged cache
+	gpuCache   *GPUKVCache      // GPU-resident KV cache for Metal/CUDA
 	config     ModelConfig
 	layers     []*BlockRuntime
 
@@ -29,7 +30,8 @@ type ModelRuntime struct {
 	ggufLoader *gguf.TensorLoader
 
 	// Keep converted weight slices alive to prevent GC
-	keepAlive [][]float32
+	keepAlive      [][]float32
+	keepAliveBytes [][]byte // For raw quantized weight data
 }
 
 // NewModelRuntime initializes a new model runtime.
@@ -52,6 +54,11 @@ func NewModelRuntime(b backend.Backend, ctx *memory.InferenceContext, cache *kv.
 // Config returns the model configuration.
 func (m *ModelRuntime) Config() ModelConfig {
 	return m.config
+}
+
+// Backend returns the underlying compute backend.
+func (m *ModelRuntime) Backend() backend.Backend {
+	return m.backend
 }
 
 // Layer returns the block runtime at the given index.
@@ -85,4 +92,24 @@ func (m *ModelRuntime) CreatePagedKVCache(maxBlocks int) *kv.PagedKVCache {
 	cache := kv.NewPagedKVCache(config)
 	m.pagedCache = cache
 	return cache
+}
+
+// CreateGPUKVCache creates a GPU-resident KV cache for faster inference.
+// This avoids CPU roundtrips for KV data during decode.
+func (m *ModelRuntime) CreateGPUKVCache(maxSeqLen int) *GPUKVCache {
+	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	cache := NewGPUKVCache(
+		m.backend,
+		m.config.NumHiddenLayers,
+		m.config.NumKeyValueHeads,
+		headDim,
+		maxSeqLen,
+	)
+	m.gpuCache = cache
+	return cache
+}
+
+// GPUKVCache returns the GPU KV cache if available.
+func (m *ModelRuntime) GPUKVCache() *GPUKVCache {
+	return m.gpuCache
 }

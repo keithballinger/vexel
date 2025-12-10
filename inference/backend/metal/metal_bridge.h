@@ -17,8 +17,13 @@ void metal_release(void* obj);
 
 // Buffer management
 void* metal_alloc_buffer(void* device, size_t size);
+size_t metal_buffer_size(void* buffer);
 void metal_copy_to_buffer(void* buffer, const void* src, size_t size);
 void metal_copy_from_buffer(void* dst, void* buffer, size_t size);
+
+// GPU-to-GPU buffer copy (uses blit encoder)
+void metal_copy_buffer(void* queue, void* srcBuffer, size_t srcOffset,
+                       void* dstBuffer, size_t dstOffset, size_t size);
 
 // Shader compilation
 void* metal_compile_library(void* device, const char* source);
@@ -35,6 +40,20 @@ void metal_matmul_f32(void* queue, void* pipeline,
 void metal_matmul_transposed_f32(void* queue, void* pipeline,
                                   void* A, void* B, void* C,
                                   int M, int N, int K);
+
+void metal_matvec_transposed_f32(void* queue, void* pipeline,
+                                  void* A, void* B, void* C,
+                                  int N, int K);
+
+// Q4_0 quantized matrix-vector: C = A @ B^T where B is Q4_0 encoded
+void metal_matvec_q4_0_transposed_f32(void* queue, void* pipeline,
+                                       void* A, void* B, void* C,
+                                       int N, int K);
+
+// Batched Q4_0 matmul: C = A @ B^T where A is [M,K], B is [N,K] Q4_0, C is [M,N]
+void metal_matmul_q4_0_batched_f32(void* queue, void* pipeline,
+                                    void* A, void* B, void* C,
+                                    int M, int N, int K);
 
 void metal_rmsnorm_f32(void* queue, void* pipeline,
                        void* x, void* weight, void* out,
@@ -81,6 +100,14 @@ void metal_sdpa_prefill_f32(void* queue, void* pipeline,
                             void* Q, void* K, void* V, void* out,
                             int seqLen, int numQHeads, int numKVHeads, int headDim,
                             float scale);
+
+// Flash Decoding - parallelized SDPA for decode phase
+// Uses threadgroup parallelism with online softmax reduction
+// Q: [numQHeads, headDim], K/V: [kvLen, numKVHeads, headDim]
+void metal_sdpa_flash_decode_f32(void* queue, void* pipeline,
+                                  void* Q, void* K, void* V, void* out,
+                                  int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                  float scale);
 
 // Legacy interface (deprecated)
 void metal_scaled_dot_product_attention(void* queue,
