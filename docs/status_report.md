@@ -416,10 +416,10 @@ Created a truly batched Metal kernel `matmul_q4_0_batched_f32` that uses a 2D th
 
 | Metric | Vexel Before | Vexel After | llama.cpp | Gap (After) |
 |--------|--------------|-------------|-----------|-------------|
-| **Prefill** | 97 tok/s | **310 tok/s** | 1224 tok/s | **4x slower** |
+| **Prefill** | 97 tok/s | **396 tok/s** | 1224 tok/s | **3x slower** |
 | **Decode** | 61 tok/s | **120 tok/s** | 245 tok/s | **2x slower** |
 
-**Improvement achieved:** Prefill 3.2x faster, Decode 2x faster!
+**Improvement achieved:** Prefill 4.1x faster, Decode 2x faster!
 
 ### Optimizations Implemented
 
@@ -452,11 +452,18 @@ float4 a1 = A4[base_k / 4 + 1];
 - Activation loads moved outside the output loop for reuse
 - All nibble bytes loaded upfront before accumulation
 
-#### 4. SIMD Matrix Operations
+#### 4. Flash Attention for Prefill (DONE)
+- Tiled attention with online softmax algorithm
+- Process K in tiles of 16 positions
+- 64 threads per threadgroup with SIMD reductions
+- Each thread handles multiple headDim dimensions
+- Single-pass attention computation (no storing all scores)
+
+#### 5. SIMD Matrix Operations (TODO)
 - Apple's `simdgroup_matrix` for fast 8x8 matrix operations
 - Particularly effective for attention computation
 
-#### 5. Kernel Fusion
+#### 6. Kernel Fusion (TODO)
 - Combine operations like RMSNorm + first matmul
 - Reduce memory bandwidth by keeping data in registers
 
