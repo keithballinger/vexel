@@ -821,12 +821,16 @@ kernel void sdpa_flash_decode_f32(
     }
 }
 
-// Batched SDPA for prefill with causal masking
-// Uses two-pass algorithm to avoid large local arrays
+// Tiled SDPA for prefill with causal masking (Flash Attention style)
+// Uses online softmax to compute attention in a single pass with tiling
+// Each threadgroup handles one (qPos, qHead) pair with threads parallelizing over headDim
 // Q: [seqLen, numQHeads, headDim]
 // K: [seqLen, numKVHeads, headDim]
 // V: [seqLen, numKVHeads, headDim]
 // out: [seqLen, numQHeads, headDim]
+constant int PREFILL_THREADS = 64;  // Threads per threadgroup
+constant int PREFILL_TILE_K = 16;   // K positions per tile
+
 kernel void sdpa_prefill_f32(
     device const float* Q [[buffer(0)]],
     device const float* K [[buffer(1)]],
@@ -837,7 +841,11 @@ kernel void sdpa_prefill_f32(
     constant int& numKVHeads [[buffer(6)]],
     constant int& headDim [[buffer(7)]],
     constant float& scale [[buffer(8)]],
-    uint2 gid [[thread_position_in_grid]]
+    threadgroup float* shared [[threadgroup(0)]],
+    uint2 gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
 ) {
     int qPos = gid.x;
     int qHead = gid.y;
@@ -848,58 +856,125 @@ kernel void sdpa_prefill_f32(
     int headsPerKV = numQHeads / numKVHeads;
     int kvHead = qHead / headsPerKV;
 
-    // Q pointer for this position and head
     // Q layout: [seqLen, numQHeads, headDim]
     int qOffset = qPos * numQHeads * headDim + qHead * headDim;
 
     // Causal attention: only attend to positions <= qPos
     int maxKLen = qPos + 1;
 
-    // First pass: find max score for numerical stability
-    float maxScore = -INFINITY;
-    for (int kPos = 0; kPos < maxKLen; kPos++) {
-        // K layout: [seqLen, numKVHeads, headDim]
-        int kOffset = kPos * numKVHeads * headDim + kvHead * headDim;
+    // Shared memory layout:
+    // [0..PREFILL_TILE_K-1]: attention scores for current tile
+    // [PREFILL_TILE_K..PREFILL_TILE_K+7]: warp scratch for reduction
+    threadgroup float* scores = shared;
+    threadgroup float* warpScratch = shared + PREFILL_TILE_K;
 
-        float dot = 0.0f;
-        for (int d = 0; d < headDim; d++) {
-            dot += Q[qOffset + d] * K[kOffset + d];
+    // Online softmax state
+    float runningMax = -INFINITY;
+    float runningSum = 0.0f;
+
+    // Output accumulator (per-thread for dimensions it handles)
+    // Each thread handles headDim/PREFILL_THREADS dimensions
+    float acc[4] = {0.0f};  // Assuming headDim <= 256, max 4 dims per thread with 64 threads
+
+    // Process K in tiles
+    for (int tileStart = 0; tileStart < maxKLen; tileStart += PREFILL_TILE_K) {
+        int tileEnd = min(tileStart + PREFILL_TILE_K, maxKLen);
+        int tileSize = tileEnd - tileStart;
+
+        // Phase 1: Compute Q·K scores for this tile (parallel over K positions)
+        // Each thread computes one score
+        float localScore = -INFINITY;
+        if ((int)tid < tileSize) {
+            int kPos = tileStart + tid;
+            int kOffset = kPos * numKVHeads * headDim + kvHead * headDim;
+
+            float dot = 0.0f;
+            for (int d = 0; d < headDim; d++) {
+                dot += Q[qOffset + d] * K[kOffset + d];
+            }
+            localScore = dot * scale;
         }
-        maxScore = max(maxScore, dot * scale);
+
+        // Store score to shared memory
+        if ((int)tid < tileSize) {
+            scores[tid] = localScore;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Phase 2: Find tile max (parallel reduction)
+        float tileMax = -INFINITY;
+        for (int i = tid; i < tileSize; i += PREFILL_THREADS) {
+            tileMax = max(tileMax, scores[i]);
+        }
+        tileMax = simd_max(tileMax);
+        if (simd_lane == 0) {
+            warpScratch[simd_group] = tileMax;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < 2) {
+            tileMax = max(warpScratch[0], warpScratch[1]);
+            warpScratch[0] = tileMax;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        tileMax = warpScratch[0];
+
+        // Phase 3: Online softmax update
+        float newMax = max(runningMax, tileMax);
+        float rescale = exp(runningMax - newMax);
+
+        // Rescale existing accumulator
+        for (int i = 0; i < 4; i++) {
+            acc[i] *= rescale;
+        }
+        runningSum *= rescale;
+
+        // Compute exp(score - newMax) and sum for this tile
+        float tileSum = 0.0f;
+        for (int i = tid; i < tileSize; i += PREFILL_THREADS) {
+            float expScore = exp(scores[i] - newMax);
+            scores[i] = expScore;  // Store for V accumulation
+            tileSum += expScore;
+        }
+
+        // Reduce tile sum
+        tileSum = simd_sum(tileSum);
+        if (simd_lane == 0) {
+            warpScratch[simd_group] = tileSum;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < 2) {
+            tileSum = warpScratch[0] + warpScratch[1];
+            warpScratch[0] = tileSum;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        tileSum = warpScratch[0];
+
+        runningSum += tileSum;
+        runningMax = newMax;
+
+        // Phase 4: Accumulate weighted V
+        // Each thread handles specific dimensions
+        for (int kIdx = 0; kIdx < tileSize; kIdx++) {
+            float weight = scores[kIdx];
+            int kPos = tileStart + kIdx;
+            int vOffset = kPos * numKVHeads * headDim + kvHead * headDim;
+
+            // Each thread accumulates for its assigned dimensions
+            for (int i = 0; i < 4 && (int)(tid + i * PREFILL_THREADS) < headDim; i++) {
+                int d = tid + i * PREFILL_THREADS;
+                acc[i] += weight * V[vOffset + d];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    // out layout: [seqLen, numQHeads, headDim]
+    // Write output (each thread writes its dimensions)
     int outOffset = qPos * numQHeads * headDim + qHead * headDim;
+    float invSum = 1.0f / runningSum;
 
-    // Initialize output to zero
-    for (int d = 0; d < headDim; d++) {
-        out[outOffset + d] = 0.0f;
-    }
-
-    // Second pass: compute softmax and weighted sum
-    float sumExp = 0.0f;
-    for (int kPos = 0; kPos < maxKLen; kPos++) {
-        // Recompute K offset and score
-        int kOffset = kPos * numKVHeads * headDim + kvHead * headDim;
-        int vOffset = kPos * numKVHeads * headDim + kvHead * headDim;
-
-        float dot = 0.0f;
-        for (int d = 0; d < headDim; d++) {
-            dot += Q[qOffset + d] * K[kOffset + d];
-        }
-        float weight = exp(dot * scale - maxScore);
-        sumExp += weight;
-
-        // Accumulate weighted V
-        for (int d = 0; d < headDim; d++) {
-            out[outOffset + d] += weight * V[vOffset + d];
-        }
-    }
-
-    // Normalize by sum of exp
-    float invSum = 1.0f / sumExp;
-    for (int d = 0; d < headDim; d++) {
-        out[outOffset + d] *= invSum;
+    for (int i = 0; i < 4 && (int)(tid + i * PREFILL_THREADS) < headDim; i++) {
+        int d = tid + i * PREFILL_THREADS;
+        out[outOffset + d] = acc[i] * invSum;
     }
 }
 )";
@@ -1429,15 +1504,20 @@ void metal_sdpa_prefill_f32(void* queuePtr, void* pipelinePtr,
     [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
     [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
 
-    // Dispatch [seqLen, numQHeads] grid
-    MTLSize threadgroupSize = MTLSizeMake(MIN(16, (NSUInteger)seqLen), MIN(16, (NSUInteger)numQHeads), 1);
-    MTLSize threadgroups = MTLSizeMake(
-        (seqLen + threadgroupSize.width - 1) / threadgroupSize.width,
-        (numQHeads + threadgroupSize.height - 1) / threadgroupSize.height,
-        1
-    );
+    // Tiled Flash Attention: each threadgroup handles one (qPos, qHead) pair
+    // PREFILL_THREADS = 64 threads per threadgroup
+    // Shared memory: PREFILL_TILE_K (16) + warp scratch (8) = 24 floats
+    int PREFILL_THREADS = 64;
+    int PREFILL_TILE_K = 16;
+    int sharedMemSize = (PREFILL_TILE_K + 8) * sizeof(float);
 
-    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadgroupSize];
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    // Dispatch grid: (seqLen, numQHeads) threadgroups
+    MTLSize threadgroups = MTLSizeMake(seqLen, numQHeads, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(PREFILL_THREADS, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
     [encoder endEncoding];
     [cmdBuffer commit];
     [cmdBuffer waitUntilCompleted];
