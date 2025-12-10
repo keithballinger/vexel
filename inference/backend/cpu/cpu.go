@@ -215,6 +215,8 @@ func (b *CPUBackend) RMSNorm(x, weight, out tensor.DevicePtr, rows, cols int, ep
 }
 
 // RoPE applies Rotary Positional Embeddings in-place.
+// Uses interleaved (NEOX-style) layout where pairs are (0,1), (2,3), (4,5), ...
+// This matches llama.cpp's implementation for Llama-family models.
 func (b *CPUBackend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos int, theta float32) {
 	qData := ptrToFloat32Slice(q, seqLen*numHeads*headDim)
 	totalVectors := len(qData) / headDim
@@ -223,19 +225,20 @@ func (b *CPUBackend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, 
 		seqPos := i / numHeads
 		pos := startPos + seqPos
 		offset := i * headDim
-		halfDim := headDim / 2
 
-		for j := 0; j < halfDim; j++ {
+		// Interleaved layout: pairs are (0,1), (2,3), (4,5), ...
+		for j := 0; j < headDim/2; j++ {
+			idx := j * 2
 			exp := float64(2*j) / float64(headDim)
 			freq := float32(1.0 / math.Pow(float64(theta), exp))
 			angle := float32(pos) * freq
 			cos := float32(math.Cos(float64(angle)))
 			sin := float32(math.Sin(float64(angle)))
 
-			val1 := qData[offset+j]
-			val2 := qData[offset+j+halfDim]
-			qData[offset+j] = val1*cos - val2*sin
-			qData[offset+j+halfDim] = val1*sin + val2*cos
+			val1 := qData[offset+idx]
+			val2 := qData[offset+idx+1]
+			qData[offset+idx] = val1*cos - val2*sin
+			qData[offset+idx+1] = val1*sin + val2*cos
 		}
 	}
 
@@ -246,17 +249,19 @@ func (b *CPUBackend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, 
 			seqPos := i / numKVHeads
 			pos := startPos + seqPos
 			offset := i * headDim
-			halfDim := headDim / 2
-			for j := 0; j < halfDim; j++ {
+
+			for j := 0; j < headDim/2; j++ {
+				idx := j * 2
 				exp := float64(2*j) / float64(headDim)
 				freq := float32(1.0 / math.Pow(float64(theta), exp))
 				angle := float32(pos) * freq
 				cos := float32(math.Cos(float64(angle)))
 				sin := float32(math.Sin(float64(angle)))
-				val1 := kData[offset+j]
-				val2 := kData[offset+j+halfDim]
-				kData[offset+j] = val1*cos - val2*sin
-				kData[offset+j+halfDim] = val1*sin + val2*cos
+
+				val1 := kData[offset+idx]
+				val2 := kData[offset+idx+1]
+				kData[offset+idx] = val1*cos - val2*sin
+				kData[offset+idx+1] = val1*sin + val2*cos
 			}
 		}
 	}

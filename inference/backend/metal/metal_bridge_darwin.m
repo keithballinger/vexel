@@ -281,24 +281,27 @@ kernel void rope_f32(
     // Layout: [seqLen, numHeads, headDim]
     int offset = (pos * numHeads + head) * headDim;
 
+    // Interleaved layout: pairs are (0,1), (2,3), (4,5), ...
+    // This matches llama.cpp's implementation for Llama-family models.
     for (int j = 0; j < halfDim; j++) {
+        int idx = j * 2;
         // Frequency for this dimension pair
         float freq = 1.0f / pow(theta, float(2 * j) / float(headDim));
         float angle = float(absPos) * freq;
         float cos_val = cos(angle);
         float sin_val = sin(angle);
 
-        // Apply rotation to Q using paired elements (j and j+halfDim)
-        float q0 = q[offset + j];
-        float q1 = q[offset + j + halfDim];
-        q[offset + j] = q0 * cos_val - q1 * sin_val;
-        q[offset + j + halfDim] = q0 * sin_val + q1 * cos_val;
+        // Apply rotation to Q using interleaved pairs (2j and 2j+1)
+        float q0 = q[offset + idx];
+        float q1 = q[offset + idx + 1];
+        q[offset + idx] = q0 * cos_val - q1 * sin_val;
+        q[offset + idx + 1] = q0 * sin_val + q1 * cos_val;
 
         // Apply to K
-        float k0 = k[offset + j];
-        float k1 = k[offset + j + halfDim];
-        k[offset + j] = k0 * cos_val - k1 * sin_val;
-        k[offset + j + halfDim] = k0 * sin_val + k1 * cos_val;
+        float k0 = k[offset + idx];
+        float k1 = k[offset + idx + 1];
+        k[offset + idx] = k0 * cos_val - k1 * sin_val;
+        k[offset + idx + 1] = k0 * sin_val + k1 * cos_val;
     }
 }
 
@@ -324,35 +327,37 @@ kernel void rope_gqa_f32(
     int absPos = startPos + pos;
     int halfDim = headDim / 2;
 
-    // Process Q heads
+    // Process Q heads - interleaved layout: pairs are (0,1), (2,3), (4,5), ...
     if (head < numQHeads) {
         int qOffset = (pos * numQHeads + head) * headDim;
         for (int j = 0; j < halfDim; j++) {
+            int idx = j * 2;
             float freq = 1.0f / pow(theta, float(2 * j) / float(headDim));
             float angle = float(absPos) * freq;
             float cos_val = cos(angle);
             float sin_val = sin(angle);
 
-            float q0 = q[qOffset + j];
-            float q1 = q[qOffset + j + halfDim];
-            q[qOffset + j] = q0 * cos_val - q1 * sin_val;
-            q[qOffset + j + halfDim] = q0 * sin_val + q1 * cos_val;
+            float q0 = q[qOffset + idx];
+            float q1 = q[qOffset + idx + 1];
+            q[qOffset + idx] = q0 * cos_val - q1 * sin_val;
+            q[qOffset + idx + 1] = q0 * sin_val + q1 * cos_val;
         }
     }
 
-    // Process K heads (fewer due to GQA)
+    // Process K heads (fewer due to GQA) - interleaved layout
     if (head < numKVHeads) {
         int kOffset = (pos * numKVHeads + head) * headDim;
         for (int j = 0; j < halfDim; j++) {
+            int idx = j * 2;
             float freq = 1.0f / pow(theta, float(2 * j) / float(headDim));
             float angle = float(absPos) * freq;
             float cos_val = cos(angle);
             float sin_val = sin(angle);
 
-            float k0 = k[kOffset + j];
-            float k1 = k[kOffset + j + halfDim];
-            k[kOffset + j] = k0 * cos_val - k1 * sin_val;
-            k[kOffset + j + halfDim] = k0 * sin_val + k1 * cos_val;
+            float k0 = k[kOffset + idx];
+            float k1 = k[kOffset + idx + 1];
+            k[kOffset + idx] = k0 * cos_val - k1 * sin_val;
+            k[kOffset + idx + 1] = k0 * sin_val + k1 * cos_val;
         }
     }
 }

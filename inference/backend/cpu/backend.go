@@ -131,6 +131,8 @@ func (b *cpuBackend) RMSNorm(x, weight, out []float32, rows, cols int, eps float
 // RoPE applies Rotary Positional Embeddings in-place.
 // Data layout: [seqLen, numHeads, headDim]
 // All heads at the same sequence position use the same RoPE position.
+// Uses interleaved (NEOX-style) layout where pairs are (0,1), (2,3), (4,5), ...
+// This matches llama.cpp's implementation for Llama-family models.
 func (b *cpuBackend) RoPE(q, k []float32, headDim, numHeads, seqLen, startPos int, theta float32) {
 	totalVectors := len(q) / headDim
 
@@ -139,19 +141,20 @@ func (b *cpuBackend) RoPE(q, k []float32, headDim, numHeads, seqLen, startPos in
 		seqPos := i / numHeads
 		pos := startPos + seqPos
 		offset := i * headDim
-		halfDim := headDim / 2
 
-		for j := 0; j < halfDim; j++ {
+		// Interleaved layout: pairs are (0,1), (2,3), (4,5), ...
+		for j := 0; j < headDim/2; j++ {
+			idx := j * 2
 			exp := float64(2*j) / float64(headDim)
 			freq := float32(1.0 / math.Pow(float64(theta), exp))
 			angle := float32(pos) * freq
 			cos := float32(math.Cos(float64(angle)))
 			sin := float32(math.Sin(float64(angle)))
 
-			val1 := q[offset+j]
-			val2 := q[offset+j+halfDim]
-			q[offset+j] = val1*cos - val2*sin
-			q[offset+j+halfDim] = val1*sin + val2*cos
+			val1 := q[offset+idx]
+			val2 := q[offset+idx+1]
+			q[offset+idx] = val1*cos - val2*sin
+			q[offset+idx+1] = val1*sin + val2*cos
 		}
 	}
 
@@ -166,17 +169,19 @@ func (b *cpuBackend) RoPE(q, k []float32, headDim, numHeads, seqLen, startPos in
 			seqPos := i / numKVHeads
 			pos := startPos + seqPos
 			offset := i * headDim
-			halfDim := headDim / 2
-			for j := 0; j < halfDim; j++ {
+
+			for j := 0; j < headDim/2; j++ {
+				idx := j * 2
 				exp := float64(2*j) / float64(headDim)
 				freq := float32(1.0 / math.Pow(float64(theta), exp))
 				angle := float32(pos) * freq
 				cos := float32(math.Cos(float64(angle)))
 				sin := float32(math.Sin(float64(angle)))
-				val1 := k[offset+j]
-				val2 := k[offset+j+halfDim]
-				k[offset+j] = val1*cos - val2*sin
-				k[offset+j+halfDim] = val1*sin + val2*cos
+
+				val1 := k[offset+idx]
+				val2 := k[offset+idx+1]
+				k[offset+idx] = val1*cos - val2*sin
+				k[offset+idx+1] = val1*sin + val2*cos
 			}
 		}
 	}
@@ -238,12 +243,11 @@ func (b *cpuBackend) Softmax(x, out []float32, rows, cols int) {
 
 // RoPEShift applies a uniform RoPE position shift to K vectors in place.
 // This enables fragment caching by transforming RoPE(p) -> RoPE(p+shift).
+// Uses interleaved (NEOX-style) layout where pairs are (0,1), (2,3), (4,5), ...
 func (b *cpuBackend) RoPEShift(k []float32, headDim, numKVHeads, numTokens, shift int, theta float32) {
 	if shift == 0 {
 		return // No shift needed
 	}
-
-	halfDim := headDim / 2
 
 	// Apply RoPE(shift) to each K vector
 	// K layout: [numTokens, numKVHeads, headDim]
@@ -251,7 +255,9 @@ func (b *cpuBackend) RoPEShift(k []float32, headDim, numKVHeads, numTokens, shif
 		for h := 0; h < numKVHeads; h++ {
 			offset := t*numKVHeads*headDim + h*headDim
 
-			for j := 0; j < halfDim; j++ {
+			// Interleaved layout: pairs are (0,1), (2,3), (4,5), ...
+			for j := 0; j < headDim/2; j++ {
+				idx := j * 2
 				// Compute rotation angle for this dimension at position `shift`
 				exp := float64(2*j) / float64(headDim)
 				freq := float32(1.0 / math.Pow(float64(theta), exp))
@@ -260,10 +266,10 @@ func (b *cpuBackend) RoPEShift(k []float32, headDim, numKVHeads, numTokens, shif
 				sin := float32(math.Sin(float64(angle)))
 
 				// Apply rotation
-				val1 := k[offset+j]
-				val2 := k[offset+j+halfDim]
-				k[offset+j] = val1*cos - val2*sin
-				k[offset+j+halfDim] = val1*sin + val2*cos
+				val1 := k[offset+idx]
+				val2 := k[offset+idx+1]
+				k[offset+idx] = val1*cos - val2*sin
+				k[offset+idx+1] = val1*sin + val2*cos
 			}
 		}
 	}

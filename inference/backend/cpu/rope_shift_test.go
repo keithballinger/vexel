@@ -133,16 +133,16 @@ func TestRoPEShiftMathematicalProperties(t *testing.T) {
 
 	t.Run("rotation_preserves_magnitude", func(t *testing.T) {
 		// RoPE is a rotation, so magnitude should be preserved
-		// RoPE rotates pairs: (k[j], k[j+halfDim]) for j in [0, halfDim)
-		// For headDim=4, halfDim=2: pairs are (k[0],k[2]) and (k[1],k[3])
-		k := []float32{3.0, 0.0, 4.0, 0.0} // pair (3,4) has magnitude 5
+		// Interleaved layout: pairs are (k[0],k[1]) and (k[2],k[3])
+		// For headDim=4: pairs are (k[0],k[1]) and (k[2],k[3])
+		k := []float32{3.0, 4.0, 0.0, 0.0} // pair (3,4) has magnitude 5
 
-		// Magnitude of pair (k[0], k[2])
-		magBefore := float32(math.Sqrt(float64(k[0]*k[0] + k[2]*k[2])))
+		// Magnitude of pair (k[0], k[1])
+		magBefore := float32(math.Sqrt(float64(k[0]*k[0] + k[1]*k[1])))
 
 		ops.RoPEShift(k, headDim, numKVHeads, 1, 7, theta)
 
-		magAfter := float32(math.Sqrt(float64(k[0]*k[0] + k[2]*k[2])))
+		magAfter := float32(math.Sqrt(float64(k[0]*k[0] + k[1]*k[1])))
 
 		if absFloat(magBefore-magAfter) > 1e-5 {
 			t.Errorf("magnitude changed: %f -> %f", magBefore, magAfter)
