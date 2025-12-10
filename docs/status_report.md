@@ -410,6 +410,83 @@ Created a truly batched Metal kernel `matmul_q4_0_batched_f32` that uses a 2D th
 
 ---
 
+## Performance Gap Analysis: Vexel vs llama.cpp
+
+### Current Performance (December 10, 2024)
+
+| Metric | Vexel | llama.cpp | Gap |
+|--------|-------|-----------|-----|
+| **Prefill** | 97 tok/s | 1224 tok/s | **12.6x slower** |
+| **Decode** | 61 tok/s | 245 tok/s | **4x slower** |
+
+### Root Cause Analysis
+
+The performance gap is due to several optimizations in llama.cpp that Vexel doesn't yet implement:
+
+#### 1. SIMD Vectorized Dequantization
+**Current Vexel (slow):**
+```metal
+// Process Q4_0 elements one at a time
+for (int i = 0; i < 16; i++) {
+    uchar byte_val = blockPtr[2 + i];
+    int q0 = byte_val & 0x0F;
+    sum += A[k0] * scale * float(q0 - 8);  // Scalar operations
+}
+```
+
+**llama.cpp style (fast):**
+- Uses `simdgroup_load` for vectorized memory access
+- Processes 4-8 elements at once using `float4` or `half4`
+- SIMD shuffle operations for efficient reduction
+
+#### 2. Multiple Outputs Per Threadgroup
+- **Vexel**: 1 output element per threadgroup
+- **llama.cpp**: 2-4 output elements per threadgroup
+- Benefits: Better weight reuse, reduced dispatch overhead
+
+#### 3. Loop Unrolling & Register Blocking
+- Process 4-8 Q4 blocks per iteration instead of 1
+- Better instruction-level parallelism
+- Reduced loop overhead
+
+#### 4. SIMD Matrix Operations
+- Apple's `simdgroup_matrix` for fast 8x8 matrix operations
+- Particularly effective for attention computation
+
+#### 5. Kernel Fusion
+- Combine operations like RMSNorm + first matmul
+- Reduce memory bandwidth by keeping data in registers
+
+### Optimization Roadmap
+
+#### Phase 1: SIMD Q4_0 Kernel (Target: 2-3x decode speedup)
+- Vectorized dequantization using `float4`
+- Process multiple blocks per thread
+- SIMD reductions
+
+#### Phase 2: Multi-Output Threadgroups (Target: 1.5x additional speedup)
+- Each threadgroup computes 2-4 outputs
+- Better weight data reuse
+- Reduced dispatch overhead
+
+#### Phase 3: Flash Attention (Target: 2x prefill speedup)
+- Tiled attention computation
+- Memory-efficient softmax
+- Better cache utilization
+
+#### Phase 4: Kernel Fusion (Target: 1.2-1.5x additional)
+- RMSNorm + MatMul fusion
+- SiLU + Mul fusion (gate projection)
+
+### Target Performance
+
+| Metric | Current | Target | Required Improvement |
+|--------|---------|--------|---------------------|
+| **Prefill** | 97 tok/s | 800+ tok/s | 8x |
+| **Decode** | 61 tok/s | 200+ tok/s | 3.3x |
+
+---
+
 ## Test Scripts Reference
 
 Test scripts are stored in `/tmp/` and can be run with `go run`:

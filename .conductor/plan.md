@@ -294,3 +294,70 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [ ] Write Failing Tests: For preemption and resumption of sequences.
 - [ ] Implement Feature: Implement sequence preemption with KV cache preservation.
 
+## Phase 9: Performance Optimization (Target: Match llama.cpp)
+
+**Current Performance Gap (TinyLlama 1.1B Q4_0):**
+| Metric | Vexel | llama.cpp | Gap |
+|--------|-------|-----------|-----|
+| Prefill | 97 tok/s | 1224 tok/s | 12.6x |
+| Decode | 61 tok/s | 245 tok/s | 4x |
+
+### Task: SIMD Vectorized Q4_0 Dequantization (Target: 2-3x decode speedup)
+- [ ] Write Failing Tests: For vectorized Q4_0 dequantization correctness.
+- [ ] Implement Feature: Rewrite Q4_0 matvec kernel using `float4` vectorized loads.
+- [ ] Implement Feature: Use SIMD shuffle operations for efficient dot product.
+- [ ] Implement Feature: Process multiple Q4 blocks per thread iteration.
+- [ ] Write Failing Tests: For Q4_0 batched matmul vectorization.
+- [ ] Implement Feature: Apply SIMD vectorization to batched Q4_0 matmul.
+- [ ] Benchmark: Measure decode tok/s improvement (target: 120+ tok/s).
+
+### Task: Multi-Output Threadgroups (Target: 1.5x additional speedup)
+- [ ] Write Failing Tests: For multi-output kernel correctness.
+- [ ] Implement Feature: Modify Q4_0 matvec to compute 2-4 outputs per threadgroup.
+- [ ] Implement Feature: Optimize weight data reuse within threadgroup.
+- [ ] Implement Feature: Tune threadgroup size for optimal occupancy.
+- [ ] Benchmark: Measure decode tok/s improvement (target: 180+ tok/s).
+
+### Task: Flash Attention Implementation (Target: 2x prefill speedup)
+- [ ] Write Failing Tests: For tiled attention correctness.
+- [ ] Implement Feature: Implement tiled Q×K computation with local softmax.
+- [ ] Implement Feature: Implement online softmax normalization.
+- [ ] Implement Feature: Implement tiled attention output accumulation.
+- [ ] Write Failing Tests: For Flash Attention numerical stability.
+- [ ] Implement Feature: Handle causal masking in tiled computation.
+- [ ] Benchmark: Measure prefill tok/s improvement (target: 400+ tok/s).
+
+### Task: SIMD Matrix Operations (Target: 1.3x additional speedup)
+- [ ] Write Failing Tests: For simdgroup_matrix operations.
+- [ ] Implement Feature: Use Apple's `simdgroup_matrix` for 8x8 matrix multiply.
+- [ ] Implement Feature: Apply simdgroup matrices to attention computation.
+- [ ] Implement Feature: Apply simdgroup matrices to FFN computation.
+- [ ] Benchmark: Measure overall tok/s improvement.
+
+### Task: Kernel Fusion (Target: 1.2-1.5x additional speedup)
+- [ ] Write Failing Tests: For fused RMSNorm+MatMul correctness.
+- [ ] Implement Feature: Fuse RMSNorm with first attention matmul (QKV projection).
+- [ ] Write Failing Tests: For fused SiLU+Mul correctness.
+- [ ] Implement Feature: Fuse SiLU activation with gate multiplication in FFN.
+- [ ] Write Failing Tests: For fused Add+RMSNorm correctness.
+- [ ] Implement Feature: Fuse residual add with RMSNorm.
+- [ ] Benchmark: Measure memory bandwidth reduction and tok/s improvement.
+
+### Task: Memory Access Optimization
+- [ ] Implement Feature: Ensure coalesced memory access patterns in all kernels.
+- [ ] Implement Feature: Use shared memory for frequently accessed data.
+- [ ] Implement Feature: Optimize buffer layouts for cache efficiency.
+- [ ] Implement Feature: Reduce CPU-GPU synchronization points.
+
+### Task: Performance Validation
+- [ ] Benchmark: Full inference comparison with llama.cpp on TinyLlama 1.1B.
+- [ ] Benchmark: Test with larger models (7B, 13B) if applicable.
+- [ ] Document: Performance tuning guide with optimal settings.
+- [ ] Document: Architecture-specific optimizations (M1/M2/M3).
+
+**Target Final Performance:**
+| Metric | Current | Target | Required Improvement |
+|--------|---------|--------|---------------------|
+| Prefill | 97 tok/s | 800+ tok/s | 8x |
+| Decode | 61 tok/s | 200+ tok/s | 3.3x |
+
