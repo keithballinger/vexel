@@ -54,6 +54,11 @@ void metal_matvec_q4_0_transposed_f32(void* queue, void* pipeline,
                                        void* A, void* B, void* C,
                                        int N, int K);
 
+// Q4_0 multi-output matvec: 8 outputs per threadgroup for better utilization
+void metal_matvec_q4_0_multi_output_f32(void* queue, void* pipeline,
+                                         void* A, void* B, void* C,
+                                         int N, int K);
+
 // Batched Q4_0 matmul: C = A @ B^T where A is [M,K], B is [N,K] Q4_0, C is [M,N]
 void metal_matmul_q4_0_batched_f32(void* queue, void* pipeline,
                                     void* A, void* B, void* C,

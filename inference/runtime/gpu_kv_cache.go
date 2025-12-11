@@ -82,13 +82,16 @@ func (c *GPUKVCache) AppendKV(layerIdx int, kPtr, vPtr tensor.DevicePtr, newToke
 	}
 	// Note: No sync needed - Metal command queue serializes work in submission order
 
+	// Calculate the sequence length including the new tokens BEFORE updating
+	fullSeqLen = c.seqLen + newTokens
+
 	// Update sequence length (only after last layer to maintain consistency)
 	if layerIdx == c.numLayers-1 {
 		c.seqLen += newTokens
 	}
 
 	// Return full buffers and the sequence length including new tokens
-	return c.kBuffers[layerIdx], c.vBuffers[layerIdx], c.seqLen + newTokens
+	return c.kBuffers[layerIdx], c.vBuffers[layerIdx], fullSeqLen
 }
 
 // GetKV returns the K/V cache buffers for a specific layer.

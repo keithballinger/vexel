@@ -393,6 +393,10 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 		return tensor.Tensor{}, fmt.Errorf("GPU KV cache not initialized")
 	}
 
+	if debugDecode {
+		fmt.Printf("[DECODE-GPU] tokens=%v pos=%d\n", tokens, pos)
+	}
+
 	// Reset buffer pool if the backend supports it
 	if pooler, ok := m.backend.(interface{ ResetPool() }); ok {
 		pooler.ResetPool()
@@ -436,7 +440,10 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 	if !m.Embedding.DevicePtr().IsNil() {
 		m.backend.Embedding(tokenPtr, batchSize, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
 	}
-	// No sync needed - GPU operations serialized
+	if debugDecode {
+		m.backend.Sync()
+		debugTensor("[GPU] After Embedding", m.backend, statePtr, batchSize*hiddenSize)
+	}
 
 	// 4. Allocate Scratch for Layers
 	scratchBytes := m.config.ScratchBytes(batchSize)
@@ -452,11 +459,24 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 		if err != nil {
 			return tensor.Tensor{}, fmt.Errorf("layer %d: %w", i, err)
 		}
+		// Debug every layer to trace where values go wrong
+		if debugDecode {
+			m.backend.Sync()
+			debugTensor(fmt.Sprintf("[GPU] After Layer %d", i), m.backend, state.DevicePtr(), batchSize*hiddenSize)
+		}
+	}
+	if debugDecode {
+		m.backend.Sync()
+		debugTensor("[GPU] After All Layers", m.backend, state.DevicePtr(), batchSize*hiddenSize)
 	}
 
 	// 6. Final Norm (in-place on state)
 	if !m.FinalNorm.DevicePtr().IsNil() {
 		m.backend.RMSNorm(statePtr, m.FinalNorm.DevicePtr(), statePtr, batchSize, hiddenSize, float32(m.config.RMSNormEPS))
+	}
+	if debugDecode {
+		m.backend.Sync()
+		debugTensor("[GPU] After Final Norm", m.backend, statePtr, batchSize*hiddenSize)
 	}
 
 	// 7. Compute Logits: state @ OutputHead^T
@@ -471,6 +491,10 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 	}
 
 	m.backend.Sync()
+
+	if debugDecode {
+		debugLogits(m.backend, logitsPtr, vocabSize)
+	}
 
 	return logits, nil
 }
@@ -548,10 +572,10 @@ func (m *ModelRuntime) PrefillWithPagedKV(tokens []int, seqID int64, startPos in
 		if err != nil {
 			return tensor.Tensor{}, fmt.Errorf("layer %d: %w", i, err)
 		}
-		// Debug first layer only (to avoid spam)
-		if i == 0 {
+		// Debug every layer to compare with GPU path
+		if debugDecode {
 			m.backend.Sync()
-			debugTensor("[PREFILL] After Layer 0", m.backend, state.DevicePtr(), seqLen*hiddenSize)
+			debugTensor(fmt.Sprintf("[PREFILL] After Layer %d", i), m.backend, state.DevicePtr(), seqLen*hiddenSize)
 		}
 	}
 	m.backend.Sync()

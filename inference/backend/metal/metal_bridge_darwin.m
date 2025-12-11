@@ -112,15 +112,33 @@ kernel void matvec_transposed_f32(
 //
 // OPTIMIZED VERSION v3:
 // - Uses 2 simdgroups (64 threads) per threadgroup for better occupancy
-// - Each simdgroup processes 4 output rows (8 rows total per threadgroup)
-// - Loads activations cooperatively into shared memory
-// - Vectorized byte loads using uchar4
+// Q4_0 constants and helpers
 constant int Q4_BLOCK_SIZE = 32;
 constant int Q4_BYTES_PER_BLOCK = 18;
-constant int Q4_NR_PER_SIMD = 4;  // Rows per simdgroup
-constant int Q4_NUM_SIMD = 2;     // Simdgroups per threadgroup
-constant int Q4_NR = Q4_NR_PER_SIMD * Q4_NUM_SIMD;  // Total rows per threadgroup = 8
+constant int Q4_MV_THREADGROUP_SIZE = 256;
+constant int Q4_MV_OUTPUTS_PER_TG = 8;  // Multi-output: 8 outputs per threadgroup
 
+// Helper function to convert fp16 to fp32 (for Q4_0 scale)
+inline float q4_f16_to_f32(ushort h) {
+    uint sign = (h >> 15) & 0x1;
+    uint exp = (h >> 10) & 0x1f;
+    uint mant = h & 0x3ff;
+
+    if (exp == 0) {
+        if (mant == 0) return sign ? -0.0f : 0.0f;
+        float f = mant * (1.0f / 1024.0f) * (1.0f / 16384.0f);
+        return sign ? -f : f;
+    } else if (exp == 31) {
+        return sign ? -INFINITY : INFINITY;
+    }
+
+    float f = (1.0f + mant * (1.0f / 1024.0f)) * pow(2.0f, float(exp) - 15.0f);
+    return sign ? -f : f;
+}
+
+// Q4_0 matvec: each threadgroup handles one output element
+// Grid: N threadgroups of 256 threads
+// OPTIMIZED: Uses float4 vectorized loads and processes 4 bytes at a time
 kernel void matvec_q4_0_transposed_f32(
     device const float* A [[buffer(0)]],           // [1, K] activations
     device const uchar* B [[buffer(1)]],           // [N, K] in Q4_0 format
@@ -133,256 +151,212 @@ kernel void matvec_q4_0_transposed_f32(
     uint simd_lane [[thread_index_in_simdgroup]],
     uint simd_group [[simdgroup_index_in_threadgroup]]
 ) {
-    // Each threadgroup processes Q4_NR=8 output rows (2 simdgroups x 4 rows each)
-    const int r0 = gid * Q4_NR + simd_group * Q4_NR_PER_SIMD;  // Base row for this simdgroup
-    if (r0 >= N) return;
+    // Each threadgroup computes one output element C[gid]
+    if (gid >= (uint)N) return;
 
-    const int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
-    const int rowBytes = numBlocks * Q4_BYTES_PER_BLOCK;
+    float sum = 0.0f;
 
-    // Accumulators for each output row (4 rows per simdgroup)
-    float sumf0 = 0.0f, sumf1 = 0.0f, sumf2 = 0.0f, sumf3 = 0.0f;
+    // Calculate Q4_0 row offset for row gid
+    int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
+    device const uchar* b_row = B + gid * numBlocks * Q4_BYTES_PER_BLOCK;
 
-    // Pointers to weight rows
-    device const uchar* bx0 = B + r0 * rowBytes;
-    device const uchar* bx1 = (r0 + 1 < N) ? B + (r0 + 1) * rowBytes : bx0;
-    device const uchar* bx2 = (r0 + 2 < N) ? B + (r0 + 2) * rowBytes : bx0;
-    device const uchar* bx3 = (r0 + 3 < N) ? B + (r0 + 3) * rowBytes : bx0;
+    // Each thread handles some blocks
+    for (int block = tid; block < numBlocks; block += Q4_MV_THREADGROUP_SIZE) {
+        device const uchar* blockPtr = b_row + block * Q4_BYTES_PER_BLOCK;
 
-    // Pointer for vectorized activation reads
-    device const float4* A4 = (device const float4*)A;
+        // Read f16 scale
+        ushort scale_u16 = ((ushort)blockPtr[1] << 8) | blockPtr[0];
+        float scale = q4_f16_to_f32(scale_u16);
 
-    // Each thread handles different blocks, stride by simdgroup size
-    for (int block = simd_lane; block < numBlocks; block += 32) {
         int base_k = block * Q4_BLOCK_SIZE;
-        int blockOff = block * Q4_BYTES_PER_BLOCK;
 
-        // Load activations for this block using float4 (8 float4s = 32 elements)
-        float4 a0 = A4[base_k / 4 + 0];  // k: 0-3
-        float4 a1 = A4[base_k / 4 + 1];  // k: 4-7
-        float4 a2 = A4[base_k / 4 + 2];  // k: 8-11
-        float4 a3 = A4[base_k / 4 + 3];  // k: 12-15
-        float4 a4 = A4[base_k / 4 + 4];  // k: 16-19
-        float4 a5 = A4[base_k / 4 + 5];  // k: 20-23
-        float4 a6 = A4[base_k / 4 + 6];  // k: 24-27
-        float4 a7 = A4[base_k / 4 + 7];  // k: 28-31
+        // Check if we can do full block (most common case)
+        if (base_k + 32 <= K) {
+            // Process 16 bytes = 32 nibbles using float4 loads for A
+            // Load A values as float4 for first 16 elements (low nibbles)
+            device const float4* a_vec = (device const float4*)(A + base_k);
+            float4 a0 = a_vec[0];  // A[base_k + 0..3]
+            float4 a1 = a_vec[1];  // A[base_k + 4..7]
+            float4 a2 = a_vec[2];  // A[base_k + 8..11]
+            float4 a3 = a_vec[3];  // A[base_k + 12..15]
 
-        // Process row 0
-        {
-            device const uchar* blockPtr = bx0 + blockOff;
-            // Read f16 scale using hardware half type
-            half scale_h = *((device const half*)blockPtr);
-            float scale = float(scale_h);
+            // Load A values for second 16 elements (high nibbles)
+            device const float4* a_vec_hi = (device const float4*)(A + base_k + 16);
+            float4 a4 = a_vec_hi[0];  // A[base_k + 16..19]
+            float4 a5 = a_vec_hi[1];  // A[base_k + 20..23]
+            float4 a6 = a_vec_hi[2];  // A[base_k + 24..27]
+            float4 a7 = a_vec_hi[3];  // A[base_k + 28..31]
 
-            // Load nibble data as uchar4 (4 loads instead of 16)
-            device const uchar4* nibPtr = (device const uchar4*)(blockPtr + 2);
-            uchar4 n0 = nibPtr[0];  // bytes 0-3
-            uchar4 n1 = nibPtr[1];  // bytes 4-7
-            uchar4 n2 = nibPtr[2];  // bytes 8-11
-            uchar4 n3 = nibPtr[3];  // bytes 12-15
+            // Process bytes 0-3 (elements 0-3 low, 16-19 high)
+            uchar b0 = blockPtr[2];
+            uchar b1 = blockPtr[3];
+            uchar b2 = blockPtr[4];
+            uchar b3 = blockPtr[5];
 
-            float acc = 0.0f;
-            // Low nibbles (k: 0-15)
-            acc += a0.x * float((n0.x & 0x0F) - 8);
-            acc += a0.y * float((n0.y & 0x0F) - 8);
-            acc += a0.z * float((n0.z & 0x0F) - 8);
-            acc += a0.w * float((n0.w & 0x0F) - 8);
-            acc += a1.x * float((n1.x & 0x0F) - 8);
-            acc += a1.y * float((n1.y & 0x0F) - 8);
-            acc += a1.z * float((n1.z & 0x0F) - 8);
-            acc += a1.w * float((n1.w & 0x0F) - 8);
-            acc += a2.x * float((n2.x & 0x0F) - 8);
-            acc += a2.y * float((n2.y & 0x0F) - 8);
-            acc += a2.z * float((n2.z & 0x0F) - 8);
-            acc += a2.w * float((n2.w & 0x0F) - 8);
-            acc += a3.x * float((n3.x & 0x0F) - 8);
-            acc += a3.y * float((n3.y & 0x0F) - 8);
-            acc += a3.z * float((n3.z & 0x0F) - 8);
-            acc += a3.w * float((n3.w & 0x0F) - 8);
-            // High nibbles (k: 16-31)
-            acc += a4.x * float((n0.x >> 4) - 8);
-            acc += a4.y * float((n0.y >> 4) - 8);
-            acc += a4.z * float((n0.z >> 4) - 8);
-            acc += a4.w * float((n0.w >> 4) - 8);
-            acc += a5.x * float((n1.x >> 4) - 8);
-            acc += a5.y * float((n1.y >> 4) - 8);
-            acc += a5.z * float((n1.z >> 4) - 8);
-            acc += a5.w * float((n1.w >> 4) - 8);
-            acc += a6.x * float((n2.x >> 4) - 8);
-            acc += a6.y * float((n2.y >> 4) - 8);
-            acc += a6.z * float((n2.z >> 4) - 8);
-            acc += a6.w * float((n2.w >> 4) - 8);
-            acc += a7.x * float((n3.x >> 4) - 8);
-            acc += a7.y * float((n3.y >> 4) - 8);
-            acc += a7.z * float((n3.z >> 4) - 8);
-            acc += a7.w * float((n3.w >> 4) - 8);
-            sumf0 += scale * acc;
-        }
+            float4 q_lo_0 = float4(b0 & 0xF, b1 & 0xF, b2 & 0xF, b3 & 0xF) - 8.0f;
+            float4 q_hi_0 = float4(b0 >> 4, b1 >> 4, b2 >> 4, b3 >> 4) - 8.0f;
+            sum += scale * dot(a0, q_lo_0);
+            sum += scale * dot(a4, q_hi_0);
 
-        // Process row 1
-        if (r0 + 1 < N) {
-            device const uchar* blockPtr = bx1 + blockOff;
-            half scale_h = *((device const half*)blockPtr);
-            float scale = float(scale_h);
+            // Process bytes 4-7 (elements 4-7 low, 20-23 high)
+            uchar b4 = blockPtr[6];
+            uchar b5 = blockPtr[7];
+            uchar b6 = blockPtr[8];
+            uchar b7 = blockPtr[9];
 
-            device const uchar4* nibPtr = (device const uchar4*)(blockPtr + 2);
-            uchar4 n0 = nibPtr[0];
-            uchar4 n1 = nibPtr[1];
-            uchar4 n2 = nibPtr[2];
-            uchar4 n3 = nibPtr[3];
+            float4 q_lo_1 = float4(b4 & 0xF, b5 & 0xF, b6 & 0xF, b7 & 0xF) - 8.0f;
+            float4 q_hi_1 = float4(b4 >> 4, b5 >> 4, b6 >> 4, b7 >> 4) - 8.0f;
+            sum += scale * dot(a1, q_lo_1);
+            sum += scale * dot(a5, q_hi_1);
 
-            float acc = 0.0f;
-            acc += a0.x * float((n0.x & 0x0F) - 8);
-            acc += a0.y * float((n0.y & 0x0F) - 8);
-            acc += a0.z * float((n0.z & 0x0F) - 8);
-            acc += a0.w * float((n0.w & 0x0F) - 8);
-            acc += a1.x * float((n1.x & 0x0F) - 8);
-            acc += a1.y * float((n1.y & 0x0F) - 8);
-            acc += a1.z * float((n1.z & 0x0F) - 8);
-            acc += a1.w * float((n1.w & 0x0F) - 8);
-            acc += a2.x * float((n2.x & 0x0F) - 8);
-            acc += a2.y * float((n2.y & 0x0F) - 8);
-            acc += a2.z * float((n2.z & 0x0F) - 8);
-            acc += a2.w * float((n2.w & 0x0F) - 8);
-            acc += a3.x * float((n3.x & 0x0F) - 8);
-            acc += a3.y * float((n3.y & 0x0F) - 8);
-            acc += a3.z * float((n3.z & 0x0F) - 8);
-            acc += a3.w * float((n3.w & 0x0F) - 8);
-            acc += a4.x * float((n0.x >> 4) - 8);
-            acc += a4.y * float((n0.y >> 4) - 8);
-            acc += a4.z * float((n0.z >> 4) - 8);
-            acc += a4.w * float((n0.w >> 4) - 8);
-            acc += a5.x * float((n1.x >> 4) - 8);
-            acc += a5.y * float((n1.y >> 4) - 8);
-            acc += a5.z * float((n1.z >> 4) - 8);
-            acc += a5.w * float((n1.w >> 4) - 8);
-            acc += a6.x * float((n2.x >> 4) - 8);
-            acc += a6.y * float((n2.y >> 4) - 8);
-            acc += a6.z * float((n2.z >> 4) - 8);
-            acc += a6.w * float((n2.w >> 4) - 8);
-            acc += a7.x * float((n3.x >> 4) - 8);
-            acc += a7.y * float((n3.y >> 4) - 8);
-            acc += a7.z * float((n3.z >> 4) - 8);
-            acc += a7.w * float((n3.w >> 4) - 8);
-            sumf1 += scale * acc;
-        }
+            // Process bytes 8-11 (elements 8-11 low, 24-27 high)
+            uchar b8 = blockPtr[10];
+            uchar b9 = blockPtr[11];
+            uchar b10 = blockPtr[12];
+            uchar b11 = blockPtr[13];
 
-        // Process row 2
-        if (r0 + 2 < N) {
-            device const uchar* blockPtr = bx2 + blockOff;
-            half scale_h = *((device const half*)blockPtr);
-            float scale = float(scale_h);
+            float4 q_lo_2 = float4(b8 & 0xF, b9 & 0xF, b10 & 0xF, b11 & 0xF) - 8.0f;
+            float4 q_hi_2 = float4(b8 >> 4, b9 >> 4, b10 >> 4, b11 >> 4) - 8.0f;
+            sum += scale * dot(a2, q_lo_2);
+            sum += scale * dot(a6, q_hi_2);
 
-            device const uchar4* nibPtr = (device const uchar4*)(blockPtr + 2);
-            uchar4 n0 = nibPtr[0];
-            uchar4 n1 = nibPtr[1];
-            uchar4 n2 = nibPtr[2];
-            uchar4 n3 = nibPtr[3];
+            // Process bytes 12-15 (elements 12-15 low, 28-31 high)
+            uchar b12 = blockPtr[14];
+            uchar b13 = blockPtr[15];
+            uchar b14 = blockPtr[16];
+            uchar b15 = blockPtr[17];
 
-            float acc = 0.0f;
-            acc += a0.x * float((n0.x & 0x0F) - 8);
-            acc += a0.y * float((n0.y & 0x0F) - 8);
-            acc += a0.z * float((n0.z & 0x0F) - 8);
-            acc += a0.w * float((n0.w & 0x0F) - 8);
-            acc += a1.x * float((n1.x & 0x0F) - 8);
-            acc += a1.y * float((n1.y & 0x0F) - 8);
-            acc += a1.z * float((n1.z & 0x0F) - 8);
-            acc += a1.w * float((n1.w & 0x0F) - 8);
-            acc += a2.x * float((n2.x & 0x0F) - 8);
-            acc += a2.y * float((n2.y & 0x0F) - 8);
-            acc += a2.z * float((n2.z & 0x0F) - 8);
-            acc += a2.w * float((n2.w & 0x0F) - 8);
-            acc += a3.x * float((n3.x & 0x0F) - 8);
-            acc += a3.y * float((n3.y & 0x0F) - 8);
-            acc += a3.z * float((n3.z & 0x0F) - 8);
-            acc += a3.w * float((n3.w & 0x0F) - 8);
-            acc += a4.x * float((n0.x >> 4) - 8);
-            acc += a4.y * float((n0.y >> 4) - 8);
-            acc += a4.z * float((n0.z >> 4) - 8);
-            acc += a4.w * float((n0.w >> 4) - 8);
-            acc += a5.x * float((n1.x >> 4) - 8);
-            acc += a5.y * float((n1.y >> 4) - 8);
-            acc += a5.z * float((n1.z >> 4) - 8);
-            acc += a5.w * float((n1.w >> 4) - 8);
-            acc += a6.x * float((n2.x >> 4) - 8);
-            acc += a6.y * float((n2.y >> 4) - 8);
-            acc += a6.z * float((n2.z >> 4) - 8);
-            acc += a6.w * float((n2.w >> 4) - 8);
-            acc += a7.x * float((n3.x >> 4) - 8);
-            acc += a7.y * float((n3.y >> 4) - 8);
-            acc += a7.z * float((n3.z >> 4) - 8);
-            acc += a7.w * float((n3.w >> 4) - 8);
-            sumf2 += scale * acc;
-        }
+            float4 q_lo_3 = float4(b12 & 0xF, b13 & 0xF, b14 & 0xF, b15 & 0xF) - 8.0f;
+            float4 q_hi_3 = float4(b12 >> 4, b13 >> 4, b14 >> 4, b15 >> 4) - 8.0f;
+            sum += scale * dot(a3, q_lo_3);
+            sum += scale * dot(a7, q_hi_3);
+        } else {
+            // Partial block - use scalar fallback
+            for (int i = 0; i < 16 && base_k + i < K; i++) {
+                uchar byte_val = blockPtr[2 + i];
+                int k0 = base_k + i;
+                int q0 = byte_val & 0x0F;
+                sum += A[k0] * scale * float(q0 - 8);
 
-        // Process row 3
-        if (r0 + 3 < N) {
-            device const uchar* blockPtr = bx3 + blockOff;
-            half scale_h = *((device const half*)blockPtr);
-            float scale = float(scale_h);
-
-            device const uchar4* nibPtr = (device const uchar4*)(blockPtr + 2);
-            uchar4 n0 = nibPtr[0];
-            uchar4 n1 = nibPtr[1];
-            uchar4 n2 = nibPtr[2];
-            uchar4 n3 = nibPtr[3];
-
-            float acc = 0.0f;
-            acc += a0.x * float((n0.x & 0x0F) - 8);
-            acc += a0.y * float((n0.y & 0x0F) - 8);
-            acc += a0.z * float((n0.z & 0x0F) - 8);
-            acc += a0.w * float((n0.w & 0x0F) - 8);
-            acc += a1.x * float((n1.x & 0x0F) - 8);
-            acc += a1.y * float((n1.y & 0x0F) - 8);
-            acc += a1.z * float((n1.z & 0x0F) - 8);
-            acc += a1.w * float((n1.w & 0x0F) - 8);
-            acc += a2.x * float((n2.x & 0x0F) - 8);
-            acc += a2.y * float((n2.y & 0x0F) - 8);
-            acc += a2.z * float((n2.z & 0x0F) - 8);
-            acc += a2.w * float((n2.w & 0x0F) - 8);
-            acc += a3.x * float((n3.x & 0x0F) - 8);
-            acc += a3.y * float((n3.y & 0x0F) - 8);
-            acc += a3.z * float((n3.z & 0x0F) - 8);
-            acc += a3.w * float((n3.w & 0x0F) - 8);
-            acc += a4.x * float((n0.x >> 4) - 8);
-            acc += a4.y * float((n0.y >> 4) - 8);
-            acc += a4.z * float((n0.z >> 4) - 8);
-            acc += a4.w * float((n0.w >> 4) - 8);
-            acc += a5.x * float((n1.x >> 4) - 8);
-            acc += a5.y * float((n1.y >> 4) - 8);
-            acc += a5.z * float((n1.z >> 4) - 8);
-            acc += a5.w * float((n1.w >> 4) - 8);
-            acc += a6.x * float((n2.x >> 4) - 8);
-            acc += a6.y * float((n2.y >> 4) - 8);
-            acc += a6.z * float((n2.z >> 4) - 8);
-            acc += a6.w * float((n2.w >> 4) - 8);
-            acc += a7.x * float((n3.x >> 4) - 8);
-            acc += a7.y * float((n3.y >> 4) - 8);
-            acc += a7.z * float((n3.z >> 4) - 8);
-            acc += a7.w * float((n3.w >> 4) - 8);
-            sumf3 += scale * acc;
+                int k1 = base_k + i + 16;
+                if (k1 < K) {
+                    int q1 = (byte_val >> 4) & 0x0F;
+                    sum += A[k1] * scale * float(q1 - 8);
+                }
+            }
         }
     }
 
-    // SIMD reduction and output
-    float tot0 = simd_sum(sumf0);
-    float tot1 = simd_sum(sumf1);
-    float tot2 = simd_sum(sumf2);
-    float tot3 = simd_sum(sumf3);
+    // Warp-level reduction
+    sum = simd_sum(sum);
 
+    // Store warp results to shared memory
     if (simd_lane == 0) {
-        C[r0] = tot0;
-        if (r0 + 1 < N) C[r0 + 1] = tot1;
-        if (r0 + 2 < N) C[r0 + 2] = tot2;
-        if (r0 + 3 < N) C[r0 + 3] = tot3;
+        shared[simd_group] = sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Final reduction by first warp
+    if (simd_group == 0) {
+        int num_warps = (Q4_MV_THREADGROUP_SIZE + 31) / 32;
+        float warp_sum = (simd_lane < (uint)num_warps) ? shared[simd_lane] : 0.0f;
+        warp_sum = simd_sum(warp_sum);
+        if (tid == 0) {
+            C[gid] = warp_sum;
+        }
     }
 }
 
-// True batched Q4_0 matmul: C[m,n] = A[m,k] @ B[n,k]^T
-// OPTIMIZED: Uses vectorized float4 loads for activations
-// Each threadgroup (1 simdgroup of 32 threads) handles Q4_BATCH_NR output columns for one row
-// Grid: (N/Q4_BATCH_NR, M) threadgroups
-constant int Q4_BATCH_NR = 4;  // Number of output columns per threadgroup
+// Q4_0 matvec MULTI-OUTPUT: compute 8 outputs per threadgroup
+// Each simdgroup (32 threads) handles one output
+// 8 simdgroups = 8 outputs, each thread processes K/32 blocks
+// Grid: ceil(N/8) threadgroups of 256 threads
+kernel void matvec_q4_0_multi_output_f32(
+    device const float* A [[buffer(0)]],           // [1, K] activations
+    device const uchar* B [[buffer(1)]],           // [N, K] in Q4_0 format
+    device float* C [[buffer(2)]],                 // [1, N] output
+    constant int& N [[buffer(3)]],                 // Number of output elements
+    constant int& K [[buffer(4)]],                 // Inner dimension
+    uint gid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    // Each threadgroup handles 8 outputs: [gid*8 .. gid*8+7]
+    // Each simdgroup handles one output
+    int output_idx = gid * Q4_MV_OUTPUTS_PER_TG + simd_group;
+    if (output_idx >= N) return;
+
+    float sum = 0.0f;
+
+    // Q4_0 row layout
+    int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
+    device const uchar* b_row = B + output_idx * numBlocks * Q4_BYTES_PER_BLOCK;
+
+    // Each thread in simdgroup handles blocks with stride 32
+    // For K=2048 (64 blocks), each thread handles 2 blocks
+    for (int block = simd_lane; block < numBlocks; block += 32) {
+        device const uchar* blockPtr = b_row + block * Q4_BYTES_PER_BLOCK;
+
+        // Read f16 scale
+        ushort scale_u16 = ((ushort)blockPtr[1] << 8) | blockPtr[0];
+        float scale = q4_f16_to_f32(scale_u16);
+
+        int base_k = block * Q4_BLOCK_SIZE;
+
+        if (base_k + 32 <= K) {
+            // Full block - vectorized processing
+            device const float4* a_vec = (device const float4*)(A + base_k);
+            float4 a0 = a_vec[0], a1 = a_vec[1], a2 = a_vec[2], a3 = a_vec[3];
+
+            device const float4* a_vec_hi = (device const float4*)(A + base_k + 16);
+            float4 a4 = a_vec_hi[0], a5 = a_vec_hi[1], a6 = a_vec_hi[2], a7 = a_vec_hi[3];
+
+            // Process bytes 0-3
+            uchar b0 = blockPtr[2], b1 = blockPtr[3], b2 = blockPtr[4], b3 = blockPtr[5];
+            sum += scale * dot(a0, float4(b0 & 0xF, b1 & 0xF, b2 & 0xF, b3 & 0xF) - 8.0f);
+            sum += scale * dot(a4, float4(b0 >> 4, b1 >> 4, b2 >> 4, b3 >> 4) - 8.0f);
+
+            // Process bytes 4-7
+            uchar b4 = blockPtr[6], b5 = blockPtr[7], b6 = blockPtr[8], b7 = blockPtr[9];
+            sum += scale * dot(a1, float4(b4 & 0xF, b5 & 0xF, b6 & 0xF, b7 & 0xF) - 8.0f);
+            sum += scale * dot(a5, float4(b4 >> 4, b5 >> 4, b6 >> 4, b7 >> 4) - 8.0f);
+
+            // Process bytes 8-11
+            uchar b8 = blockPtr[10], b9 = blockPtr[11], b10 = blockPtr[12], b11 = blockPtr[13];
+            sum += scale * dot(a2, float4(b8 & 0xF, b9 & 0xF, b10 & 0xF, b11 & 0xF) - 8.0f);
+            sum += scale * dot(a6, float4(b8 >> 4, b9 >> 4, b10 >> 4, b11 >> 4) - 8.0f);
+
+            // Process bytes 12-15
+            uchar b12 = blockPtr[14], b13 = blockPtr[15], b14 = blockPtr[16], b15 = blockPtr[17];
+            sum += scale * dot(a3, float4(b12 & 0xF, b13 & 0xF, b14 & 0xF, b15 & 0xF) - 8.0f);
+            sum += scale * dot(a7, float4(b12 >> 4, b13 >> 4, b14 >> 4, b15 >> 4) - 8.0f);
+        } else {
+            // Partial block - scalar fallback
+            for (int i = 0; i < 16 && base_k + i < K; i++) {
+                uchar byte_val = blockPtr[2 + i];
+                int k0 = base_k + i;
+                sum += A[k0] * scale * float((byte_val & 0x0F) - 8);
+                int k1 = base_k + i + 16;
+                if (k1 < K) {
+                    sum += A[k1] * scale * float(((byte_val >> 4) & 0x0F) - 8);
+                }
+            }
+        }
+    }
+
+    // Simdgroup reduction - only 32 threads, single simd_sum needed
+    sum = simd_sum(sum);
+
+    // Lane 0 of each simdgroup writes its output
+    if (simd_lane == 0) {
+        C[output_idx] = sum;
+    }
+}
+
+// Q4_0 matmul: C[m,n] = A[m,k] @ B[n,k]^T
+// Each threadgroup handles ONE output element
+// Grid: (N, M) threadgroups of 256 threads
+// OPTIMIZED: Uses float4 vectorized loads and dot products
 
 kernel void matmul_q4_0_batched_f32(
     device const float* A [[buffer(0)]],           // [M, K] activations
@@ -397,122 +371,123 @@ kernel void matmul_q4_0_batched_f32(
     uint simd_lane [[thread_index_in_simdgroup]],
     uint simd_group [[simdgroup_index_in_threadgroup]]
 ) {
-    // gid.x = tile index in N dimension, gid.y = input row (m)
-    int n0 = gid.x * Q4_BATCH_NR;
+    // gid.x = output column (n), gid.y = input row (m)
+    int n = gid.x;
     int m = gid.y;
 
-    if (m >= M) return;
+    if (n >= N || m >= M) return;
 
-    const int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
+    float sum = 0.0f;
 
-    // A row pointer as float4 for vectorized reads
-    device const float4* A4 = (device const float4*)(A + m * K);
+    // A row pointer: A[m, :]
+    device const float* a_row = A + m * K;
 
-    // Accumulators for Q4_BATCH_NR output columns
-    float sumf[Q4_BATCH_NR] = {0.0f};
+    // B row pointer in Q4_0 format: B[n, :]
+    int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
+    device const uchar* b_row = B + n * numBlocks * Q4_BYTES_PER_BLOCK;
 
-    // Pointers to weight rows
-    device const uchar* bx[Q4_BATCH_NR];
-    for (int col = 0; col < Q4_BATCH_NR; ++col) {
-        bx[col] = (n0 + col < N) ? B + (n0 + col) * numBlocks * Q4_BYTES_PER_BLOCK : nullptr;
-    }
+    // Each thread handles some blocks
+    for (int block = tid; block < numBlocks; block += Q4_MV_THREADGROUP_SIZE) {
+        device const uchar* blockPtr = b_row + block * Q4_BYTES_PER_BLOCK;
 
-    // Each thread handles different blocks, stride by simdgroup size
-    for (int block = simd_lane; block < numBlocks; block += 32) {
+        // Read f16 scale
+        ushort scale_u16 = ((ushort)blockPtr[1] << 8) | blockPtr[0];
+        float scale = q4_f16_to_f32(scale_u16);
+
         int base_k = block * Q4_BLOCK_SIZE;
 
-        // Load activations for this block using float4 (8 float4s = 32 elements)
-        float4 a0 = A4[base_k / 4 + 0];  // k: 0-3
-        float4 a1 = A4[base_k / 4 + 1];  // k: 4-7
-        float4 a2 = A4[base_k / 4 + 2];  // k: 8-11
-        float4 a3 = A4[base_k / 4 + 3];  // k: 12-15
-        float4 a4 = A4[base_k / 4 + 4];  // k: 16-19
-        float4 a5 = A4[base_k / 4 + 5];  // k: 20-23
-        float4 a6 = A4[base_k / 4 + 6];  // k: 24-27
-        float4 a7 = A4[base_k / 4 + 7];  // k: 28-31
+        // Check if we can do full block (most common case)
+        if (base_k + 32 <= K) {
+            // Process 16 bytes = 32 nibbles using float4 loads for A
+            device const float4* a_vec = (device const float4*)(a_row + base_k);
+            float4 a0 = a_vec[0];
+            float4 a1 = a_vec[1];
+            float4 a2 = a_vec[2];
+            float4 a3 = a_vec[3];
 
-        // Process each output column
-        for (int col = 0; col < Q4_BATCH_NR; ++col) {
-            if (n0 + col >= N || bx[col] == nullptr) continue;
+            device const float4* a_vec_hi = (device const float4*)(a_row + base_k + 16);
+            float4 a4 = a_vec_hi[0];
+            float4 a5 = a_vec_hi[1];
+            float4 a6 = a_vec_hi[2];
+            float4 a7 = a_vec_hi[3];
 
-            device const uchar* blockPtr = bx[col] + block * Q4_BYTES_PER_BLOCK;
+            // Process bytes 0-3
+            uchar b0 = blockPtr[2];
+            uchar b1 = blockPtr[3];
+            uchar b2 = blockPtr[4];
+            uchar b3 = blockPtr[5];
 
-            // Read f16 scale using hardware half type
-            half scale_h = *((device const half*)blockPtr);
-            float scale = float(scale_h);
+            float4 q_lo_0 = float4(b0 & 0xF, b1 & 0xF, b2 & 0xF, b3 & 0xF) - 8.0f;
+            float4 q_hi_0 = float4(b0 >> 4, b1 >> 4, b2 >> 4, b3 >> 4) - 8.0f;
+            sum += scale * dot(a0, q_lo_0);
+            sum += scale * dot(a4, q_hi_0);
 
-            // Load nibble data as uchar4 (4 loads instead of 16)
-            device const uchar4* nibPtr = (device const uchar4*)(blockPtr + 2);
-            uchar4 n0 = nibPtr[0];
-            uchar4 n1 = nibPtr[1];
-            uchar4 n2 = nibPtr[2];
-            uchar4 n3 = nibPtr[3];
+            // Process bytes 4-7
+            uchar b4 = blockPtr[6];
+            uchar b5 = blockPtr[7];
+            uchar b6 = blockPtr[8];
+            uchar b7 = blockPtr[9];
 
-            // Map to old variable names for compatibility
-            uchar b0 = n0.x, b1 = n0.y, b2 = n0.z, b3 = n0.w;
-            uchar b4 = n1.x, b5 = n1.y, b6 = n1.z, b7 = n1.w;
-            uchar b8 = n2.x, b9 = n2.y, b10 = n2.z, b11 = n2.w;
-            uchar b12 = n3.x, b13 = n3.y, b14 = n3.z, b15 = n3.w;
+            float4 q_lo_1 = float4(b4 & 0xF, b5 & 0xF, b6 & 0xF, b7 & 0xF) - 8.0f;
+            float4 q_hi_1 = float4(b4 >> 4, b5 >> 4, b6 >> 4, b7 >> 4) - 8.0f;
+            sum += scale * dot(a1, q_lo_1);
+            sum += scale * dot(a5, q_hi_1);
 
-            float acc = 0.0f;
+            // Process bytes 8-11
+            uchar b8 = blockPtr[10];
+            uchar b9 = blockPtr[11];
+            uchar b10 = blockPtr[12];
+            uchar b11 = blockPtr[13];
 
-            // k: 0-3 (low nibbles of b0-b3)
-            acc += a0.x * float((b0  & 0x0F) - 8);
-            acc += a0.y * float((b1  & 0x0F) - 8);
-            acc += a0.z * float((b2  & 0x0F) - 8);
-            acc += a0.w * float((b3  & 0x0F) - 8);
+            float4 q_lo_2 = float4(b8 & 0xF, b9 & 0xF, b10 & 0xF, b11 & 0xF) - 8.0f;
+            float4 q_hi_2 = float4(b8 >> 4, b9 >> 4, b10 >> 4, b11 >> 4) - 8.0f;
+            sum += scale * dot(a2, q_lo_2);
+            sum += scale * dot(a6, q_hi_2);
 
-            // k: 4-7 (low nibbles of b4-b7)
-            acc += a1.x * float((b4  & 0x0F) - 8);
-            acc += a1.y * float((b5  & 0x0F) - 8);
-            acc += a1.z * float((b6  & 0x0F) - 8);
-            acc += a1.w * float((b7  & 0x0F) - 8);
+            // Process bytes 12-15
+            uchar b12 = blockPtr[14];
+            uchar b13 = blockPtr[15];
+            uchar b14 = blockPtr[16];
+            uchar b15 = blockPtr[17];
 
-            // k: 8-11 (low nibbles of b8-b11)
-            acc += a2.x * float((b8  & 0x0F) - 8);
-            acc += a2.y * float((b9  & 0x0F) - 8);
-            acc += a2.z * float((b10 & 0x0F) - 8);
-            acc += a2.w * float((b11 & 0x0F) - 8);
+            float4 q_lo_3 = float4(b12 & 0xF, b13 & 0xF, b14 & 0xF, b15 & 0xF) - 8.0f;
+            float4 q_hi_3 = float4(b12 >> 4, b13 >> 4, b14 >> 4, b15 >> 4) - 8.0f;
+            sum += scale * dot(a3, q_lo_3);
+            sum += scale * dot(a7, q_hi_3);
+        } else {
+            // Partial block - use scalar fallback
+            for (int i = 0; i < 16 && base_k + i < K; i++) {
+                uchar byte_val = blockPtr[2 + i];
+                int k0 = base_k + i;
+                int q0 = byte_val & 0x0F;
+                sum += a_row[k0] * scale * float(q0 - 8);
 
-            // k: 12-15 (low nibbles of b12-b15)
-            acc += a3.x * float((b12 & 0x0F) - 8);
-            acc += a3.y * float((b13 & 0x0F) - 8);
-            acc += a3.z * float((b14 & 0x0F) - 8);
-            acc += a3.w * float((b15 & 0x0F) - 8);
-
-            // k: 16-19 (high nibbles of b0-b3)
-            acc += a4.x * float((b0  >> 4) - 8);
-            acc += a4.y * float((b1  >> 4) - 8);
-            acc += a4.z * float((b2  >> 4) - 8);
-            acc += a4.w * float((b3  >> 4) - 8);
-
-            // k: 20-23 (high nibbles of b4-b7)
-            acc += a5.x * float((b4  >> 4) - 8);
-            acc += a5.y * float((b5  >> 4) - 8);
-            acc += a5.z * float((b6  >> 4) - 8);
-            acc += a5.w * float((b7  >> 4) - 8);
-
-            // k: 24-27 (high nibbles of b8-b11)
-            acc += a6.x * float((b8  >> 4) - 8);
-            acc += a6.y * float((b9  >> 4) - 8);
-            acc += a6.z * float((b10 >> 4) - 8);
-            acc += a6.w * float((b11 >> 4) - 8);
-
-            // k: 28-31 (high nibbles of b12-b15)
-            acc += a7.x * float((b12 >> 4) - 8);
-            acc += a7.y * float((b13 >> 4) - 8);
-            acc += a7.z * float((b14 >> 4) - 8);
-            acc += a7.w * float((b15 >> 4) - 8);
-
-            sumf[col] += scale * acc;
+                int k1 = base_k + i + 16;
+                if (k1 < K) {
+                    int q1 = (byte_val >> 4) & 0x0F;
+                    sum += a_row[k1] * scale * float(q1 - 8);
+                }
+            }
         }
     }
 
-    // SIMD reduction and output
-    for (int col = 0; col < Q4_BATCH_NR; ++col) {
-        float tot = simd_sum(sumf[col]);
-        if (simd_lane == 0 && n0 + col < N) {
-            C[m * N + n0 + col] = tot;
+    // Warp-level reduction
+    sum = simd_sum(sum);
+
+    // Store warp results to shared memory
+    if (simd_lane == 0) {
+        shared[simd_group] = sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Final reduction by first warp
+    if (simd_group == 0) {
+        int num_warps = (Q4_MV_THREADGROUP_SIZE + 31) / 32;
+        float warp_sum = (simd_lane < (uint)num_warps) ? shared[simd_lane] : 0.0f;
+        warp_sum = simd_sum(warp_sum);
+        if (tid == 0) {
+            // Output: C[m, n]
+            C[m * N + n] = warp_sum;
         }
     }
 }
@@ -1164,6 +1139,7 @@ void metal_copy_buffer(void* queue, void* srcBuffer, size_t srcOffset,
     [blit endEncoding];
 
     [commandBuffer commit];
+    [commandBuffer waitUntilCompleted];
 }
 
 // Shader compilation
@@ -1372,7 +1348,7 @@ void metal_matvec_transposed_f32(void* queuePtr, void* pipelinePtr,
 }
 
 // Q4_0 quantized matrix-vector multiply: C = A @ B^T where B is Q4_0
-// OPTIMIZED: Each simdgroup (32 threads) processes Q4_NR=2 output rows
+// Each threadgroup handles one output element with 256 threads
 void metal_matvec_q4_0_transposed_f32(void* queuePtr, void* pipelinePtr,
                                        void* A, void* B, void* C,
                                        int N, int K) {
@@ -1390,14 +1366,43 @@ void metal_matvec_q4_0_transposed_f32(void* queuePtr, void* pipelinePtr,
     [encoder setBytes:&N length:sizeof(N) atIndex:3];
     [encoder setBytes:&K length:sizeof(K) atIndex:4];
 
-    // Optimized kernel: 64 threads per threadgroup (2 simdgroups)
-    // Each threadgroup processes Q4_NR=8 output rows
-    int threadgroupSize = 64;
-    int Q4_NR = 8;  // Must match shader constant
-    int numThreadgroups = (N + Q4_NR - 1) / Q4_NR;
-    int sharedMemSize = sizeof(float);  // Minimal shared mem needed
+    // One threadgroup per output element, 256 threads per threadgroup
+    int threadgroupSize = 256;
+    int numWarps = (threadgroupSize + 31) / 32;
+    int sharedMemSize = numWarps * sizeof(float);
 
     [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    MTLSize threadgroups = MTLSizeMake(N, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Q4_0 multi-output matvec: 8 outputs per threadgroup using simdgroups
+// Grid: ceil(N/8) threadgroups of 256 threads
+void metal_matvec_q4_0_multi_output_f32(void* queuePtr, void* pipelinePtr,
+                                         void* A, void* B, void* C,
+                                         int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:0 atIndex:2];
+    [encoder setBytes:&N length:sizeof(N) atIndex:3];
+    [encoder setBytes:&K length:sizeof(K) atIndex:4];
+
+    // 8 outputs per threadgroup, 256 threads (8 simdgroups of 32)
+    int outputsPerTG = 8;
+    int threadgroupSize = 256;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
 
     MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
     MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
@@ -1406,19 +1411,17 @@ void metal_matvec_q4_0_transposed_f32(void* queuePtr, void* pipelinePtr,
     finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
-// True batched Q4_0 matmul: single dispatch for all M*N outputs
-// OPTIMIZED: Uses 32 threads per threadgroup (1 simdgroup)
-// Each threadgroup handles Q4_BATCH_NR=4 output columns for one row
-// Grid: (ceil(N/4), M) threadgroups
+// Q4_0 batched matmul: one threadgroup per output element
+// Grid: (N, M) threadgroups of 256 threads
 void metal_matmul_q4_0_batched_f32(void* queuePtr, void* pipelinePtr,
                                     void* A, void* B, void* C,
                                     int M, int N, int K) {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
     id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
 
-    int threadgroupSize = 32;  // One simdgroup
-    int Q4_BATCH_NR = 4;       // Must match shader constant
-    int sharedMemSize = sizeof(float);  // Minimal shared mem
+    int threadgroupSize = 256;
+    int numWarps = (threadgroupSize + 31) / 32;
+    int sharedMemSize = numWarps * sizeof(float);
 
     id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
@@ -1432,9 +1435,8 @@ void metal_matmul_q4_0_batched_f32(void* queuePtr, void* pipelinePtr,
     [encoder setBytes:&K length:sizeof(K) atIndex:5];
     [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
 
-    // 2D grid: (ceil(N/Q4_BATCH_NR), M) threadgroups
-    int numColTiles = (N + Q4_BATCH_NR - 1) / Q4_BATCH_NR;
-    MTLSize threadgroups = MTLSizeMake(numColTiles, M, 1);
+    // 2D grid: (N, M) threadgroups - one per output element
+    MTLSize threadgroups = MTLSizeMake(N, M, 1);
     MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];

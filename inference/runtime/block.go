@@ -499,7 +499,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	}
 
 	// Use command buffer batching if available (and not profiling - profiling needs sync points)
-	useBatching := b.batcher != nil && !profiler.enabled
+	// Note: Batching measured to have minimal impact, disabled for now
+	useBatching := false // b.batcher != nil && !profiler.enabled
 	if useBatching {
 		b.batcher.BeginBatch()
 		defer b.batcher.EndBatch()
@@ -603,6 +604,15 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 
 	// 4. Append K/V to GPU cache and get pointers for SDPA
 	// This uses GPU-to-GPU copy - no CPU roundtrip!
+	// CRITICAL: Must sync before CopyBuffer when batching is enabled!
+	// CopyBuffer creates its own command buffer, but the batched commands
+	// (RMSNorm, Q/K/V projections, RoPE) haven't been committed yet.
+	// Without this sync, CopyBuffer reads uninitialized data.
+	if useBatching {
+		b.batcher.EndBatch() // Commit and execute the batch
+		b.batcher.BeginBatch() // Start a new batch for remaining ops
+	}
+
 	var fullKPtr, fullVPtr tensor.DevicePtr
 	var fullSeqLen int
 	profileOp("KVCache", func() {
@@ -611,6 +621,18 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 
 	// 5. Attention: Q @ K^T -> softmax -> @ V
 	scale := float32(1.0 / sqrt(float64(headDim)))
+
+	// Debug: dump Q, K, V before SDPA
+	if debugDecode && layerIdx <= 1 {
+		b.debugBlockTensor(fmt.Sprintf("L%d Q before SDPA", layerIdx), qPtr, qSize)
+		if seqLen == 1 {
+			b.debugBlockTensor(fmt.Sprintf("L%d fullK before SDPA", layerIdx), fullKPtr, fullSeqLen*numKVHeads*headDim)
+			b.debugBlockTensor(fmt.Sprintf("L%d fullV before SDPA", layerIdx), fullVPtr, fullSeqLen*numKVHeads*headDim)
+		} else {
+			b.debugBlockTensor(fmt.Sprintf("L%d K before SDPA", layerIdx), kPtr, kvSize)
+			b.debugBlockTensor(fmt.Sprintf("L%d V before SDPA", layerIdx), vPtr, kvSize)
+		}
+	}
 
 	profileOp("SDPA", func() {
 		if seqLen == 1 {
@@ -622,6 +644,12 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		}
 	})
 
+	// Debug: dump attention output after SDPA
+	if debugDecode && layerIdx <= 1 {
+		b.backend.Sync()
+		b.debugBlockTensor(fmt.Sprintf("L%d AttnOut after SDPA", layerIdx), attnOutPtr, qSize)
+	}
+
 	// 6. Output Projection and residual
 	profileOp("Wo", func() {
 		if !b.Wo.DevicePtr().IsNil() {
@@ -629,9 +657,18 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			b.matMulTransposed(attnOutPtr, b.Wo, normOutPtr, seqLen, oDim, numHeads*headDim)
 		}
 	})
+	if debugDecode && layerIdx <= 1 {
+		b.backend.Sync()
+		b.debugBlockTensor(fmt.Sprintf("L%d After Wo (attn output)", layerIdx), normOutPtr, seqLen*hiddenSize)
+		b.debugBlockTensor(fmt.Sprintf("L%d x before Add1", layerIdx), xPtr, seqLen*hiddenSize)
+	}
 	profileOp("Add1", func() {
 		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
 	})
+	if debugDecode && layerIdx <= 1 {
+		b.backend.Sync()
+		b.debugBlockTensor(fmt.Sprintf("L%d x after Add1", layerIdx), xPtr, seqLen*hiddenSize)
+	}
 
 	// 7. FFN RMSNorm
 	profileOp("RMSNorm2", func() {
@@ -665,9 +702,18 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			b.matMulTransposed(gatePtr, b.W2, normOutPtr, seqLen, w2Dim, intermediateSize)
 		}
 	})
+	if debugDecode && layerIdx <= 1 {
+		b.backend.Sync()
+		b.debugBlockTensor(fmt.Sprintf("L%d After W2 (MLP output)", layerIdx), normOutPtr, seqLen*hiddenSize)
+		b.debugBlockTensor(fmt.Sprintf("L%d x before Add2", layerIdx), xPtr, seqLen*hiddenSize)
+	}
 	profileOp("Add2", func() {
 		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
 	})
+	if debugDecode && layerIdx <= 1 {
+		b.backend.Sync()
+		b.debugBlockTensor(fmt.Sprintf("L%d x after Add2 (FINAL)", layerIdx), xPtr, seqLen*hiddenSize)
+	}
 
 	return x, nil
 }

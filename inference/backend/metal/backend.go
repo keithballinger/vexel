@@ -47,9 +47,10 @@ type Backend struct {
 	pool *bufferPool
 
 	// Cached pipeline states
-	matmulPipeline           unsafe.Pointer
-	matvecPipeline           unsafe.Pointer
-	matvecQ4Pipeline         unsafe.Pointer
+	matmulPipeline               unsafe.Pointer
+	matvecPipeline               unsafe.Pointer
+	matvecQ4Pipeline             unsafe.Pointer
+	matvecQ4MultiOutputPipeline  unsafe.Pointer
 	softmaxPipeline          unsafe.Pointer
 	rmsnormPipeline          unsafe.Pointer
 	ropePipeline             unsafe.Pointer
@@ -92,6 +93,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matmulPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_transposed_f32"))
 	b.matvecPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_transposed_f32"))
 	b.matvecQ4Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_transposed_f32"))
+	b.matvecQ4MultiOutputPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_multi_output_f32"))
 	b.softmaxPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("softmax_f32"))
 	b.rmsnormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_f32"))
 	b.ropePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_f32"))
@@ -251,12 +253,13 @@ func (b *Backend) MatMulTransposed(a, bMat, out tensor.DevicePtr, m, n, k int) {
 // MatMulQ4_0 performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q4_0 format.
 // B contains raw Q4_0 data (18 bytes per 32 elements).
 func (b *Backend) MatMulQ4_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
-	if b.matvecQ4Pipeline == nil {
-		panic("MatMulQ4_0 called but no matvecQ4Pipeline available")
+	if b.matvecQ4MultiOutputPipeline == nil {
+		panic("MatMulQ4_0 called but no matvecQ4MultiOutputPipeline available")
 	}
 	if m == 1 {
-		// Single row - use direct matvec
-		C.metal_matvec_q4_0_transposed_f32(b.queue, b.matvecQ4Pipeline,
+		// Single row - use multi-output matvec for better thread utilization
+		// Each threadgroup computes 8 outputs, each simdgroup handles one output
+		C.metal_matvec_q4_0_multi_output_f32(b.queue, b.matvecQ4MultiOutputPipeline,
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(n), C.int(k))
 	} else {

@@ -112,3 +112,47 @@ Vexel aims for ambitious performance targets:
 Vexel includes a `MemoryPlan` API to estimate resource requirements:
 *   `MemoryPlan` struct: Provides estimates for `WeightsBytes`, `KVBytes`, `ScratchBytes`, and `ApproxParams`.
 *   `ModelConfig.MemoryPlan(kv KVConfig, maxActiveSeqs int)`: A function to calculate memory usage based on model configuration, KV cache configuration, and maximum active sequences. This includes detailed calculations for parameter count, weights memory, paged KV memory, and scratch memory.
+
+## 9. Benchmarking Infrastructure
+
+### Performance Target: llama.cpp Parity
+Vexel's performance target is to match llama.cpp, the reference implementation for efficient LLM inference. This provides a well-established, highly-optimized baseline.
+
+### Reference Benchmarks (TinyLlama 1.1B Q4_0 on M3 Max)
+| Implementation | Prefill (tok/s) | Decode (tok/s) |
+|---------------|-----------------|----------------|
+| llama.cpp     | ~1224           | ~245           |
+| Vexel (current)| ~97            | ~53            |
+
+### Benchmark Commands
+```bash
+# Vexel benchmark
+timeout 30 ./vexel -model models/tinyllama-1.1b-chat-v1.0.Q4_0.gguf -prompt "Hello" -n 50
+
+# llama.cpp reference
+timeout 15 llama-cli -m models/tinyllama-1.1b-chat-v1.0.Q4_0.gguf -p "Hello" -n 50
+```
+
+### Key Metrics
+*   **Prefill tok/s**: Tokens processed per second during prompt ingestion
+*   **Decode tok/s**: Tokens generated per second during autoregressive generation
+
+### Optimization Approach
+1. **Correctness First**: Ensure kernels produce correct output before optimizing
+2. **Simple Baseline**: Start with simple, correct implementations
+3. **Profile Before Optimizing**: Identify actual bottlenecks via profiling
+4. **Incremental Optimization**: Apply one optimization at a time, measuring impact
+5. **Regression Testing**: All optimizations must maintain correctness via kernel unit tests
+
+### Kernel Performance Hierarchy (Q4_0 matmul)
+1. **Simple loop-based**: Correct, ~10x slower than llama.cpp
+2. **SIMD vectorized**: float4 loads, SIMD shuffle - target 2-3x speedup
+3. **Multi-output threadgroups**: Compute multiple outputs per threadgroup - target 1.5x additional
+4. **simdgroup_matrix**: Apple's native 8x8 matrix ops - target 1.3x additional
+
+### Test Suite for Kernels
+Each kernel must have isolated unit tests that verify:
+*   Correctness against CPU reference implementation
+*   Various input sizes (edge cases like K=32, K=64, K=4096)
+*   Batched vs non-batched paths (M=1 vs M>1)
+*   Quantization formats (Q4_0, Q6_K, F32)

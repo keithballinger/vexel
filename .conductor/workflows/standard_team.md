@@ -48,6 +48,7 @@ All tasks follow a strict lifecycle:
    - Stage all code changes related to the task.
    - Propose a clear, concise commit message following the prose style guide.
    - Perform the commit.
+   - **Note:** Performance-related commits should include brief metrics in the commit message body (e.g., "Prefill: 97→150 tok/s (+55%)")
 
 8. **Attach Task Summary with Git Notes:**
    - **Step 8.1: Get Commit Hash:** Obtain the hash of the *just-completed commit* (`git log -1 --format="%H"`).
@@ -56,11 +57,22 @@ All tasks follow a strict lifecycle:
      - A deep dive into *why* specific technical decisions were made.
      - A detailed list of modified files and the nature of the changes in each.
      - Any trade-offs considered or architectural implications.
+     - **Performance Impact (REQUIRED for kernel/optimization work):**
+       - Baseline metrics before changes (prefill tok/s, decode tok/s)
+       - Post-change metrics
+       - Improvement/regression percentage
+       - Gap to llama.cpp reference (if applicable)
    - **Step 8.3: Attach Note:** Use the `git notes` command to attach the summary to the commit.
      ```bash
      # The note content from the previous step is passed via the -m flag.
      git notes add -m "<note content>" <commit_hash>
      ```
+
+9. **Record Benchmark Results (for performance-related tasks):**
+   - Run standardized benchmark: `timeout 30 ./vexel -model models/tinyllama-1.1b-chat-v1.0.Q4_0.gguf -prompt "Hello" -n 50`
+   - Record prefill tok/s and decode tok/s
+   - Compare to llama.cpp baseline: `timeout 15 llama-cli -m models/tinyllama-1.1b-chat-v1.0.Q4_0.gguf -p "Hello" -n 50`
+   - Update `.conductor/status.md` with latest metrics
 
 
 ### Quality Gates

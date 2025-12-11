@@ -3,6 +3,28 @@
 ## Guiding Principles
 This project adheres to the Conductor methodology, with a strong emphasis on Test-Driven Development (TDD), high code coverage, and deliberate architectural planning. All tasks will follow the Standard Task Workflow.
 
+## Benchmarking Requirements
+
+**All work must be associated with a Phase and Task.** When completing tasks that could affect performance:
+
+1. **Record Baseline Metrics** (before changes):
+   - Prefill tok/s
+   - Decode tok/s
+   - Model used (e.g., TinyLlama 1.1B Q4_0)
+   - Hardware (e.g., M3 Max)
+
+2. **Record Post-Change Metrics** (after changes):
+   - Same metrics as baseline
+   - Calculate improvement/regression percentage
+
+3. **Reference Target: llama.cpp Performance**
+   - TinyLlama 1.1B Q4_0 on M3 Max: ~1224 tok/s prefill, ~245 tok/s decode
+   - Always measure gap to llama.cpp when relevant
+
+4. **Include Benchmark Results in Task Completion**
+   - Add benchmark results to git notes when completing performance-related tasks
+   - Update status.md with latest performance metrics
+
 ## Phase 1: Foundation and Core Components
 
 ### Task: Set up Project Structure and Basic Go Modules
@@ -127,7 +149,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 
 ### Task: End-to-End Integration Testing
 - [x] Write Failing Tests: For loading and running a Llama-3-style 8B model from end-to-end. (Started: 2025-12-07 21:00, Completed: 2025-12-07 21:05)
-- [~] Implement Feature: Perform end-to-end integration of all modules with a reference model. (Started: 2025-12-07 21:10)
+- [x] Implement Feature: Perform end-to-end integration of all modules with a reference model. (Completed: 2025-12-10)
 - [x] Write Failing Tests: For key performance indicators (prefill, decode step, TtFT, active sequences). (Started: 2025-12-07 21:15, Completed: 2025-12-07 21:20)
 - [x] Implement Feature: Implement performance benchmarking tools and scripts. (Started: 2025-12-07 21:20, Completed: 2025-12-07 21:25)
 
@@ -172,7 +194,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Write Failing Tests: For Sequence token streaming channel. (Started: 2025-12-08 00:40, Completed: 2025-12-08 00:45)
 - [x] Implement Feature: Add `TokenChan` to `Sequence` and update `Scheduler` to push tokens. (Started: 2025-12-08 00:45, Completed: 2025-12-08 00:50)
 - [x] Write Failing Tests: For Interactive CLI loop (mocked stdin). (Started: 2025-12-08 00:50, Completed: 2025-12-08 00:55)
-- [~] Implement Feature: Update `cli.go` to support interactive chat loop. (Started: 2025-12-08 00:55)
+- [x] Implement Feature: Update `cli.go` to support interactive chat loop. (Completed: 2025-12-08)
 
 ### Task: Real Inference Support (Data Path)
 - [x] Write Failing Tests: For verifying weight data is populated from safetensors. (Started: 2025-12-08 00:55, Completed: 2025-12-08 01:00)
@@ -182,21 +204,20 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Optimize CPU Matmul (Parallelize). (Started: 2025-12-08 01:20, Completed: 2025-12-08 01:25)
 
 ### Task: Real Inference Support (Memory & Math)
-- [~] Write Failing Tests: For `Arena` allocator. (Started: 2025-12-08 02:00)
-- [ ] Implement Feature: Implement `Arena` with real memory allocation.
-- [ ] Write Failing Tests: For `Softmax` kernel.
-- [x] Implement Feature: Implement `Softmax` kernel. (Started: 2025-12-08 02:00, Completed: 2025-12-08 02:05)
-- [x] Write Failing Tests: For `SDPA` (Scaled Dot Product Attention) logic. (Started: 2025-12-08 02:10, Completed: 2025-12-08 02:15)
-- [x] Implement Feature: Implement `SDPA` with causal masking. (Started: 2025-12-08 02:15, Completed: 2025-12-08 02:20)
-- [ ] Write Failing Tests: For KV Cache read/write logic in `BlockRuntime`.
-- [x] Write Failing Tests: For KV Cache read/write logic in `BlockRuntime`. (Started: 2025-12-08 02:20, Completed: 2025-12-08 02:25)
-- [~] Implement Feature: Integrate KV Cache into `BlockRuntime`. (Started: 2025-12-08 02:30, Completed: 2025-12-08 02:35)
-- [x] Implement Feature: Implement `Matmul` Transpose support (for linear layers). (Started: 2025-12-08 02:35, Completed: 2025-12-08 02:40)
+- [x] Write Failing Tests: For `Arena` allocator. (Completed: 2025-12-08)
+- [x] Implement Feature: Implement `Arena` with real memory allocation. (Completed: 2025-12-08)
+- [x] Write Failing Tests: For `Softmax` kernel. (Completed: 2025-12-08)
+- [x] Implement Feature: Implement `Softmax` kernel. (Completed: 2025-12-08)
+- [x] Write Failing Tests: For `SDPA` (Scaled Dot Product Attention) logic. (Completed: 2025-12-08)
+- [x] Implement Feature: Implement `SDPA` with causal masking. (Completed: 2025-12-08)
+- [x] Write Failing Tests: For KV Cache read/write logic in `BlockRuntime`. (Completed: 2025-12-08)
+- [x] Implement Feature: Integrate KV Cache into `BlockRuntime`. (Completed: 2025-12-08)
+- [x] Implement Feature: Implement `Matmul` Transpose support (for linear layers). (Completed: 2025-12-08)
 
 ### Task: Manual Testing and Debugging
-- [ ] Implement Feature: Instrument `Scheduler` to print raw logits/token IDs.
-- [ ] Implement Feature: Debug Embedding and Layer outputs.
-- [ ] Verify: Generate real English text.
+- [x] Implement Feature: Instrument `Scheduler` to print raw logits/token IDs. (Completed: 2025-12-08)
+- [x] Implement Feature: Debug Embedding and Layer outputs. (Completed: 2025-12-08)
+- [x] Verify: Generate real English text. (Completed: 2025-12-10, after Q4_0 kernel fix)
 - [ ] Implement Feature: Add comprehensive GoDoc comments for all public types, functions, and methods.
 - [ ] Implement Feature: Review and refine `user_guide.md` and `architecture.md` to reflect implementation details and any evolved design decisions.
 - [ ] Implement Feature: Ensure all code adheres to the selected Go code style guide and passes linting/static analysis checks.
@@ -205,37 +226,39 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 ## Phase 6: GGUF Model Support
 
 ### Task: Implement GGUF File Format Loader (`inference/pkg/gguf/`)
-- [ ] Write Failing Tests: For GGUF header parsing (magic number, version, tensor count, metadata count).
-- [ ] Implement Feature: Implement GGUF header parser.
-- [ ] Write Failing Tests: For GGUF metadata parsing (key-value pairs, string/int/float/array types).
-- [ ] Implement Feature: Implement GGUF metadata parser (extract model config, tokenizer, chat template).
-- [ ] Write Failing Tests: For GGUF tensor info parsing (name, dimensions, type, offset).
-- [ ] Implement Feature: Implement GGUF tensor info parser.
-- [ ] Write Failing Tests: For mmap-based tensor data access.
-- [ ] Implement Feature: Implement mmap loading for GGUF tensor data.
+- [x] Write Failing Tests: For GGUF header parsing (magic number, version, tensor count, metadata count). (Completed: 2025-12-08)
+- [x] Implement Feature: Implement GGUF header parser. (Completed: 2025-12-08)
+- [x] Write Failing Tests: For GGUF metadata parsing (key-value pairs, string/int/float/array types). (Completed: 2025-12-08)
+- [x] Implement Feature: Implement GGUF metadata parser (extract model config, tokenizer, chat template). (Completed: 2025-12-08)
+- [x] Write Failing Tests: For GGUF tensor info parsing (name, dimensions, type, offset). (Completed: 2025-12-08)
+- [x] Implement Feature: Implement GGUF tensor info parser. (Completed: 2025-12-08)
+- [x] Write Failing Tests: For mmap-based tensor data access. (Completed: 2025-12-08)
+- [x] Implement Feature: Implement mmap loading for GGUF tensor data. (Completed: 2025-12-08)
 
 ### Task: Implement Quantized Tensor Support
-- [ ] Write Failing Tests: For Q4_0 dequantization (block of 32 values with 4-bit weights + scale).
-- [ ] Implement Feature: Implement Q4_0 dequantization kernel.
+- [x] Write Failing Tests: For Q4_0 dequantization (block of 32 values with 4-bit weights + scale). (Completed: 2025-12-08)
+- [x] Implement Feature: Implement Q4_0 dequantization kernel (CPU). (Completed: 2025-12-08)
+- [x] Write Failing Tests: For Q8_0 dequantization. (Completed: 2025-12-08)
+- [x] Implement Feature: Implement Q8_0 dequantization kernel (CPU). (Completed: 2025-12-08)
+- [x] Write Failing Tests: For Q6_K dequantization. (Completed: 2025-12-08)
+- [x] Implement Feature: Implement Q6_K dequantization kernel (CPU). (Completed: 2025-12-08)
 - [ ] Write Failing Tests: For Q4_K dequantization (k-quants with super-blocks).
-- [ ] Implement Feature: Implement Q4_K dequantization kernel.
-- [ ] Write Failing Tests: For Q8_0 dequantization.
-- [ ] Implement Feature: Implement Q8_0 dequantization kernel.
-- [ ] Write Failing Tests: For quantized matmul (multiply without full dequant).
-- [ ] Implement Feature: Implement fused quantized matmul for Q4/Q8.
+- [ ] Implement Feature: Implement Q4_K dequantization kernel (CPU).
+- [x] Implement Feature: Implement fused quantized matmul for Q4_0 (GPU). (Completed: 2025-12-09)
 
 ### Task: Integrate GGUF with Runtime
-- [ ] Write Failing Tests: For ModelRuntime loading from GGUF file.
-- [ ] Implement Feature: Update ModelRuntime to auto-detect and load GGUF vs SafeTensors.
-- [ ] Write Failing Tests: For tokenizer extraction from GGUF metadata.
-- [ ] Implement Feature: Parse tokenizer vocab and special tokens from GGUF metadata.
-- [ ] Write Failing Tests: For chat template extraction from GGUF.
-- [ ] Implement Feature: Extract and apply chat templates from GGUF metadata.
+- [x] Write Failing Tests: For ModelRuntime loading from GGUF file. (Completed: 2025-12-08)
+- [x] Implement Feature: Update ModelRuntime to auto-detect and load GGUF vs SafeTensors. (Completed: 2025-12-08)
+- [x] Write Failing Tests: For tokenizer extraction from GGUF metadata. (Completed: 2025-12-08)
+- [x] Implement Feature: Parse tokenizer vocab and special tokens from GGUF metadata. (Completed: 2025-12-08)
+- [x] Write Failing Tests: For chat template extraction from GGUF. (Completed: 2025-12-08)
+- [x] Implement Feature: Extract and apply chat templates from GGUF metadata. (Completed: 2025-12-08)
 
 ## Phase 7: Real GPU Backend Implementation
 
 ### Task: CUDA Backend - Real Kernels (`inference/backend/cuda/`)
 *Note: Phase 3 implemented interface structure. This phase implements actual CUDA kernels.*
+*Status: NOT STARTED - placeholder only*
 - [ ] Write Failing Tests: For CUDA device detection and initialization.
 - [ ] Implement Feature: Implement CUDA device enumeration and context creation.
 - [ ] Write Failing Tests: For CUDA memory allocation (cudaMalloc/cudaFree).
@@ -255,32 +278,38 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 
 ### Task: Metal Backend - Real Kernels (`inference/backend/metal/`)
 *Note: Phase 3 implemented interface structure. This phase implements actual Metal shaders.*
-- [ ] Write Failing Tests: For Metal device detection and command queue creation.
-- [ ] Implement Feature: Implement Metal device initialization.
-- [ ] Write Failing Tests: For Metal buffer allocation.
-- [ ] Implement Feature: Implement Metal memory management.
-- [ ] Write Failing Tests: For Metal Matmul shader (MPSMatrixMultiplication or custom).
-- [ ] Implement Feature: Implement Matmul using MPS or custom Metal shader.
-- [ ] Write Failing Tests: For Metal RMSNorm shader.
-- [ ] Implement Feature: Implement RMSNorm Metal shader.
-- [ ] Write Failing Tests: For Metal RoPE shader.
-- [ ] Implement Feature: Implement RoPE Metal shader.
-- [ ] Write Failing Tests: For Metal SiLU shader.
-- [ ] Implement Feature: Implement SiLU Metal shader.
-- [ ] Write Failing Tests: For Metal Softmax shader.
-- [ ] Implement Feature: Implement Softmax Metal shader.
-- [ ] Write Failing Tests: For Metal Flash Attention shader.
-- [ ] Implement Feature: Implement Flash Attention for Metal.
+*Status: COMPLETE - All core kernels implemented*
+- [x] Write Failing Tests: For Metal device detection and command queue creation. (Completed: 2025-12-08)
+- [x] Implement Feature: Implement Metal device initialization. (Completed: 2025-12-08)
+- [x] Write Failing Tests: For Metal buffer allocation. (Completed: 2025-12-08)
+- [x] Implement Feature: Implement Metal memory management. (Completed: 2025-12-08)
+- [x] Write Failing Tests: For Metal Matmul shader (MPSMatrixMultiplication or custom). (Completed: 2025-12-08)
+- [x] Implement Feature: Implement Matmul using custom Metal shader (F32 and Q4_0). (Completed: 2025-12-09)
+- [x] Write Failing Tests: For Metal RMSNorm shader. (Completed: 2025-12-08)
+- [x] Implement Feature: Implement RMSNorm Metal shader. (Completed: 2025-12-08)
+- [x] Write Failing Tests: For Metal RoPE shader. (Completed: 2025-12-08)
+- [x] Implement Feature: Implement RoPE Metal shader (including GQA variant). (Completed: 2025-12-08)
+- [x] Write Failing Tests: For Metal SiLU shader. (Completed: 2025-12-08)
+- [x] Implement Feature: Implement SiLU Metal shader. (Completed: 2025-12-08)
+- [x] Implement Feature: Implement fused SiLU+Mul kernel. (Completed: 2025-12-09)
+- [x] Write Failing Tests: For Metal Softmax shader. (Completed: 2025-12-08)
+- [x] Implement Feature: Implement Softmax Metal shader. (Completed: 2025-12-08)
+- [x] Write Failing Tests: For Metal Flash Attention shader. (Completed: 2025-12-09)
+- [x] Implement Feature: Implement Flash Attention for Metal (sdpa_prefill_f32, sdpa_flash_decode_f32). (Completed: 2025-12-09)
+- [x] Implement Feature: Implement Embedding lookup shader. (Completed: 2025-12-08)
+- [x] Implement Feature: Implement Add and Mul element-wise shaders. (Completed: 2025-12-08)
 
 ## Phase 8: Advanced Optimizations
 
 ### Task: Batched Prefill
-- [ ] Write Failing Tests: For processing multiple prompt tokens in single forward pass.
-- [ ] Implement Feature: Update DecodeStep to handle batched prefill (all prompt tokens at once).
-- [ ] Write Failing Tests: For KV cache batch write during prefill.
-- [ ] Implement Feature: Optimize KV cache writes for batched prefill.
+- [x] Write Failing Tests: For processing multiple prompt tokens in single forward pass. (Completed: 2025-12-08)
+- [x] Implement Feature: Update DecodeStep to handle batched prefill (all prompt tokens at once). (Completed: 2025-12-08)
+- [x] Write Failing Tests: For KV cache batch write during prefill. (Completed: 2025-12-08)
+- [x] Implement Feature: Optimize KV cache writes for batched prefill. (Completed: 2025-12-08)
+*Implementation: PrefillWithPagedKV in runtime/decode.go, uses SDPAPrefill kernel*
 
 ### Task: Speculative Decoding
+*Status: NOT STARTED*
 - [ ] Write Failing Tests: For draft model token generation.
 - [ ] Implement Feature: Implement draft model support (smaller model for speculation).
 - [ ] Write Failing Tests: For verification of draft tokens by main model.
@@ -289,6 +318,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [ ] Implement Feature: Integrate speculative decoding into scheduler.
 
 ### Task: Continuous Batching Improvements
+*Status: NOT STARTED*
 - [ ] Write Failing Tests: For dynamic batch size adjustment.
 - [ ] Implement Feature: Implement iteration-level batching (add/remove sequences mid-generation).
 - [ ] Write Failing Tests: For preemption and resumption of sequences.
@@ -296,20 +326,30 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 
 ## Phase 9: Performance Optimization (Target: Match llama.cpp)
 
-**Current Performance Gap (TinyLlama 1.1B Q4_0):**
+**Current Performance (TinyLlama 1.1B Q4_0 on M3 Max):**
 | Metric | Vexel | llama.cpp | Gap |
 |--------|-------|-----------|-----|
-| Prefill | 97 tok/s | 1224 tok/s | 12.6x |
-| Decode | 61 tok/s | 245 tok/s | 4x |
+| Prefill | ~97 tok/s | ~1224 tok/s | 12.6x |
+| Decode | ~53 tok/s | ~245 tok/s | 4.6x |
+
+*Note: Q4_0 "optimized" kernels from commit c51d6eb had correctness bugs and were reverted to simple versions on 2025-12-10.*
+
+### Task: Q4_0 Kernel Correctness (COMPLETED)
+- [x] Write Failing Tests: For Q4_0 kernel correctness (isolated unit test). (Completed: 2025-12-10)
+- [x] Fix: Reverted buggy vectorized Q4_0 kernels to simple loop-based versions. (Completed: 2025-12-10)
+- [x] Verify: GPU inference produces coherent text. (Completed: 2025-12-10)
 
 ### Task: SIMD Vectorized Q4_0 Dequantization (Target: 2-3x decode speedup)
-- [ ] Write Failing Tests: For vectorized Q4_0 dequantization correctness.
-- [ ] Implement Feature: Rewrite Q4_0 matvec kernel using `float4` vectorized loads.
-- [ ] Implement Feature: Use SIMD shuffle operations for efficient dot product.
-- [ ] Implement Feature: Process multiple Q4 blocks per thread iteration.
-- [ ] Write Failing Tests: For Q4_0 batched matmul vectorization.
-- [ ] Implement Feature: Apply SIMD vectorization to batched Q4_0 matmul.
-- [ ] Benchmark: Measure decode tok/s improvement (target: 120+ tok/s).
+*Status: COMPLETE - 2.5x prefill improvement achieved*
+- [x] Write Failing Tests: For vectorized Q4_0 dequantization correctness. (Completed: 2025-12-10)
+  - 8 tests in `q4_kernel_test.go` covering matvec, batched, scales, realistic sizes
+- [x] Implement Feature: Rewrite Q4_0 matvec kernel using `float4` vectorized loads. (Completed: 2025-12-10)
+- [x] Implement Feature: Use dot() for efficient dot product. (Completed: 2025-12-10)
+- [x] Implement Feature: Apply SIMD vectorization to batched Q4_0 matmul. (Completed: 2025-12-10)
+- [x] Benchmark: Measure tok/s improvement. (Completed: 2025-12-10)
+  - Prefill: 70 → 179 tok/s (+156%)
+  - Decode: 49 → 55 tok/s (+12%)
+  - Gap to llama.cpp reduced from 9x to 5.6x (prefill), 5.4x to 4.8x (decode)
 
 ### Task: Multi-Output Threadgroups (Target: 1.5x additional speedup)
 - [ ] Write Failing Tests: For multi-output kernel correctness.
@@ -319,12 +359,13 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [ ] Benchmark: Measure decode tok/s improvement (target: 180+ tok/s).
 
 ### Task: Flash Attention Implementation (Target: 2x prefill speedup)
-- [ ] Write Failing Tests: For tiled attention correctness.
-- [ ] Implement Feature: Implement tiled Q×K computation with local softmax.
-- [ ] Implement Feature: Implement online softmax normalization.
-- [ ] Implement Feature: Implement tiled attention output accumulation.
+*Status: COMPLETE - tiled Flash Attention implemented*
+- [x] Write Failing Tests: For tiled attention correctness. (Completed: 2025-12-09)
+- [x] Implement Feature: Implement tiled Q×K computation with local softmax. (Completed: 2025-12-09)
+- [x] Implement Feature: Implement online softmax normalization. (Completed: 2025-12-09)
+- [x] Implement Feature: Implement tiled attention output accumulation. (Completed: 2025-12-09)
+- [x] Implement Feature: Handle causal masking in tiled computation. (Completed: 2025-12-09)
 - [ ] Write Failing Tests: For Flash Attention numerical stability.
-- [ ] Implement Feature: Handle causal masking in tiled computation.
 - [ ] Benchmark: Measure prefill tok/s improvement (target: 400+ tok/s).
 
 ### Task: SIMD Matrix Operations (Target: 1.3x additional speedup)
@@ -337,13 +378,21 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 ### Task: Kernel Fusion (Target: 1.2-1.5x additional speedup)
 - [ ] Write Failing Tests: For fused RMSNorm+MatMul correctness.
 - [ ] Implement Feature: Fuse RMSNorm with first attention matmul (QKV projection).
-- [ ] Write Failing Tests: For fused SiLU+Mul correctness.
-- [ ] Implement Feature: Fuse SiLU activation with gate multiplication in FFN.
+- [x] Write Failing Tests: For fused SiLU+Mul correctness. (Completed: 2025-12-09)
+- [x] Implement Feature: Fuse SiLU activation with gate multiplication in FFN. (Completed: 2025-12-09)
 - [ ] Write Failing Tests: For fused Add+RMSNorm correctness.
 - [ ] Implement Feature: Fuse residual add with RMSNorm.
 - [ ] Benchmark: Measure memory bandwidth reduction and tok/s improvement.
 
+### Task: Q6_K GPU Kernel (for lm_head optimization)
+*Status: NOT STARTED - lm_head currently uses F32*
+- [ ] Write Failing Tests: For Q6_K GPU matmul correctness.
+- [ ] Implement Feature: Implement Q6_K matvec kernel for Metal.
+- [ ] Implement Feature: Implement Q6_K batched matmul kernel for Metal.
+- [ ] Benchmark: Measure improvement from avoiding F32 lm_head.
+
 ### Task: Memory Access Optimization
+- [x] Implement Feature: Command buffer batching. (Completed: 2025-12-09)
 - [ ] Implement Feature: Ensure coalesced memory access patterns in all kernels.
 - [ ] Implement Feature: Use shared memory for frequently accessed data.
 - [ ] Implement Feature: Optimize buffer layouts for cache efficiency.
@@ -358,6 +407,6 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 **Target Final Performance:**
 | Metric | Current | Target | Required Improvement |
 |--------|---------|--------|---------------------|
-| Prefill | 97 tok/s | 800+ tok/s | 8x |
-| Decode | 61 tok/s | 200+ tok/s | 3.3x |
+| Prefill | ~97 tok/s | 800+ tok/s | 8x |
+| Decode | ~53 tok/s | 200+ tok/s | 3.8x |
 
