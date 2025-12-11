@@ -73,8 +73,9 @@ type Backend struct {
 	mulF16Pipeline      unsafe.Pointer
 	siluF16Pipeline     unsafe.Pointer
 	siluMulF16Pipeline  unsafe.Pointer
-	rmsnormF16Pipeline  unsafe.Pointer
-	matvecQ4F16Pipeline unsafe.Pointer
+	rmsnormF16Pipeline   unsafe.Pointer
+	matvecQ4F16Pipeline  unsafe.Pointer
+	sdpaDecodeF16Pipeline unsafe.Pointer
 }
 
 // NewBackend creates a new Metal backend.
@@ -130,6 +131,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.siluMulF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_mul_f16"))
 	b.rmsnormF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_f16"))
 	b.matvecQ4F16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_f16"))
+	b.sdpaDecodeF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_f16"))
 
 	return b, nil
 }
@@ -482,4 +484,15 @@ func (b *Backend) MatMulQ4_0_F16(a, bMat, out tensor.DevicePtr, n, k int) {
 	C.metal_matvec_q4_0_f16(b.queue, b.matvecQ4F16Pipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(n), C.int(k))
+}
+
+// SDPAF16 performs scaled dot-product attention with FP16 KV cache.
+// Q: [numQHeads, headDim], K/V: [kvLen, numKVHeads, headDim], out: [numQHeads, headDim]
+// All tensors in FP16. Provides 2x KV cache bandwidth savings.
+func (b *Backend) SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	C.metal_sdpa_decode_f16(b.queue, b.sdpaDecodeF16Pipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale))
 }

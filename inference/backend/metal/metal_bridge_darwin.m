@@ -1246,6 +1246,115 @@ kernel void rmsnorm_f16(
     }
 }
 
+// FP16 SDPA for decode - K/V cache in FP16 for 2x bandwidth savings
+// Q: [numQHeads, headDim] in FP16
+// K: [kvLen, numKVHeads, headDim] in FP16
+// V: [kvLen, numKVHeads, headDim] in FP16
+// out: [numQHeads, headDim] in FP16
+constant int SDPA_F16_THREADS = 256;
+
+kernel void sdpa_decode_f16(
+    device const half* Q [[buffer(0)]],
+    device const half* K [[buffer(1)]],
+    device const half* V [[buffer(2)]],
+    device half* out [[buffer(3)]],
+    constant int& kvLen [[buffer(4)]],
+    constant int& numQHeads [[buffer(5)]],
+    constant int& numKVHeads [[buffer(6)]],
+    constant int& headDim [[buffer(7)]],
+    constant float& scale [[buffer(8)]],
+    threadgroup float* shared [[threadgroup(0)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int qHead = gid;
+    if (qHead >= numQHeads) return;
+
+    // GQA: map Q head to KV head
+    int headsPerKV = numQHeads / numKVHeads;
+    int kvHead = qHead / headsPerKV;
+
+    int qOffset = qHead * headDim;
+
+    // Shared memory layout:
+    // [0..kvLen-1]: attention weights
+    // [kvLen..kvLen+7]: warp max/sum values
+    threadgroup float* weights = shared;
+    threadgroup float* warpVals = shared + kvLen;
+
+    // Phase 1a: Compute Q·K scores (convert FP16 to FP32 for computation)
+    float localMax = -INFINITY;
+    for (int pos = tid; pos < kvLen; pos += SDPA_F16_THREADS) {
+        int kOffset = pos * numKVHeads * headDim + kvHead * headDim;
+        float dot = 0.0f;
+        for (int d = 0; d < headDim; d++) {
+            dot += float(Q[qOffset + d]) * float(K[kOffset + d]);
+        }
+        float score = dot * scale;
+        weights[pos] = score;
+        localMax = max(localMax, score);
+    }
+
+    // Reduce max across threadgroup
+    localMax = simd_max(localMax);
+    if (simd_lane == 0) {
+        warpVals[simd_group] = localMax;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid < 8) {
+        localMax = warpVals[tid];
+        localMax = simd_max(localMax);
+        if (tid == 0) warpVals[0] = localMax;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float gMax = warpVals[0];
+
+    // Phase 1b: Compute exp(score - max) and sum
+    float localSum = 0.0f;
+    for (int pos = tid; pos < kvLen; pos += SDPA_F16_THREADS) {
+        float expScore = exp(weights[pos] - gMax);
+        weights[pos] = expScore;
+        localSum += expScore;
+    }
+
+    // Reduce sum
+    localSum = simd_sum(localSum);
+    if (simd_lane == 0) {
+        warpVals[simd_group] = localSum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid < 8) {
+        localSum = warpVals[tid];
+        localSum = simd_sum(localSum);
+        if (tid == 0) warpVals[0] = localSum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float invSum = 1.0f / warpVals[0];
+
+    // Normalize weights
+    for (int pos = tid; pos < kvLen; pos += SDPA_F16_THREADS) {
+        weights[pos] *= invSum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 2: Compute weighted sum of V (output in FP16)
+    int outOffset = qHead * headDim;
+    for (int d = tid; d < headDim; d += SDPA_F16_THREADS) {
+        float sum = 0.0f;
+        for (int pos = 0; pos < kvLen; pos++) {
+            int vOffset = pos * numKVHeads * headDim + kvHead * headDim;
+            sum += weights[pos] * float(V[vOffset + d]);
+        }
+        out[outOffset + d] = half(sum);
+    }
+}
+
 // Q4_0 Matrix-vector with FP16 input/output
 // A: [1, K] in FP16, B: [N, K] in Q4_0 format, C: [1, N] in FP16
 // Uses FP32 accumulation for precision, 2x bandwidth savings on activations
@@ -2581,6 +2690,41 @@ void metal_rmsnorm_f16(void* queuePtr, void* pipelinePtr,
     MTLSize tgSize = MTLSizeMake(threadgroupSize, 1, 1);
     [encoder dispatchThreadgroups:gridSize threadsPerThreadgroup:tgSize];
 
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_sdpa_decode_f16(void* queuePtr, void* pipelinePtr,
+                            void* Q, void* K, void* V, void* out,
+                            int kvLen, int numQHeads, int numKVHeads, int headDim,
+                            float scale) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBytes:&kvLen length:sizeof(kvLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+
+    // Shared memory: weights[kvLen] + warpVals[8]
+    int threadgroupSize = 256;
+    int sharedMemSize = (kvLen + 8) * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    // One threadgroup per Q head
+    MTLSize threadgroups = MTLSizeMake(numQHeads, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
     finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 

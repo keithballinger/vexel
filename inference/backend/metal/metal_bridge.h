@@ -177,6 +177,14 @@ void metal_matvec_q4_0_f16(void* queue, void* pipeline,
                             void* A, void* B, void* C,
                             int N, int K);
 
+// FP16 SDPA for decode - 2x KV cache bandwidth savings
+// Q: [numQHeads, headDim], K/V: [kvLen, numKVHeads, headDim], out: [numQHeads, headDim]
+// All tensors in FP16
+void metal_sdpa_decode_f16(void* queue, void* pipeline,
+                            void* Q, void* K, void* V, void* out,
+                            int kvLen, int numQHeads, int numKVHeads, int headDim,
+                            float scale);
+
 #ifdef __cplusplus
 }
 #endif
