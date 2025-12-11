@@ -67,6 +67,13 @@ type Backend struct {
 	matmulQ4SimdgroupPipeline unsafe.Pointer
 	matvecQ6KPipeline         unsafe.Pointer
 	matvecQ4KPipeline         unsafe.Pointer
+
+	// FP16 (Half-Precision) pipelines
+	addF16Pipeline     unsafe.Pointer
+	mulF16Pipeline     unsafe.Pointer
+	siluF16Pipeline    unsafe.Pointer
+	siluMulF16Pipeline unsafe.Pointer
+	rmsnormF16Pipeline unsafe.Pointer
 }
 
 // NewBackend creates a new Metal backend.
@@ -114,6 +121,13 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matmulQ4SimdgroupPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_simdgroup_f32"))
 	b.matvecQ6KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q6k_multi_output_f32"))
 	b.matvecQ4KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_multi_output_f32"))
+
+	// FP16 pipelines
+	b.addF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_f16"))
+	b.mulF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("mul_f16"))
+	b.siluF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_f16"))
+	b.siluMulF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_mul_f16"))
+	b.rmsnormF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_f16"))
 
 	return b, nil
 }
@@ -420,4 +434,41 @@ func (b *Backend) FlashAttention2(q, k, v, out tensor.DevicePtr, seqLen, numQHea
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
 		C.float(scale))
+}
+
+// =============================================================================
+// FP16 (Half-Precision) Operations
+// These provide 2x memory bandwidth for memory-bound operations.
+// =============================================================================
+
+// AddF16 performs element-wise addition on FP16 data.
+func (b *Backend) AddF16(a, bIn, out tensor.DevicePtr, n int) {
+	C.metal_add_f16(b.queue, b.addF16Pipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bIn.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
+}
+
+// MulF16 performs element-wise multiplication on FP16 data.
+func (b *Backend) MulF16(a, bIn, out tensor.DevicePtr, n int) {
+	C.metal_mul_f16(b.queue, b.mulF16Pipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bIn.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
+}
+
+// SiLUF16 applies the SiLU activation function on FP16 data.
+func (b *Backend) SiLUF16(x, out tensor.DevicePtr, n int) {
+	C.metal_silu_f16(b.queue, b.siluF16Pipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
+}
+
+// SiLUMulF16 performs fused silu(gate) * up operation on FP16 data.
+func (b *Backend) SiLUMulF16(gate, up, out tensor.DevicePtr, n int) {
+	C.metal_silu_mul_f16(b.queue, b.siluMulF16Pipeline,
+		unsafe.Pointer(gate.Addr()), unsafe.Pointer(up.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
+}
+
+// RMSNormF16 performs RMS normalization with FP16 input/output.
+// x: [rows, cols] in FP16, weight: [cols] in FP32, out: [rows, cols] in FP16
+func (b *Backend) RMSNormF16(x, weight, out tensor.DevicePtr, rows, cols int, eps float32) {
+	C.metal_rmsnorm_f16(b.queue, b.rmsnormF16Pipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(weight.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(rows), C.int(cols), C.float(eps))
 }

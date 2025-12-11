@@ -150,6 +150,27 @@ void metal_scaled_dot_product_attention(void* queue,
                                         int batchSize, int numHeads, int seqLen, int headDim,
                                         float scale, int causal);
 
+// =============================================================================
+// FP16 (Half-Precision) Operations
+// These provide 2x memory bandwidth for memory-bound operations.
+// =============================================================================
+
+void metal_add_f16(void* queue, void* pipeline,
+                   void* a, void* b, void* out, int n);
+
+void metal_mul_f16(void* queue, void* pipeline,
+                   void* a, void* b, void* out, int n);
+
+void metal_silu_f16(void* queue, void* pipeline,
+                    void* x, void* out, int n);
+
+void metal_silu_mul_f16(void* queue, void* pipeline,
+                        void* gate, void* up, void* out, int n);
+
+void metal_rmsnorm_f16(void* queue, void* pipeline,
+                       void* x, void* weight, void* out,
+                       int batchSize, int dim, float eps);
+
 #ifdef __cplusplus
 }
 #endif

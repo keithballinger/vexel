@@ -1138,6 +1138,114 @@ kernel void silu_mul_f32(
     out[gid] = silu_g * up[gid];
 }
 
+// =============================================================================
+// FP16 (Half-Precision) Kernels
+// These provide 2x memory bandwidth for memory-bound operations.
+// Accumulation is done in FP32 for numerical stability where needed.
+// =============================================================================
+
+// Element-wise add for FP16
+kernel void add_f16(
+    device const half* a [[buffer(0)]],
+    device const half* b [[buffer(1)]],
+    device half* out [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    out[gid] = a[gid] + b[gid];
+}
+
+// Element-wise multiply for FP16
+kernel void mul_f16(
+    device const half* a [[buffer(0)]],
+    device const half* b [[buffer(1)]],
+    device half* out [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    out[gid] = a[gid] * b[gid];
+}
+
+// SiLU activation for FP16
+// Uses half4 for better vectorization (process 4 elements at a time)
+kernel void silu_f16(
+    device const half* x [[buffer(0)]],
+    device half* out [[buffer(1)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    half val = x[gid];
+    // Compute SiLU in FP32 for numerical stability, then convert back
+    float f = float(val);
+    float silu = f / (1.0f + exp(-f));
+    out[gid] = half(silu);
+}
+
+// Fused SiLU+Mul for FP16
+kernel void silu_mul_f16(
+    device const half* gate [[buffer(0)]],
+    device const half* up [[buffer(1)]],
+    device half* out [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    float g = float(gate[gid]);
+    float silu_g = g / (1.0f + exp(-g));
+    out[gid] = half(silu_g * float(up[gid]));
+}
+
+// RMSNorm for FP16 input/output with FP32 accumulation
+// x: [rows, dim] in FP16, weight: [dim] in FP32, out: [rows, dim] in FP16
+constant int RMSNORM_F16_THREADGROUP_SIZE = 256;
+
+kernel void rmsnorm_f16(
+    device const half* x [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device half* out [[buffer(2)]],
+    constant int& dim [[buffer(3)]],
+    constant float& eps [[buffer(4)]],
+    threadgroup float* shared [[threadgroup(0)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int base = row * dim;
+
+    // Phase 1: Each thread computes partial sum of squares in FP32
+    float sumSq = 0.0f;
+    for (int i = tid; i < dim; i += RMSNORM_F16_THREADGROUP_SIZE) {
+        float val = float(x[base + i]);  // Convert to FP32 for accumulation
+        sumSq += val * val;
+    }
+
+    // Warp-level reduction
+    sumSq = simd_sum(sumSq);
+
+    // Store warp results to shared memory
+    if (simd_lane == 0) {
+        shared[simd_group] = sumSq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Final reduction by first warp
+    float totalSumSq = 0.0f;
+    if (simd_group == 0) {
+        int num_warps = (RMSNORM_F16_THREADGROUP_SIZE + 31) / 32;
+        float warp_sum = (simd_lane < (uint)num_warps) ? shared[simd_lane] : 0.0f;
+        totalSumSq = simd_sum(warp_sum);
+    }
+
+    // Broadcast RMS to all threads via shared memory
+    if (tid == 0) {
+        shared[0] = rsqrt(totalSumSq / float(dim) + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float rms = shared[0];
+
+    // Phase 2: Each thread normalizes its portion of elements
+    for (int i = tid; i < dim; i += RMSNORM_F16_THREADGROUP_SIZE) {
+        float val = float(x[base + i]);
+        out[base + i] = half(val * rms * weight[i]);
+    }
+}
+
 // Embedding lookup
 kernel void embedding_f32(
     device const int* tokens [[buffer(0)]],
@@ -2270,6 +2378,94 @@ void metal_mul_f32(void* queuePtr, void* pipelinePtr,
     ];
 
     dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+// =============================================================================
+// FP16 (Half-Precision) C Dispatch Functions
+// =============================================================================
+
+void metal_add_f16(void* queuePtr, void* pipelinePtr,
+                   void* a, void* b, void* out, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)a,
+        (__bridge id<MTLBuffer>)b,
+        (__bridge id<MTLBuffer>)out
+    ];
+
+    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+void metal_mul_f16(void* queuePtr, void* pipelinePtr,
+                   void* a, void* b, void* out, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)a,
+        (__bridge id<MTLBuffer>)b,
+        (__bridge id<MTLBuffer>)out
+    ];
+
+    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+void metal_silu_f16(void* queuePtr, void* pipelinePtr,
+                    void* x, void* out, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)x,
+        (__bridge id<MTLBuffer>)out
+    ];
+
+    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+void metal_silu_mul_f16(void* queuePtr, void* pipelinePtr,
+                        void* gate, void* up, void* out, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)gate,
+        (__bridge id<MTLBuffer>)up,
+        (__bridge id<MTLBuffer>)out
+    ];
+
+    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+void metal_rmsnorm_f16(void* queuePtr, void* pipelinePtr,
+                       void* x, void* weight, void* out,
+                       int batchSize, int dim, float eps) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)x offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)weight offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:2];
+    [encoder setBytes:&dim length:sizeof(int) atIndex:3];
+    [encoder setBytes:&eps length:sizeof(float) atIndex:4];
+
+    // Each threadgroup processes one row
+    int threadgroupSize = 256;
+    int sharedMemSize = (threadgroupSize / 32 + 1) * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    MTLSize gridSize = MTLSizeMake(batchSize, 1, 1);
+    MTLSize tgSize = MTLSizeMake(threadgroupSize, 1, 1);
+    [encoder dispatchThreadgroups:gridSize threadsPerThreadgroup:tgSize];
+
+    finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
 void metal_embedding_f32(void* queuePtr,
