@@ -59,10 +59,11 @@ type Backend struct {
 	siluMulPipeline          unsafe.Pointer
 	addPipeline              unsafe.Pointer
 	mulPipeline              unsafe.Pointer
-	sdpaDecodePipeline       unsafe.Pointer
-	sdpaFlashDecodePipeline  unsafe.Pointer
-	sdpaPrefillPipeline      unsafe.Pointer
-	matmulQ4BatchedPipeline  unsafe.Pointer
+	sdpaDecodePipeline        unsafe.Pointer
+	sdpaFlashDecodePipeline   unsafe.Pointer
+	sdpaPrefillPipeline       unsafe.Pointer
+	matmulQ4BatchedPipeline   unsafe.Pointer
+	matmulQ4SimdgroupPipeline unsafe.Pointer
 }
 
 // NewBackend creates a new Metal backend.
@@ -106,6 +107,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.sdpaFlashDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f32"))
 	b.sdpaPrefillPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_prefill_f32"))
 	b.matmulQ4BatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_batched_f32"))
+	b.matmulQ4SimdgroupPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_simdgroup_f32"))
 
 	return b, nil
 }
@@ -262,8 +264,14 @@ func (b *Backend) MatMulQ4_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 		C.metal_matvec_q4_0_multi_output_f32(b.queue, b.matvecQ4MultiOutputPipeline,
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(n), C.int(k))
+	} else if m >= 8 && b.matmulQ4SimdgroupPipeline != nil {
+		// Use simdgroup_matrix kernel for larger batches (prefill)
+		// simdgroup_matrix hardware units provide better compute throughput
+		C.metal_matmul_q4_0_simdgroup_f32(b.queue, b.matmulQ4SimdgroupPipeline,
+			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+			C.int(m), C.int(n), C.int(k))
 	} else {
-		// Multiple rows - use truly batched kernel with 2D grid (single dispatch)
+		// Small batch (2-7 rows) - use simple batched kernel
 		C.metal_matmul_q4_0_batched_f32(b.queue, b.matmulQ4BatchedPipeline,
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(m), C.int(n), C.int(k))

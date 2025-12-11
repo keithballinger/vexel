@@ -694,3 +694,81 @@ func TestQ4_0_Scale(t *testing.T) {
 		}
 	}
 }
+
+// TestQ4_0_SimdgroupKernel tests the simdgroup_matrix kernel for M >= 8.
+// This kernel is used for prefill operations where batch size is larger.
+func TestQ4_0_SimdgroupKernel(t *testing.T) {
+	b, err := NewBackend(0)
+	if err != nil {
+		t.Skipf("Metal backend not available: %v", err)
+	}
+	defer b.Close()
+
+	// Test with M=16 to ensure simdgroup kernel is used (threshold is M >= 8)
+	M, N, K := 16, 2048, 2048
+
+	// Create random input (reproducible)
+	a := make([]float32, M*K)
+	for i := range a {
+		a[i] = float32((i*7+13)%101-50) * 0.01 // Values in [-0.5, 0.5]
+	}
+
+	// Create Q4_0 matrix with pattern
+	numBlocksPerRow := (K + Q4BlockSize - 1) / Q4BlockSize
+	bytesPerRow := numBlocksPerRow * Q4BytesPerBlock
+	bQ4 := make([]byte, N*bytesPerRow)
+
+	for row := 0; row < N; row++ {
+		for blk := 0; blk < numBlocksPerRow; blk++ {
+			values := make([]int, 32)
+			for i := range values {
+				values[i] = (row + blk + i) % 15
+			}
+			block := createQ4_0Block(0.5, values)
+			blockOffset := row*bytesPerRow + blk*Q4BytesPerBlock
+			copy(bQ4[blockOffset:], block)
+		}
+	}
+
+	expected := cpuMatMulQ4_0(a, bQ4, M, N, K)
+
+	// GPU
+	aBuf := b.Alloc(len(a) * 4)
+	bBuf := b.Alloc(len(bQ4))
+	outBuf := b.Alloc(M * N * 4)
+	defer b.Free(aBuf)
+	defer b.Free(bBuf)
+	defer b.Free(outBuf)
+
+	b.ToDevice(aBuf, float32ToBytes(a))
+	b.ToDevice(bBuf, bQ4)
+	b.MatMulQ4_0(aBuf, bBuf, outBuf, M, N, K)
+	b.Sync()
+
+	resultBytes := make([]byte, M*N*4)
+	b.ToHost(resultBytes, outBuf)
+	result := bytesToFloat32(resultBytes)
+
+	// Compare with tolerance
+	var maxDiff float64
+	var mismatchCount int
+	for i := range expected {
+		diff := math.Abs(float64(result[i] - expected[i]))
+		if diff > maxDiff {
+			maxDiff = diff
+		}
+		if diff > 1.0 { // Allow 1.0 tolerance for accumulated errors
+			mismatchCount++
+			if mismatchCount <= 5 {
+				t.Errorf("Index %d [m=%d,n=%d]: GPU=%f, CPU=%f, diff=%f",
+					i, i/N, i%N, result[i], expected[i], diff)
+			}
+		}
+	}
+
+	if mismatchCount > 0 {
+		t.Errorf("Total mismatches: %d/%d (max diff: %f)", mismatchCount, len(expected), maxDiff)
+	} else {
+		t.Logf("Q4_0 Simdgroup [%d,%d]x[%d,%d]: PASS (max diff: %f)", M, K, N, K, maxDiff)
+	}
+}

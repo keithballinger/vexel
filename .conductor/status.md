@@ -7,45 +7,65 @@
 Phase 9: Performance Optimization (Target: Match llama.cpp)
 
 ## Current Task
-Multi-output Q4_0 matvec kernel implemented. Decode improved ~75% (55→96 tok/s).
+Simdgroup_matrix kernel implemented for prefill. Prefill improved ~48% (226→336 tok/s).
 
 ## Latest Performance Metrics
 | Metric | Vexel | llama.cpp | Gap |
 |--------|-------|-----------|-----|
-| Prefill | **226 tok/s** | ~1000 tok/s | 4.4x |
-| Decode | **96 tok/s** | ~266 tok/s | **2.8x** |
+| Prefill | **336 tok/s** | ~1000 tok/s | **3.0x** |
+| Decode | **101 tok/s** | ~266 tok/s | 2.6x |
 
 **Model:** TinyLlama 1.1B Q4_0
 **Hardware:** M4 Pro
 
 **Progress since start of optimization:**
-- Prefill: 70 → 226 tok/s (3.2x improvement)
-- Decode: 49 → 96 tok/s (2x improvement)
+- Prefill: 70 → 336 tok/s (4.8x improvement)
+- Decode: 49 → 101 tok/s (2.1x improvement)
 
 ## Recent Progress
 - [x] Fixed Q4_0 kernel bug causing garbage output
-- [x] Created comprehensive Q4_0 kernel test suite (8 tests)
+- [x] Created comprehensive Q4_0 kernel test suite (9 tests)
 - [x] Implemented SIMD vectorized Q4_0 kernels
-- [x] **Implemented multi-output Q4_0 matvec (8 outputs/threadgroup)**
+- [x] Implemented multi-output Q4_0 matvec (8 outputs/threadgroup)
+- [x] **Implemented simdgroup_matrix kernel for prefill (M>=8)**
+  - 32x32 tiled matrix multiplication using 8x8 simdgroup_float8x8
+  - Cooperative loading to threadgroup memory with dequantization
+  - B matrix stored transposed for correct C = A @ B^T computation
 - [x] Profiled memory bandwidth: achieving ~30 GB/s of ~273 GB/s (11%)
-- [x] Tested shared memory A-caching (regressed, reverted)
 
 ## Next Actions
-1. Investigate simdgroup_matrix operations for hardware acceleration
-2. Implement Q6_K kernel for lm_head (currently using F32)
-3. Profile command buffer batching during inference
+1. Implement Q6_K kernel for lm_head (currently using F32)
+2. Optimize memory bandwidth utilization
+3. Profile and tune simdgroup tile sizes
 
 ## Blockers
 None
 
 ## Notes
-- Multi-output kernel: 8 simdgroups per threadgroup, each computes 1 output
-- Memory bandwidth utilization is low (11%) - room for improvement
-- Sequential processing approaches hurt performance due to loop overhead
+- Simdgroup kernel: 4 active simdgroups per threadgroup, each computes 16x16 output
+- Uses simdgroup_multiply_accumulate for 8x8 tiles
+- M >= 8 threshold for using simdgroup kernel (prefill phase)
 
 ---
 
 ## Status History
+
+### 2025-12-11: Simdgroup Matrix Kernel for Prefill
+**Status:** Major prefill performance improvement
+
+Implemented simdgroup_matrix kernel for Q4_0 matmul during prefill (M >= 8). Uses Apple Silicon's hardware matrix multiply-accumulate units.
+
+**Key Changes:**
+- New `matmul_q4_0_simdgroup_f32` kernel using simdgroup_float8x8
+- 32x32 tile sizes matching Q4_0 block size (32 elements)
+- Cooperative loading to threadgroup memory with on-the-fly dequantization
+- B matrix stored transposed for correct C = A @ B^T computation
+- 4 active simdgroups per threadgroup, each computing 16x16 output
+
+**Results:**
+- Prefill: 226 → 336 tok/s (+48%)
+- Decode: unchanged at ~101 tok/s (uses different kernel)
+- Gap to llama.cpp reduced from 4.4x to 3.0x for prefill
 
 ### 2025-12-11: Multi-Output Q4_0 Kernel Optimization
 **Status:** Major decode performance improvement

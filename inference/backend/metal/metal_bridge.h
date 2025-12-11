@@ -64,6 +64,11 @@ void metal_matmul_q4_0_batched_f32(void* queue, void* pipeline,
                                     void* A, void* B, void* C,
                                     int M, int N, int K);
 
+// Simdgroup tiled Q4_0 matmul: uses simdgroup_matrix for prefill
+void metal_matmul_q4_0_simdgroup_f32(void* queue, void* pipeline,
+                                      void* A, void* B, void* C,
+                                      int M, int N, int K);
+
 void metal_rmsnorm_f32(void* queue, void* pipeline,
                        void* x, void* weight, void* out,
                        int batchSize, int dim, float eps);
