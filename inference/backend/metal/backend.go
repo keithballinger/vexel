@@ -69,11 +69,12 @@ type Backend struct {
 	matvecQ4KPipeline         unsafe.Pointer
 
 	// FP16 (Half-Precision) pipelines
-	addF16Pipeline     unsafe.Pointer
-	mulF16Pipeline     unsafe.Pointer
-	siluF16Pipeline    unsafe.Pointer
-	siluMulF16Pipeline unsafe.Pointer
-	rmsnormF16Pipeline unsafe.Pointer
+	addF16Pipeline      unsafe.Pointer
+	mulF16Pipeline      unsafe.Pointer
+	siluF16Pipeline     unsafe.Pointer
+	siluMulF16Pipeline  unsafe.Pointer
+	rmsnormF16Pipeline  unsafe.Pointer
+	matvecQ4F16Pipeline unsafe.Pointer
 }
 
 // NewBackend creates a new Metal backend.
@@ -128,6 +129,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.siluF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_f16"))
 	b.siluMulF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_mul_f16"))
 	b.rmsnormF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_f16"))
+	b.matvecQ4F16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_f16"))
 
 	return b, nil
 }
@@ -471,4 +473,13 @@ func (b *Backend) RMSNormF16(x, weight, out tensor.DevicePtr, rows, cols int, ep
 	C.metal_rmsnorm_f16(b.queue, b.rmsnormF16Pipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(weight.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(rows), C.int(cols), C.float(eps))
+}
+
+// MatMulQ4_0_F16 performs C = A @ B^T where A is FP16, B is Q4_0, C is FP16.
+// A: [1, K] in FP16, B: [N, K] in Q4_0 format, C: [1, N] in FP16.
+// This provides 2x activation bandwidth savings while maintaining Q4_0 weight compression.
+func (b *Backend) MatMulQ4_0_F16(a, bMat, out tensor.DevicePtr, n, k int) {
+	C.metal_matvec_q4_0_f16(b.queue, b.matvecQ4F16Pipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(n), C.int(k))
 }

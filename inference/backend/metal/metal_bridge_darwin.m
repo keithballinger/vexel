@@ -1246,6 +1246,93 @@ kernel void rmsnorm_f16(
     }
 }
 
+// Q4_0 Matrix-vector with FP16 input/output
+// A: [1, K] in FP16, B: [N, K] in Q4_0 format, C: [1, N] in FP16
+// Uses FP32 accumulation for precision, 2x bandwidth savings on activations
+kernel void matvec_q4_0_f16(
+    device const half* A [[buffer(0)]],            // [1, K] activations in FP16
+    device const uchar* B [[buffer(1)]],           // [N, K] in Q4_0 format
+    device half* C [[buffer(2)]],                  // [1, N] output in FP16
+    constant int& N [[buffer(3)]],                 // Number of output elements
+    constant int& K [[buffer(4)]],                 // Inner dimension
+    uint gid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    // Each threadgroup handles 8 outputs: [gid*8 .. gid*8+7]
+    // Each simdgroup handles one output
+    int output_idx = gid * Q4_MV_OUTPUTS_PER_TG + simd_group;
+    if (output_idx >= N) return;
+
+    float sum = 0.0f;  // Accumulate in FP32
+
+    // Q4_0 row layout
+    int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
+    device const uchar* b_row = B + output_idx * numBlocks * Q4_BYTES_PER_BLOCK;
+
+    // Each thread in simdgroup handles blocks with stride 32
+    for (int block = simd_lane; block < numBlocks; block += 32) {
+        device const uchar* blockPtr = b_row + block * Q4_BYTES_PER_BLOCK;
+
+        // Read f16 scale
+        ushort scale_u16 = ((ushort)blockPtr[1] << 8) | blockPtr[0];
+        float scale = q4_f16_to_f32(scale_u16);
+
+        int base_k = block * Q4_BLOCK_SIZE;
+
+        if (base_k + 32 <= K) {
+            // Full block - read FP16 and convert to FP32 for computation
+            // Using half4 reads for 2x bandwidth improvement
+            device const half4* a_vec = (device const half4*)(A + base_k);
+            float4 a0 = float4(a_vec[0]), a1 = float4(a_vec[1]);
+            float4 a2 = float4(a_vec[2]), a3 = float4(a_vec[3]);
+
+            device const half4* a_vec_hi = (device const half4*)(A + base_k + 16);
+            float4 a4 = float4(a_vec_hi[0]), a5 = float4(a_vec_hi[1]);
+            float4 a6 = float4(a_vec_hi[2]), a7 = float4(a_vec_hi[3]);
+
+            // Process bytes 0-3
+            uchar b0 = blockPtr[2], b1 = blockPtr[3], b2 = blockPtr[4], b3 = blockPtr[5];
+            sum += scale * dot(a0, float4(b0 & 0xF, b1 & 0xF, b2 & 0xF, b3 & 0xF) - 8.0f);
+            sum += scale * dot(a4, float4(b0 >> 4, b1 >> 4, b2 >> 4, b3 >> 4) - 8.0f);
+
+            // Process bytes 4-7
+            uchar b4 = blockPtr[6], b5 = blockPtr[7], b6 = blockPtr[8], b7 = blockPtr[9];
+            sum += scale * dot(a1, float4(b4 & 0xF, b5 & 0xF, b6 & 0xF, b7 & 0xF) - 8.0f);
+            sum += scale * dot(a5, float4(b4 >> 4, b5 >> 4, b6 >> 4, b7 >> 4) - 8.0f);
+
+            // Process bytes 8-11
+            uchar b8 = blockPtr[10], b9 = blockPtr[11], b10 = blockPtr[12], b11 = blockPtr[13];
+            sum += scale * dot(a2, float4(b8 & 0xF, b9 & 0xF, b10 & 0xF, b11 & 0xF) - 8.0f);
+            sum += scale * dot(a6, float4(b8 >> 4, b9 >> 4, b10 >> 4, b11 >> 4) - 8.0f);
+
+            // Process bytes 12-15
+            uchar b12 = blockPtr[14], b13 = blockPtr[15], b14 = blockPtr[16], b15 = blockPtr[17];
+            sum += scale * dot(a3, float4(b12 & 0xF, b13 & 0xF, b14 & 0xF, b15 & 0xF) - 8.0f);
+            sum += scale * dot(a7, float4(b12 >> 4, b13 >> 4, b14 >> 4, b15 >> 4) - 8.0f);
+        } else {
+            // Partial block - scalar fallback
+            for (int i = 0; i < 16 && base_k + i < K; i++) {
+                uchar byte_val = blockPtr[2 + i];
+                int k0 = base_k + i;
+                sum += float(A[k0]) * scale * float((byte_val & 0x0F) - 8);
+                int k1 = base_k + i + 16;
+                if (k1 < K) {
+                    sum += float(A[k1]) * scale * float(((byte_val >> 4) & 0x0F) - 8);
+                }
+            }
+        }
+    }
+
+    // Simdgroup reduction
+    sum = simd_sum(sum);
+
+    // Lane 0 of each simdgroup writes its output in FP16
+    if (simd_lane == 0) {
+        C[output_idx] = half(sum);
+    }
+}
+
 // Embedding lookup
 kernel void embedding_f32(
     device const int* tokens [[buffer(0)]],
@@ -2437,6 +2524,35 @@ void metal_silu_mul_f16(void* queuePtr, void* pipelinePtr,
     ];
 
     dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+void metal_matvec_q4_0_f16(void* queuePtr, void* pipelinePtr,
+                            void* A, void* B, void* C,
+                            int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:0 atIndex:2];
+    [encoder setBytes:&N length:sizeof(N) atIndex:3];
+    [encoder setBytes:&K length:sizeof(K) atIndex:4];
+
+    // 8 outputs per threadgroup, 256 threads (8 simdgroups of 32)
+    int outputsPerTG = 8;
+    int threadgroupSize = 256;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
+
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
 void metal_rmsnorm_f16(void* queuePtr, void* pipelinePtr,
