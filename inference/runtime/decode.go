@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 
+	"vexel/inference/backend"
 	"vexel/inference/memory"
 	"vexel/inference/tensor"
 )
@@ -252,9 +253,7 @@ func (m *ModelRuntime) DecodeStep(inputs BatchRuntimeInputs) (tensor.Tensor, err
 	}
 	logits := tensor.NewTensor(tensor.NewShape(batchSize, vocabSize), m.config.DType, logitsPtr)
 
-	if !m.OutputHead.DevicePtr().IsNil() {
-		m.backend.MatMulTransposed(statePtr, m.OutputHead.DevicePtr(), logitsPtr, batchSize, vocabSize, hiddenSize)
-	}
+	m.outputHeadMatMul(statePtr, logitsPtr, batchSize, vocabSize, hiddenSize)
 
 	// Sync to ensure all operations complete
 	m.backend.Sync()
@@ -368,9 +367,7 @@ func (m *ModelRuntime) DecodeWithPagedKV(tokens []int, seqID int64, pos int) (te
 	}
 	logits := tensor.NewTensor(tensor.NewShape(batchSize, vocabSize), m.config.DType, logitsPtr)
 
-	if !m.OutputHead.DevicePtr().IsNil() {
-		m.backend.MatMulTransposed(statePtr, m.OutputHead.DevicePtr(), logitsPtr, batchSize, vocabSize, hiddenSize)
-	}
+	m.outputHeadMatMul(statePtr, logitsPtr, batchSize, vocabSize, hiddenSize)
 
 	m.backend.Sync()
 
@@ -470,25 +467,40 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 		debugTensor("[GPU] After All Layers", m.backend, state.DevicePtr(), batchSize*hiddenSize)
 	}
 
-	// 6. Final Norm (in-place on state)
+	// 6. For prefill (batchSize > 1), extract last token; for decode (batchSize = 1), use directly
+	// This optimization: (a) reduces compute, (b) enables Q6_K kernel for lm_head (M=1 only)
+	var lastStatePtr tensor.DevicePtr
+	if batchSize == 1 {
+		// Decode: state already has just one token
+		lastStatePtr = statePtr
+	} else {
+		// Prefill: extract last token's hidden state
+		lastStatePtr = m.backend.Alloc(hiddenSize * 4)
+		if copier, ok := m.backend.(backend.BufferCopier); ok {
+			srcOffset := (batchSize - 1) * hiddenSize * 4
+			copier.CopyBuffer(statePtr, srcOffset, lastStatePtr, 0, hiddenSize*4)
+		} else {
+			return tensor.Tensor{}, fmt.Errorf("backend doesn't support BufferCopier interface")
+		}
+	}
+
+	// 7. Final Norm (only on last token)
 	if !m.FinalNorm.DevicePtr().IsNil() {
-		m.backend.RMSNorm(statePtr, m.FinalNorm.DevicePtr(), statePtr, batchSize, hiddenSize, float32(m.config.RMSNormEPS))
+		m.backend.RMSNorm(lastStatePtr, m.FinalNorm.DevicePtr(), lastStatePtr, 1, hiddenSize, float32(m.config.RMSNormEPS))
 	}
 	if debugDecode {
 		m.backend.Sync()
-		debugTensor("[GPU] After Final Norm", m.backend, statePtr, batchSize*hiddenSize)
+		debugTensor("[GPU] After Final Norm", m.backend, lastStatePtr, hiddenSize)
 	}
 
-	// 7. Compute Logits: state @ OutputHead^T
-	logitsPtr, err := allocPtr(batchSize * vocabSize * 4)
+	// 8. Compute Logits for last token only (M=1)
+	logitsPtr, err := allocPtr(vocabSize * 4)
 	if err != nil {
 		return tensor.Tensor{}, err
 	}
-	logits := tensor.NewTensor(tensor.NewShape(batchSize, vocabSize), m.config.DType, logitsPtr)
+	logits := tensor.NewTensor(tensor.NewShape(1, vocabSize), m.config.DType, logitsPtr)
 
-	if !m.OutputHead.DevicePtr().IsNil() {
-		m.backend.MatMulTransposed(statePtr, m.OutputHead.DevicePtr(), logitsPtr, batchSize, vocabSize, hiddenSize)
-	}
+	m.outputHeadMatMul(lastStatePtr, logitsPtr, 1, vocabSize, hiddenSize)
 
 	m.backend.Sync()
 
@@ -589,32 +601,16 @@ func (m *ModelRuntime) PrefillWithPagedKV(tokens []int, seqID int64, startPos in
 		// CPU: offset works fine; seqLen==1: no offset needed
 		lastTokenPtr = tensor.DevicePtrOffset(statePtr, uintptr((seqLen-1)*hiddenSize*4))
 	} else {
-		// GPU with seqLen > 1: allocate separate buffer and copy last token
+		// GPU with seqLen > 1: use CopyBuffer to extract the last token
 		lastTokenPtr = m.backend.Alloc(hiddenSize * 4)
-		// Copy last token from state buffer - we need to use a copy kernel
-		// For now, use a workaround: apply norm to all tokens and use only the last
-		// This is inefficient but correct
-		// TODO: implement proper GPU copy-with-offset kernel
-		m.backend.RMSNorm(statePtr, m.FinalNorm.DevicePtr(), statePtr, seqLen, hiddenSize, float32(m.config.RMSNormEPS))
-		// For GPU, we'll process all tokens through output head and extract last
-		// Actually, let's be smarter: run matmul on all and take last row of output
-		allLogitsPtr, err := allocPtr(seqLen * vocabSize * 4)
-		if err != nil {
-			return tensor.Tensor{}, err
+		// Use BufferCopier interface to copy last token (GPU-to-GPU)
+		if copier, ok := m.backend.(backend.BufferCopier); ok {
+			srcOffset := (seqLen - 1) * hiddenSize * 4
+			copier.CopyBuffer(statePtr, srcOffset, lastTokenPtr, 0, hiddenSize*4)
+		} else {
+			// Backend doesn't support CopyBuffer - this shouldn't happen for GPU backends
+			return tensor.Tensor{}, fmt.Errorf("backend doesn't support BufferCopier interface")
 		}
-		if !m.OutputHead.DevicePtr().IsNil() {
-			m.backend.MatMulTransposed(statePtr, m.OutputHead.DevicePtr(), allLogitsPtr, seqLen, vocabSize, hiddenSize)
-		}
-		// For GPU, we need to extract just the last row (last vocabSize floats)
-		// Since we can't do offset reads, return the full tensor and let caller handle
-		// Or... allocate logits separately and use a slice kernel
-		// For now: return tensor for all tokens, caller takes last
-		m.backend.Sync()
-		// Create tensor pointing to last row
-		// Actually this still has the offset problem...
-		// Let's just return all logits and fix this properly later
-		logits := tensor.NewTensor(tensor.NewShape(seqLen, vocabSize), m.config.DType, allLogitsPtr)
-		return logits, nil
 	}
 
 	if !m.FinalNorm.DevicePtr().IsNil() {
@@ -628,9 +624,7 @@ func (m *ModelRuntime) PrefillWithPagedKV(tokens []int, seqID int64, startPos in
 	}
 	logits := tensor.NewTensor(tensor.NewShape(1, vocabSize), m.config.DType, logitsPtr)
 
-	if !m.OutputHead.DevicePtr().IsNil() {
-		m.backend.MatMulTransposed(lastTokenPtr, m.OutputHead.DevicePtr(), logitsPtr, 1, vocabSize, hiddenSize)
-	}
+	m.outputHeadMatMul(lastTokenPtr, logitsPtr, 1, vocabSize, hiddenSize)
 
 	m.backend.Sync()
 

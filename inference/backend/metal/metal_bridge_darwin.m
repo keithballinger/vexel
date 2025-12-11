@@ -649,6 +649,261 @@ kernel void matmul_q4_0_batched_f32(
     }
 }
 
+// =============================================================================
+// Q6_K MATVEC FOR LM_HEAD
+// =============================================================================
+// Q6_K format (256 elements per block, 210 bytes):
+//   - ql[128]: lower 4 bits of 6-bit quants
+//   - qh[64]: upper 2 bits of 6-bit quants
+//   - scales[16]: 8-bit signed scales for 16-element super-blocks
+//   - d[2]: f16 global scale (at offset 208)
+//
+// Each simdgroup handles one output row
+// Each thread in simdgroup processes elements with stride
+// Grid: ceil(N/8) threadgroups of 256 threads (8 simdgroups)
+
+constant int Q6K_BLOCK_SIZE = 256;
+constant int Q6K_BYTES_PER_BLOCK = 210;
+constant int Q6K_OUTPUTS_PER_TG = 8;
+
+kernel void matvec_q6k_multi_output_f32(
+    device const float* A [[buffer(0)]],           // [1, K] activations
+    device const uchar* B [[buffer(1)]],           // [N, K] in Q6_K format
+    device float* C [[buffer(2)]],                 // [1, N] output
+    constant int& N [[buffer(3)]],                 // Number of output elements (vocab_size)
+    constant int& K [[buffer(4)]],                 // Inner dimension (hidden_size)
+    uint gid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    // Each simdgroup handles one output
+    int output_idx = gid * Q6K_OUTPUTS_PER_TG + simd_group;
+    if (output_idx >= N) return;
+
+    float sum = 0.0f;
+
+    // Q6_K row layout
+    int numBlocks = (K + Q6K_BLOCK_SIZE - 1) / Q6K_BLOCK_SIZE;
+    device const uchar* b_row = B + output_idx * numBlocks * Q6K_BYTES_PER_BLOCK;
+
+    // Each thread processes elements with stride 32 within each block
+    // For K=2048, numBlocks=8, total 2048 elements, each thread handles 64 elements
+    for (int block = 0; block < numBlocks; block++) {
+        device const uchar* blockPtr = b_row + block * Q6K_BYTES_PER_BLOCK;
+
+        // Block offsets
+        device const uchar* ql = blockPtr;           // 128 bytes
+        device const uchar* qh = blockPtr + 128;     // 64 bytes
+        device const char* scales = (device const char*)(blockPtr + 192);  // 16 signed bytes
+        ushort d_u16 = ((ushort)blockPtr[209] << 8) | blockPtr[208];
+        float d = q4_f16_to_f32(d_u16);  // reuse helper
+
+        int base_k = block * Q6K_BLOCK_SIZE;
+
+        // Each thread handles elements at simd_lane, simd_lane+32, simd_lane+64, ...
+        // Process 8 elements per thread (256/32 = 8)
+        for (int elem_offset = simd_lane; elem_offset < 256 && base_k + elem_offset < K; elem_offset += 32) {
+            int k_idx = base_k + elem_offset;
+            float a_val = A[k_idx];
+
+            // Determine which half of block (n: 0=first 128, 1=second 128)
+            int n = elem_offset / 128;
+            int elem_in_half = elem_offset - n * 128;
+
+            // Within half, determine super-block (0-3 in each 32-element chunk)
+            // elem_in_half: 0-31 → chunk 0, 32-63 → chunk 1, 64-95 → chunk 2, 96-127 → chunk 3
+            int chunk = elem_in_half / 32;
+            int l = elem_in_half % 32;  // position within chunk (0-31)
+
+            // Scale index: based on super-block pattern
+            // scales layout: sc0,sc1 for l<16, sc0,sc1 for l>=16, then sc2,sc3, sc4,sc5, sc6,sc7
+            int is = l / 16;  // 0 for l<16, 1 for l>=16
+
+            // Offset into scales array
+            int scOff = n * 8;  // 0 for first half, 8 for second half
+
+            // Get scale based on chunk
+            float sc;
+            if (chunk == 0) sc = float(scales[scOff + is + 0]);
+            else if (chunk == 1) sc = float(scales[scOff + is + 2]);
+            else if (chunk == 2) sc = float(scales[scOff + is + 4]);
+            else sc = float(scales[scOff + is + 6]);
+
+            // Dequantize the 6-bit value
+            // ql layout: ql[0..63] for first half, ql[64..127] for second half
+            // qh layout: qh[0..31] for first half, qh[32..63] for second half
+            int qlOff = n * 64;
+            int qhOff = n * 32;
+
+            int ql_idx, qh_idx, qh_shift;
+            uchar ql_byte, qh_byte;
+            int q;
+
+            // Map chunk and l to ql/qh indices
+            // chunk 0: ql[l], qh[l], shift 0
+            // chunk 1: ql[l+32], qh[l], shift 2
+            // chunk 2: ql[l] high nibble, qh[l], shift 4
+            // chunk 3: ql[l+32] high nibble, qh[l], shift 6
+            if (chunk == 0) {
+                ql_byte = ql[qlOff + l];
+                qh_byte = qh[qhOff + l];
+                q = ((ql_byte & 0xF) | ((qh_byte >> 0) & 3) << 4) - 32;
+            } else if (chunk == 1) {
+                ql_byte = ql[qlOff + l + 32];
+                qh_byte = qh[qhOff + l];
+                q = ((ql_byte & 0xF) | ((qh_byte >> 2) & 3) << 4) - 32;
+            } else if (chunk == 2) {
+                ql_byte = ql[qlOff + l];
+                qh_byte = qh[qhOff + l];
+                q = ((ql_byte >> 4) | ((qh_byte >> 4) & 3) << 4) - 32;
+            } else {  // chunk == 3
+                ql_byte = ql[qlOff + l + 32];
+                qh_byte = qh[qhOff + l];
+                q = ((ql_byte >> 4) | ((qh_byte >> 6) & 3) << 4) - 32;
+            }
+
+            // Accumulate: d * scale * q * a
+            sum += a_val * d * sc * float(q);
+        }
+    }
+
+    // Simdgroup reduction
+    sum = simd_sum(sum);
+
+    // Lane 0 writes output
+    if (simd_lane == 0) {
+        C[output_idx] = sum;
+    }
+}
+
+// =============================================================================
+// Q4_K MATVEC FOR ATTENTION PROJECTIONS
+// =============================================================================
+// Q4_K format (256 elements per block, 144 bytes):
+//   - d (2 bytes): fp16 super-block scale for quantized scales
+//   - dmin (2 bytes): fp16 super-block scale for quantized mins
+//   - scales[12] (12 bytes): 6-bit packed scales/mins (8 scales + 8 mins)
+//   - qs[128] (128 bytes): 4-bit quantized values
+//
+// Each simdgroup handles one output row
+// Grid: ceil(N/8) threadgroups of 256 threads (8 simdgroups)
+
+constant int Q4K_BLOCK_SIZE = 256;
+constant int Q4K_BYTES_PER_BLOCK = 144;
+constant int Q4K_OUTPUTS_PER_TG = 8;
+
+kernel void matvec_q4k_multi_output_f32(
+    device const float* A [[buffer(0)]],           // [1, K] activations
+    device const uchar* B [[buffer(1)]],           // [N, K] in Q4_K format
+    device float* C [[buffer(2)]],                 // [1, N] output
+    constant int& N [[buffer(3)]],                 // Number of output elements
+    constant int& K [[buffer(4)]],                 // Inner dimension
+    uint gid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    // Each simdgroup handles one output
+    int output_idx = gid * Q4K_OUTPUTS_PER_TG + simd_group;
+    if (output_idx >= N) return;
+
+    float sum = 0.0f;
+
+    // Q4_K row layout
+    int numBlocks = (K + Q4K_BLOCK_SIZE - 1) / Q4K_BLOCK_SIZE;
+    device const uchar* b_row = B + output_idx * numBlocks * Q4K_BYTES_PER_BLOCK;
+
+    // Each thread processes elements with stride 32 within each block
+    for (int block = 0; block < numBlocks; block++) {
+        device const uchar* blockPtr = b_row + block * Q4K_BYTES_PER_BLOCK;
+
+        // Parse block header
+        ushort d_u16 = ((ushort)blockPtr[1] << 8) | blockPtr[0];
+        ushort dmin_u16 = ((ushort)blockPtr[3] << 8) | blockPtr[2];
+        float d = q4_f16_to_f32(d_u16);
+        float dmin = q4_f16_to_f32(dmin_u16);
+
+        device const uchar* scalesData = blockPtr + 4;
+        device const uchar* qs = blockPtr + 16;  // 4-bit quantized values
+
+        // Unpack 6-bit scales and mins from 12 bytes
+        // Following llama.cpp layout:
+        // Lower 6 bits of scales[0..7] from scalesData[0..7]
+        // Upper 2 bits from scalesData[10..11]
+        // Mins use bits 6-7 of scalesData[0..7] + bits from scalesData[8..9]
+        uchar scales[8];
+        uchar mins[8];
+
+        scales[0] = (scalesData[0] & 0x3F);
+        scales[1] = (scalesData[1] & 0x3F);
+        scales[2] = (scalesData[2] & 0x3F);
+        scales[3] = (scalesData[3] & 0x3F);
+        scales[4] = (scalesData[4] & 0x3F);
+        scales[5] = (scalesData[5] & 0x3F);
+        scales[6] = (scalesData[6] & 0x3F);
+        scales[7] = (scalesData[7] & 0x3F);
+
+        mins[0] = (scalesData[0] >> 6) | ((scalesData[8] & 0x03) << 2);
+        mins[1] = (scalesData[1] >> 6) | ((scalesData[8] & 0x0C) >> 0);
+        mins[2] = (scalesData[2] >> 6) | ((scalesData[8] & 0x30) >> 2);
+        mins[3] = (scalesData[3] >> 6) | ((scalesData[8] & 0xC0) >> 4);
+        mins[4] = (scalesData[4] >> 6) | ((scalesData[9] & 0x03) << 2);
+        mins[5] = (scalesData[5] >> 6) | ((scalesData[9] & 0x0C) >> 0);
+        mins[6] = (scalesData[6] >> 6) | ((scalesData[9] & 0x30) >> 2);
+        mins[7] = (scalesData[7] >> 6) | ((scalesData[9] & 0xC0) >> 4);
+
+        // Additional 2 bits for each scale from bytes 10-11
+        scales[0] |= (scalesData[10] & 0x03) << 4;
+        scales[1] |= (scalesData[10] & 0x0C) << 2;
+        scales[2] |= (scalesData[10] & 0x30);
+        scales[3] |= (scalesData[10] & 0xC0) >> 2;
+        scales[4] |= (scalesData[11] & 0x03) << 4;
+        scales[5] |= (scalesData[11] & 0x0C) << 2;
+        scales[6] |= (scalesData[11] & 0x30);
+        scales[7] |= (scalesData[11] & 0xC0) >> 2;
+
+        int base_k = block * Q4K_BLOCK_SIZE;
+
+        // Process 8 sub-blocks of 32 elements each
+        // Each thread handles elements at stride 32 within the block
+        for (int elem_offset = simd_lane; elem_offset < 256 && base_k + elem_offset < K; elem_offset += 32) {
+            int k_idx = base_k + elem_offset;
+            float a_val = A[k_idx];
+
+            // Determine which sub-block (0-7) and position within sub-block
+            int sub_block = elem_offset / 32;
+            int pos_in_sub = elem_offset % 32;  // 0-31
+
+            float sc = float(scales[sub_block]);
+            float m = float(mins[sub_block]);
+
+            // Get 4-bit quantized value
+            // Each sub-block has 16 bytes (32 elements at 4 bits each)
+            // Low nibble -> positions 0-15, high nibble -> positions 16-31
+            int qs_byte_idx = sub_block * 16 + (pos_in_sub % 16);
+            uchar qs_byte = qs[qs_byte_idx];
+
+            int q;
+            if (pos_in_sub < 16) {
+                q = qs_byte & 0x0F;  // Low nibble
+            } else {
+                q = (qs_byte >> 4) & 0x0F;  // High nibble
+            }
+
+            // Dequantize: d * scale * q - dmin * min
+            float dequant = d * sc * float(q) - dmin * m;
+            sum += a_val * dequant;
+        }
+    }
+
+    // Simdgroup reduction
+    sum = simd_sum(sum);
+
+    // Lane 0 writes output
+    if (simd_lane == 0) {
+        C[output_idx] = sum;
+    }
+}
+
 // RMSNorm with threadgroup parallelism
 // Each threadgroup processes one row using parallel reduction
 constant int RMSNORM_THREADGROUP_SIZE = 256;
@@ -1237,6 +1492,166 @@ kernel void sdpa_prefill_f32(
         out[outOffset + d] = acc[i] * invSum;
     }
 }
+
+// Flash Attention 2 optimized kernel for prefill
+// Key optimizations:
+// 1. K/V tiles loaded to shared memory, shared across Q heads (GQA)
+// 2. Larger tile size (64 K positions vs 16)
+// 3. 8 Q heads computed in parallel (one simdgroup each)
+// 4. Vectorized loads with float4
+//
+// Threadgroup layout:
+// - 8 simdgroups (256 threads total)
+// - Each simdgroup handles one Q head (8 Q heads share one KV head in GQA)
+// - Threads within simdgroup handle different dimensions of headDim
+//
+// Q: [seqLen, numQHeads, headDim]
+// K: [seqLen, numKVHeads, headDim]
+// V: [seqLen, numKVHeads, headDim]
+// out: [seqLen, numQHeads, headDim]
+
+constant int FA2_TILE_KV = 64;      // K/V positions per tile
+constant int FA2_SIMDGROUPS = 8;    // Simdgroups per threadgroup (matches GQA ratio)
+constant int FA2_THREADS = FA2_SIMDGROUPS * 32;  // 256 threads total
+
+kernel void flash_attention_2_f32(
+    device const float* Q [[buffer(0)]],
+    device const float* K [[buffer(1)]],
+    device const float* V [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int& seqLen [[buffer(4)]],
+    constant int& numQHeads [[buffer(5)]],
+    constant int& numKVHeads [[buffer(6)]],
+    constant int& headDim [[buffer(7)]],
+    constant float& scale [[buffer(8)]],
+    threadgroup float* shared [[threadgroup(0)]],
+    uint2 gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int qPos = gid.x;      // Query position this threadgroup handles
+    int kvHead = gid.y;    // KV head this threadgroup handles
+
+    if (qPos >= seqLen || kvHead >= numKVHeads) return;
+
+    // GQA: compute which Q heads map to this KV head
+    int headsPerKV = numQHeads / numKVHeads;
+    int qHeadBase = kvHead * headsPerKV;
+
+    // This simdgroup handles one Q head
+    int qHeadLocal = simd_group;  // 0-7 for 8 Q heads per KV head
+    if (qHeadLocal >= headsPerKV) return;
+    int qHead = qHeadBase + qHeadLocal;
+
+    // Shared memory layout:
+    // [0..FA2_TILE_KV*headDim-1]: K tile
+    // [FA2_TILE_KV*headDim..2*FA2_TILE_KV*headDim-1]: V tile
+    // [2*FA2_TILE_KV*headDim..]: scratch for reductions
+    threadgroup float* Ktile = shared;
+    threadgroup float* Vtile = shared + FA2_TILE_KV * headDim;
+    threadgroup float* scratch = shared + 2 * FA2_TILE_KV * headDim;
+
+    // Q offset for this (qPos, qHead)
+    int qOffset = qPos * numQHeads * headDim + qHead * headDim;
+
+    // Causal attention: only attend to positions <= qPos
+    int maxKLen = qPos + 1;
+
+    // Online softmax state (per Q head)
+    float runningMax = -INFINITY;
+    float runningSum = 0.0f;
+
+    // Output accumulator - each thread handles 2 dims (headDim=64, 32 threads/simdgroup)
+    float acc0 = 0.0f, acc1 = 0.0f;
+
+    // Process K/V in tiles
+    for (int tileStart = 0; tileStart < maxKLen; tileStart += FA2_TILE_KV) {
+        int tileEnd = min(tileStart + FA2_TILE_KV, maxKLen);
+        int tileSize = tileEnd - tileStart;
+
+        // Cooperative load: all threads load K and V tiles to shared memory
+        // Each thread loads (FA2_TILE_KV * headDim) / FA2_THREADS elements
+        int loadCount = (FA2_TILE_KV * headDim + FA2_THREADS - 1) / FA2_THREADS;
+        for (int i = 0; i < loadCount; i++) {
+            int idx = tid + i * FA2_THREADS;
+            if (idx < FA2_TILE_KV * headDim) {
+                int kPos = tileStart + idx / headDim;
+                int d = idx % headDim;
+                if (kPos < tileEnd) {
+                    int kOffset = kPos * numKVHeads * headDim + kvHead * headDim + d;
+                    Ktile[idx] = K[kOffset];
+                    Vtile[idx] = V[kOffset];
+                } else {
+                    Ktile[idx] = 0.0f;
+                    Vtile[idx] = 0.0f;
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Each simdgroup computes attention scores for its Q head
+        // Threads within simdgroup cooperate on the dot product
+
+        // Phase 1: Compute Q·K scores for all K positions in tile
+        // Each thread computes partial dot product, then reduce
+        float tileMax = -INFINITY;
+        float tileScores[FA2_TILE_KV];  // Store scores for V accumulation
+
+        for (int k = 0; k < tileSize; k++) {
+            // Compute Q·K dot product
+            float dot = 0.0f;
+            // Each thread handles headDim/32 = 2 dimensions
+            int d0 = simd_lane * 2;
+            int d1 = simd_lane * 2 + 1;
+            if (d0 < headDim) dot += Q[qOffset + d0] * Ktile[k * headDim + d0];
+            if (d1 < headDim) dot += Q[qOffset + d1] * Ktile[k * headDim + d1];
+
+            // Reduce across simdgroup
+            dot = simd_sum(dot);
+
+            float score = dot * scale;
+            tileScores[k] = score;
+            tileMax = max(tileMax, score);
+        }
+
+        // Phase 2: Online softmax update
+        float newMax = max(runningMax, tileMax);
+        float rescale = exp(runningMax - newMax);
+
+        // Rescale existing accumulator
+        acc0 *= rescale;
+        acc1 *= rescale;
+        runningSum *= rescale;
+
+        // Compute exp(score - newMax) and accumulate V
+        float tileSum = 0.0f;
+        for (int k = 0; k < tileSize; k++) {
+            float expScore = exp(tileScores[k] - newMax);
+            tileSum += expScore;
+
+            // Accumulate weighted V
+            int d0 = simd_lane * 2;
+            int d1 = simd_lane * 2 + 1;
+            if (d0 < headDim) acc0 += expScore * Vtile[k * headDim + d0];
+            if (d1 < headDim) acc1 += expScore * Vtile[k * headDim + d1];
+        }
+
+        runningSum += tileSum;
+        runningMax = newMax;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Write output (each thread writes its 2 dimensions)
+    int outOffset = qPos * numQHeads * headDim + qHead * headDim;
+    float invSum = 1.0f / runningSum;
+
+    int d0 = simd_lane * 2;
+    int d1 = simd_lane * 2 + 1;
+    if (d0 < headDim) out[outOffset + d0] = acc0 * invSum;
+    if (d1 < headDim) out[outOffset + d1] = acc1 * invSum;
+}
 )";
 
 // Device and queue management
@@ -1645,6 +2060,68 @@ void metal_matmul_q4_0_simdgroup_f32(void* queuePtr, void* pipelinePtr,
     }
 }
 
+// Q6_K multi-output matvec: 8 outputs per threadgroup using simdgroups
+// Grid: ceil(N/8) threadgroups of 256 threads
+void metal_matvec_q6k_multi_output_f32(void* queuePtr, void* pipelinePtr,
+                                        void* A, void* B, void* C,
+                                        int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:0 atIndex:2];
+    [encoder setBytes:&N length:sizeof(N) atIndex:3];
+    [encoder setBytes:&K length:sizeof(K) atIndex:4];
+
+    // 8 outputs per threadgroup, 256 threads (8 simdgroups of 32)
+    int outputsPerTG = 8;
+    int threadgroupSize = 256;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
+
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Q4_K multi-output matvec: 8 outputs per threadgroup using simdgroups
+// Grid: ceil(N/8) threadgroups of 256 threads
+void metal_matvec_q4k_multi_output_f32(void* queuePtr, void* pipelinePtr,
+                                        void* A, void* B, void* C,
+                                        int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:0 atIndex:2];
+    [encoder setBytes:&N length:sizeof(N) atIndex:3];
+    [encoder setBytes:&K length:sizeof(K) atIndex:4];
+
+    // 8 outputs per threadgroup, 256 threads (8 simdgroups of 32)
+    int outputsPerTG = 8;
+    int threadgroupSize = 256;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
+
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
 void metal_rmsnorm_f32(void* queuePtr, void* pipelinePtr,
                        void* x, void* weight, void* out,
                        int batchSize, int dim, float eps) {
@@ -1919,6 +2396,48 @@ void metal_sdpa_prefill_f32(void* queuePtr, void* pipelinePtr,
     // Dispatch grid: (seqLen, numQHeads) threadgroups
     MTLSize threadgroups = MTLSizeMake(seqLen, numQHeads, 1);
     MTLSize threadsPerGroup = MTLSizeMake(PREFILL_THREADS, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Flash Attention 2 optimized dispatch
+// Uses larger tiles (64 K positions) and GQA-aware shared memory
+void metal_flash_attention_2_f32(void* queuePtr, void* pipelinePtr,
+                                  void* Q, void* K, void* V, void* out,
+                                  int seqLen, int numQHeads, int numKVHeads, int headDim,
+                                  float scale) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBytes:&seqLen length:sizeof(seqLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+
+    // Flash Attention 2 shared memory:
+    // K tile: FA2_TILE_KV * headDim floats = 64 * 64 = 4096 floats = 16KB
+    // V tile: FA2_TILE_KV * headDim floats = 64 * 64 = 4096 floats = 16KB
+    // Total: 32KB
+    int FA2_TILE_KV = 64;
+    int sharedMemSize = 2 * FA2_TILE_KV * headDim * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    // Dispatch grid: (seqLen, numKVHeads) threadgroups
+    // Each threadgroup handles one Q position and all Q heads for one KV head
+    // 8 simdgroups (256 threads) process 8 Q heads in parallel
+    MTLSize threadgroups = MTLSizeMake(seqLen, numKVHeads, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);  // FA2_THREADS = 8 simdgroups * 32
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
     finish_encode(encoder, cmdBuffer, shouldCommit);

@@ -568,6 +568,23 @@ func (b *CPUBackend) MatMulQ4_0(a, bQ4, out tensor.DevicePtr, m, n, k int) {
 	wg.Wait()
 }
 
+// MatMulQ6_K performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q6_K format.
+// This is a CPU fallback implementation - used if GPU Q6_K kernel not available.
+// For now, we panic since Q6_K should always be handled by GPU or dequantized to F32.
+func (b *CPUBackend) MatMulQ6_K(a, bQ6K, out tensor.DevicePtr, m, n, k int) {
+	// Q6_K is typically only used for lm_head which should use GPU kernel.
+	// If we reach here, fall back to panic or implement CPU dequant.
+	panic("MatMulQ6_K not implemented for CPU backend - use GPU backend or dequantize to F32")
+}
+
+// MatMulQ4_K performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q4_K format.
+// This is a CPU fallback implementation - panics since Q4_K should be handled by GPU.
+func (b *CPUBackend) MatMulQ4_K(a, bQ4K, out tensor.DevicePtr, m, n, k int) {
+	// Q4_K should be handled by GPU kernel.
+	// If we reach here, fall back to panic or implement CPU dequant.
+	panic("MatMulQ4_K not implemented for CPU backend - use GPU backend or dequantize to F32")
+}
+
 // ptrToByteSlice converts a DevicePtr to a byte slice.
 func ptrToByteSlice(ptr tensor.DevicePtr, n int) []byte {
 	if ptr.IsNil() {

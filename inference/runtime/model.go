@@ -113,3 +113,27 @@ func (m *ModelRuntime) CreateGPUKVCache(maxSeqLen int) *GPUKVCache {
 func (m *ModelRuntime) GPUKVCache() *GPUKVCache {
 	return m.gpuCache
 }
+
+// outputHeadMatMul performs logits = state @ OutputHead^T, using quantized kernel if available.
+func (m *ModelRuntime) outputHeadMatMul(statePtr, logitsPtr tensor.DevicePtr, batchSize, vocabSize, hiddenSize int) {
+	if m.OutputHead.DevicePtr().IsNil() {
+		return
+	}
+
+	// Check if we can use quantized kernel
+	if m.OutputHead.IsQuantized() {
+		if quantBackend, ok := m.backend.(backend.QuantizedMatMul); ok {
+			switch m.OutputHead.QuantProfile() {
+			case tensor.Q6_K:
+				quantBackend.MatMulQ6_K(statePtr, m.OutputHead.DevicePtr(), logitsPtr, batchSize, vocabSize, hiddenSize)
+				return
+			case tensor.Q4_0:
+				quantBackend.MatMulQ4_0(statePtr, m.OutputHead.DevicePtr(), logitsPtr, batchSize, vocabSize, hiddenSize)
+				return
+			}
+		}
+	}
+
+	// Fall back to F32 matmul
+	m.backend.MatMulTransposed(statePtr, m.OutputHead.DevicePtr(), logitsPtr, batchSize, vocabSize, hiddenSize)
+}

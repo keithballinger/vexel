@@ -223,6 +223,84 @@ func DequantizeQ6_K(data []byte, numElements int) []float32 {
 	return result
 }
 
+// DequantizeQ4_K converts Q4_K quantized data to float32.
+// Q4_K format: 256 elements per block (8 sub-blocks of 32 elements).
+// Block layout (144 bytes):
+//   - d (2 bytes): fp16 super-block scale for quantized scales
+//   - dmin (2 bytes): fp16 super-block scale for quantized mins
+//   - scales[12] (12 bytes): 6-bit quantized scales/mins packed
+//   - qs[128] (128 bytes): 4-bit quantized values
+//
+// Implementation follows llama.cpp's dequantize_row_q4_K exactly
+func DequantizeQ4_K(data []byte, numElements int) []float32 {
+	const blockSize = 256
+	const bytesPerBlock = 144
+
+	numBlocks := (numElements + blockSize - 1) / blockSize
+	result := make([]float32, numElements)
+
+	for b := 0; b < numBlocks; b++ {
+		blockOffset := b * bytesPerBlock
+		if blockOffset+bytesPerBlock > len(data) {
+			break
+		}
+
+		// Parse block header
+		dU16 := binary.LittleEndian.Uint16(data[blockOffset:])
+		dminU16 := binary.LittleEndian.Uint16(data[blockOffset+2:])
+		d := float16ToFloat32(dU16)
+		dmin := float16ToFloat32(dminU16)
+
+		// Scales are in bytes 4-15 (12 bytes total)
+		scalesData := data[blockOffset+4 : blockOffset+16]
+		qs := data[blockOffset+16 : blockOffset+144]
+
+		// Process 4 groups of 64 elements (using is=0,2,4,6 for scale indices)
+		qOffset := 0
+		is := 0
+		for j := 0; j < blockSize; j += 64 {
+			// Get scale and min for first 32 elements in this group
+			sc1, m1 := getScaleMinK4(is+0, scalesData)
+			d1 := d * float32(sc1)
+			dm1 := dmin * float32(m1)
+
+			// Get scale and min for second 32 elements in this group
+			sc2, m2 := getScaleMinK4(is+1, scalesData)
+			d2 := d * float32(sc2)
+			dm2 := dmin * float32(m2)
+
+			// Process 32 bytes containing 64 elements
+			for l := 0; l < 32; l++ {
+				idx1 := b*blockSize + j + l
+				idx2 := b*blockSize + j + l + 32
+				if idx1 < numElements {
+					result[idx1] = d1*float32(qs[qOffset+l]&0x0F) - dm1
+				}
+				if idx2 < numElements {
+					result[idx2] = d2*float32(qs[qOffset+l]>>4) - dm2
+				}
+			}
+			qOffset += 32
+			is += 2
+		}
+	}
+
+	return result
+}
+
+// getScaleMinK4 extracts a 6-bit scale and min from the packed scales array.
+// This matches llama.cpp's get_scale_min_k4 function exactly.
+func getScaleMinK4(j int, q []byte) (uint8, uint8) {
+	if j < 4 {
+		// First 4 sub-blocks: both scale and min from lower 6 bits
+		return q[j] & 63, q[j+4] & 63
+	}
+	// Last 4 sub-blocks: scale and min use bits from bytes 8-11 combined with upper bits
+	scale := (q[j+4] & 0x0F) | ((q[j-4] >> 6) << 4)
+	min := (q[j+4] >> 4) | ((q[j] >> 6) << 4)
+	return scale, min
+}
+
 // Dequantize converts quantized tensor data to float32 based on tensor type.
 func Dequantize(data []byte, tensorType TensorType, numElements int) []float32 {
 	switch tensorType {
@@ -247,6 +325,8 @@ func Dequantize(data []byte, tensorType TensorType, numElements int) []float32 {
 		return DequantizeQ8_0(data, numElements)
 	case TensorTypeQ6_K:
 		return DequantizeQ6_K(data, numElements)
+	case TensorTypeQ4_K:
+		return DequantizeQ4_K(data, numElements)
 	default:
 		// Unsupported type - return zeros
 		return make([]float32, numElements)

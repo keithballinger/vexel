@@ -117,13 +117,24 @@ func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 
 // matMulTransposed performs C = A @ W^T, dispatching to quantized kernel if supported.
 func (b *BlockRuntime) matMulTransposed(a tensor.DevicePtr, w tensor.Tensor, out tensor.DevicePtr, m, n, k int) {
-	if w.IsQuantized() && w.QuantProfile() == tensor.Q4_0 && b.quantMatMul != nil {
-		// Use GPU-native Q4_0 kernel
-		b.quantMatMul.MatMulQ4_0(a, w.DevicePtr(), out, m, n, k)
-	} else {
-		// Fall back to F32 matmul
-		b.backend.MatMulTransposed(a, w.DevicePtr(), out, m, n, k)
+	if w.IsQuantized() && b.quantMatMul != nil {
+		switch w.QuantProfile() {
+		case tensor.Q4_0:
+			// Use GPU-native Q4_0 kernel
+			b.quantMatMul.MatMulQ4_0(a, w.DevicePtr(), out, m, n, k)
+			return
+		case tensor.Q4_K:
+			// Use GPU-native Q4_K kernel (only M=1 for now)
+			b.quantMatMul.MatMulQ4_K(a, w.DevicePtr(), out, m, n, k)
+			return
+		case tensor.Q6_K:
+			// Use GPU-native Q6_K kernel (only M=1 for now)
+			b.quantMatMul.MatMulQ6_K(a, w.DevicePtr(), out, m, n, k)
+			return
+		}
 	}
+	// Fall back to F32 matmul
+	b.backend.MatMulTransposed(a, w.DevicePtr(), out, m, n, k)
 }
 
 // Execute performs the forward pass for this block using DevicePtr operations.

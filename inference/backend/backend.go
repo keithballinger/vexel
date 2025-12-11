@@ -30,6 +30,16 @@ type QuantizedMatMul interface {
 	// MatMulQ4_0 performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q4_0 format.
 	// B contains raw Q4_0 data (18 bytes per 32 elements: 2 byte f16 scale + 16 bytes nibbles).
 	MatMulQ4_0(a, b, out tensor.DevicePtr, m, n, k int)
+
+	// MatMulQ4_K performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q4_K format.
+	// B contains raw Q4_K data (144 bytes per 256 elements: 4 byte header + 12 scales + 128 qs).
+	// Currently only supports M=1 (matvec for decode).
+	MatMulQ4_K(a, b, out tensor.DevicePtr, m, n, k int)
+
+	// MatMulQ6_K performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q6_K format.
+	// B contains raw Q6_K data (210 bytes per 256 elements). Used for lm_head.
+	// Currently only supports M=1 (matvec for decode).
+	MatMulQ6_K(a, b, out tensor.DevicePtr, m, n, k int)
 }
 
 // Backend represents a compute backend that can execute tensor operations.

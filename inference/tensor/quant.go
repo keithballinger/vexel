@@ -10,6 +10,10 @@ const (
 	Q8_0
 	// Q4_0 represents 4-bit block quantization.
 	Q4_0
+	// Q6_K represents 6-bit k-quant quantization (used for lm_head).
+	Q6_K
+	// Q4_K represents 4-bit k-quant quantization (better alignment than Q4_0).
+	Q4_K
 )
 
 func (q QuantProfile) String() string {
@@ -20,6 +24,10 @@ func (q QuantProfile) String() string {
 		return "Q8_0"
 	case Q4_0:
 		return "Q4_0"
+	case Q6_K:
+		return "Q6_K"
+	case Q4_K:
+		return "Q4_K"
 	default:
 		return "Unknown"
 	}

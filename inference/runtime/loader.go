@@ -42,6 +42,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 	for _, hfName := range tensorNames {
 		ggufName := gguf.GetLayerTensorName(hfName)
 
+
 		// First, check the tensor type to decide loading strategy
 		info, found := loader.GetTensorInfo(ggufName)
 		if !found {
@@ -60,9 +61,10 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			continue
 		}
 
+
 		var t tensor.Tensor
 
-		// For Q4_0 weight matrices (not embeddings/norms), keep raw format
+		// For Q4_0/Q4_K weight matrices (not embeddings/norms), keep raw format
 		// This enables GPU-native quantized inference
 		if info.Type == gguf.TensorTypeQ4_0 && m.isWeightMatrix(hfName) {
 			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
@@ -80,8 +82,29 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			)
 			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
 			q4Count++
+		// TODO: Q4_K raw loading disabled until batched kernel for M>1 is implemented
+		// } else if info.Type == gguf.TensorTypeQ4_K && m.isWeightMatrix(hfName) {
+		// 	// Q4_K weight matrices use GPU-native quantized inference
+		// 	rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
+		// 	...
+		// }
+		} else if info.Type == gguf.TensorTypeQ6_K && hfName == "lm_head.weight" {
+			// Keep lm_head as Q6_K for GPU-native quantized inference
+			// All output head paths now use M=1, so Q6_K matvec kernel works
+			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
+			if err != nil {
+				fmt.Printf("Warning: failed to load raw tensor %s: %v\n", hfName, err)
+				continue
+			}
+			t = tensor.NewQuantTensor(
+				tensor.NewShape(dims...),
+				m.config.DType,
+				tensor.NewDevicePtr(tensor.CPU, uintptr(unsafe.Pointer(&rawData[0]))),
+				tensor.Q6_K,
+			)
+			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
 		} else {
-			// Dequantize to F32 for embeddings, norms, or non-Q4_0 types
+			// Dequantize to F32 for embeddings, norms, or non-Q4_0/Q6_K types
 			data, dims, err := loader.LoadTensor(ggufName)
 			if err != nil {
 				fmt.Printf("Warning: failed to load tensor %s: %v\n", hfName, err)
@@ -101,7 +124,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 		loadedCount++
 	}
 
-	fmt.Printf("Loaded %d/%d tensors from GGUF (%d Q4_0 raw)\n", loadedCount, len(tensorNames), q4Count)
+	fmt.Printf("Loaded %d/%d tensors from GGUF (%d quantized raw)\n", loadedCount, len(tensorNames), q4Count)
 
 	return nil
 }
@@ -337,14 +360,27 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 
 		// Calculate size in bytes based on quantization profile
 		var sizeBytes int
-		if t.IsQuantized() && t.QuantProfile() == tensor.Q4_0 {
-			// Q4_0: 18 bytes per 32 elements (2 byte scale + 16 bytes nibbles)
-			numElements := t.Shape().NumElements()
-			numBlocks := (numElements + 31) / 32
-			sizeBytes = numBlocks * 18
+		numElements := t.Shape().NumElements()
+		if t.IsQuantized() {
+			switch t.QuantProfile() {
+			case tensor.Q4_0:
+				// Q4_0: 18 bytes per 32 elements (2 byte scale + 16 bytes nibbles)
+				numBlocks := (numElements + 31) / 32
+				sizeBytes = numBlocks * 18
+			case tensor.Q4_K:
+				// Q4_K: 144 bytes per 256 elements
+				numBlocks := (numElements + 255) / 256
+				sizeBytes = numBlocks * 144
+			case tensor.Q6_K:
+				// Q6_K: 210 bytes per 256 elements
+				numBlocks := (numElements + 255) / 256
+				sizeBytes = numBlocks * 210
+			default:
+				// Unknown quant, fall back to F32
+				sizeBytes = numElements * 4
+			}
 		} else {
 			// F32: 4 bytes per element
-			numElements := t.Shape().NumElements()
 			sizeBytes = numElements * 4
 		}
 

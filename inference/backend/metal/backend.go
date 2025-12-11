@@ -62,8 +62,11 @@ type Backend struct {
 	sdpaDecodePipeline        unsafe.Pointer
 	sdpaFlashDecodePipeline   unsafe.Pointer
 	sdpaPrefillPipeline       unsafe.Pointer
+	flashAttention2Pipeline   unsafe.Pointer
 	matmulQ4BatchedPipeline   unsafe.Pointer
 	matmulQ4SimdgroupPipeline unsafe.Pointer
+	matvecQ6KPipeline         unsafe.Pointer
+	matvecQ4KPipeline         unsafe.Pointer
 }
 
 // NewBackend creates a new Metal backend.
@@ -106,8 +109,11 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.sdpaDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_gqa_f32"))
 	b.sdpaFlashDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f32"))
 	b.sdpaPrefillPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_prefill_f32"))
+	b.flashAttention2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("flash_attention_2_f32"))
 	b.matmulQ4BatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_batched_f32"))
 	b.matmulQ4SimdgroupPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_simdgroup_f32"))
+	b.matvecQ6KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q6k_multi_output_f32"))
+	b.matvecQ4KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_multi_output_f32"))
 
 	return b, nil
 }
@@ -278,6 +284,36 @@ func (b *Backend) MatMulQ4_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 	}
 }
 
+// MatMulQ6_K performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q6_K format.
+// B contains raw Q6_K data (210 bytes per 256 elements).
+// Only supports M=1 (matvec) for now - used for lm_head during decode.
+func (b *Backend) MatMulQ6_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	if b.matvecQ6KPipeline == nil {
+		panic("MatMulQ6_K called but no matvecQ6KPipeline available")
+	}
+	if m != 1 {
+		panic("MatMulQ6_K only supports M=1 (matvec) for now")
+	}
+	C.metal_matvec_q6k_multi_output_f32(b.queue, b.matvecQ6KPipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(n), C.int(k))
+}
+
+// MatMulQ4_K performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q4_K format.
+// B contains raw Q4_K data (144 bytes per 256 elements).
+// Only supports M=1 (matvec) for now.
+func (b *Backend) MatMulQ4_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	if b.matvecQ4KPipeline == nil {
+		panic("MatMulQ4_K called but no matvecQ4KPipeline available")
+	}
+	if m != 1 {
+		panic("MatMulQ4_K only supports M=1 (matvec) for now")
+	}
+	C.metal_matvec_q4k_multi_output_f32(b.queue, b.matvecQ4KPipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(n), C.int(k))
+}
+
 // RMSNorm performs RMS normalization.
 func (b *Backend) RMSNorm(x, weight, out tensor.DevicePtr, rows, cols int, eps float32) {
 	C.metal_rmsnorm_f32(b.queue, b.rmsnormPipeline,
@@ -357,8 +393,29 @@ func (b *Backend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHea
 }
 
 // SDPAPrefill performs SDPA for prefill with causal masking.
+// Uses Flash Attention 2 for longer sequences where K/V tiling provides benefit.
 func (b *Backend) SDPAPrefill(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	// Use Flash Attention 2 for longer sequences (>=256 tokens) where tiling helps
+	// FA2 tiles K/V in shared memory and exploits GQA to share loads across Q heads
+	if b.flashAttention2Pipeline != nil && seqLen >= 256 {
+		C.metal_flash_attention_2_f32(b.queue, b.flashAttention2Pipeline,
+			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+			unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+			C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+			C.float(scale))
+		return
+	}
 	C.metal_sdpa_prefill_f32(b.queue, b.sdpaPrefillPipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale))
+}
+
+// FlashAttention2 performs optimized SDPA with K/V tiling in shared memory.
+// Uses larger tiles (64 K positions) and exploits GQA to share K/V loads.
+func (b *Backend) FlashAttention2(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	C.metal_flash_attention_2_f32(b.queue, b.flashAttention2Pipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),

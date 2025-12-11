@@ -69,6 +69,16 @@ void metal_matmul_q4_0_simdgroup_f32(void* queue, void* pipeline,
                                       void* A, void* B, void* C,
                                       int M, int N, int K);
 
+// Q6_K multi-output matvec: for lm_head which uses Q6_K quantization
+void metal_matvec_q6k_multi_output_f32(void* queue, void* pipeline,
+                                        void* A, void* B, void* C,
+                                        int N, int K);
+
+// Q4_K multi-output matvec: for attention projections using Q4_K quantization
+void metal_matvec_q4k_multi_output_f32(void* queue, void* pipeline,
+                                        void* A, void* B, void* C,
+                                        int N, int K);
+
 void metal_rmsnorm_f32(void* queue, void* pipeline,
                        void* x, void* weight, void* out,
                        int batchSize, int dim, float eps);
@@ -117,6 +127,14 @@ void metal_sdpa_prefill_f32(void* queue, void* pipeline,
                             void* Q, void* K, void* V, void* out,
                             int seqLen, int numQHeads, int numKVHeads, int headDim,
                             float scale);
+
+// Flash Attention 2 optimized prefill
+// Uses larger tiles (64 K positions) and GQA-aware shared memory
+// K/V tiles loaded to shared memory and shared across Q heads
+void metal_flash_attention_2_f32(void* queue, void* pipeline,
+                                  void* Q, void* K, void* V, void* out,
+                                  int seqLen, int numQHeads, int numKVHeads, int headDim,
+                                  float scale);
 
 // Flash Decoding - parallelized SDPA for decode phase
 // Uses threadgroup parallelism with online softmax reduction
