@@ -205,6 +205,18 @@ func (b *Backend) Sync() {
 	C.metal_sync(b.queue)
 }
 
+// BeginBatch starts a batch of operations that will share a single command buffer.
+// This reduces commit overhead by batching multiple kernel dispatches together.
+// Call EndBatch when done to commit all operations.
+func (b *Backend) BeginBatch() {
+	C.metal_begin_batch(b.queue)
+}
+
+// EndBatch commits all batched operations.
+func (b *Backend) EndBatch() {
+	C.metal_end_batch()
+}
+
 // CopyBuffer copies data from one GPU buffer to another (GPU-to-GPU).
 func (b *Backend) CopyBuffer(src tensor.DevicePtr, srcOffset int, dst tensor.DevicePtr, dstOffset int, size int) {
 	C.metal_copy_buffer(b.queue, unsafe.Pointer(src.Addr()), C.size_t(srcOffset),

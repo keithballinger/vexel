@@ -9,6 +9,15 @@ type PoolResetter interface {
 	ResetPool()
 }
 
+// Batcher is an optional interface for backends that support command buffer batching.
+// Batching reduces dispatch overhead by combining multiple operations into one commit.
+type Batcher interface {
+	// BeginBatch starts a batch - subsequent operations share a command buffer.
+	BeginBatch()
+	// EndBatch commits all batched operations.
+	EndBatch()
+}
+
 // BufferCopier is an optional interface for backends that support GPU-to-GPU buffer copies.
 // This avoids roundtripping through CPU memory.
 type BufferCopier interface {

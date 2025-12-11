@@ -32,6 +32,10 @@ void* metal_create_pipeline(void* device, void* library, const char* functionNam
 // Synchronization
 void metal_sync(void* commandQueue);
 
+// Command Buffer Batching - reduce commit overhead by batching operations
+void metal_begin_batch(void* commandQueue);
+void metal_end_batch(void);
+
 // Kernel execution
 void metal_matmul_f32(void* queue, void* pipeline,
                       void* A, void* B, void* C,

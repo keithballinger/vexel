@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"time"
 	"unsafe"
 
 	"vexel/inference/backend"
@@ -86,6 +87,9 @@ type BlockRuntime struct {
 
 	// Cached interface check for quantized matmul
 	quantMatMul backend.QuantizedMatMul
+
+	// Cached interface for command buffer batching
+	batcher backend.Batcher
 }
 
 // NewBlockRuntime creates a new block runtime with config.
@@ -104,6 +108,9 @@ func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 
 	// Cache quantized matmul interface check
 	br.quantMatMul, _ = b.(backend.QuantizedMatMul)
+
+	// Cache batcher interface check
+	br.batcher, _ = b.(backend.Batcher)
 
 	return br
 }
@@ -491,6 +498,26 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		return x, nil
 	}
 
+	// Use command buffer batching if available (and not profiling - profiling needs sync points)
+	useBatching := b.batcher != nil && !profiler.enabled
+	if useBatching {
+		b.batcher.BeginBatch()
+		defer b.batcher.EndBatch()
+	}
+
+	// Profiling helper - only syncs and times when profiling is enabled
+	profileOp := func(name string, op func()) {
+		if profiler.enabled {
+			b.backend.Sync()
+			start := time.Now()
+			op()
+			b.backend.Sync()
+			RecordOp(name, time.Since(start))
+		} else {
+			op()
+		}
+	}
+
 	// Dimensions from config
 	seqLen := x.Shape().NumElements() / b.HiddenSize
 	hiddenSize := b.HiddenSize
@@ -541,75 +568,106 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	}
 
 	// 1. RMSNorm (Attention)
-	if !b.AttnNorm.DevicePtr().IsNil() {
-		b.backend.RMSNorm(xPtr, b.AttnNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
-	}
+	profileOp("RMSNorm", func() {
+		if !b.AttnNorm.DevicePtr().IsNil() {
+			b.backend.RMSNorm(xPtr, b.AttnNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+		}
+	})
 
 	// 2. Q/K/V Projections
-	if !b.Wq.DevicePtr().IsNil() {
-		qDim := b.Wq.Shape().Dims()[0]
-		b.matMulTransposed(normOutPtr, b.Wq, qPtr, seqLen, qDim, hiddenSize)
-	}
+	profileOp("Wq", func() {
+		if !b.Wq.DevicePtr().IsNil() {
+			qDim := b.Wq.Shape().Dims()[0]
+			b.matMulTransposed(normOutPtr, b.Wq, qPtr, seqLen, qDim, hiddenSize)
+		}
+	})
 
-	if !b.Wk.DevicePtr().IsNil() {
-		kDim := b.Wk.Shape().Dims()[0]
-		b.matMulTransposed(normOutPtr, b.Wk, kPtr, seqLen, kDim, hiddenSize)
-	}
+	profileOp("Wk", func() {
+		if !b.Wk.DevicePtr().IsNil() {
+			kDim := b.Wk.Shape().Dims()[0]
+			b.matMulTransposed(normOutPtr, b.Wk, kPtr, seqLen, kDim, hiddenSize)
+		}
+	})
 
-	if !b.Wv.DevicePtr().IsNil() {
-		vDim := b.Wv.Shape().Dims()[0]
-		b.matMulTransposed(normOutPtr, b.Wv, vPtr, seqLen, vDim, hiddenSize)
-	}
+	profileOp("Wv", func() {
+		if !b.Wv.DevicePtr().IsNil() {
+			vDim := b.Wv.Shape().Dims()[0]
+			b.matMulTransposed(normOutPtr, b.Wv, vPtr, seqLen, vDim, hiddenSize)
+		}
+	})
 
 	// 3. RoPE - Apply to Q and K
-	b.backend.RoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, startPos, float32(b.RoPETheta))
+	profileOp("RoPE", func() {
+		b.backend.RoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, startPos, float32(b.RoPETheta))
+	})
 
 	// 4. Append K/V to GPU cache and get pointers for SDPA
 	// This uses GPU-to-GPU copy - no CPU roundtrip!
-	fullKPtr, fullVPtr, fullSeqLen := gpuCache.AppendKV(layerIdx, kPtr, vPtr, seqLen)
+	var fullKPtr, fullVPtr tensor.DevicePtr
+	var fullSeqLen int
+	profileOp("KVCache", func() {
+		fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kPtr, vPtr, seqLen)
+	})
 
 	// 5. Attention: Q @ K^T -> softmax -> @ V
 	scale := float32(1.0 / sqrt(float64(headDim)))
 
-	if seqLen == 1 {
-		// Decode: single query against full KV sequence
-		b.backend.SDPA(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale)
-	} else {
-		// Prefill: use causal SDPAPrefill with just current K/V
-		b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
-	}
+	profileOp("SDPA", func() {
+		if seqLen == 1 {
+			// Decode: single query against full KV sequence
+			b.backend.SDPA(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale)
+		} else {
+			// Prefill: use causal SDPAPrefill with just current K/V
+			b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+		}
+	})
 
 	// 6. Output Projection and residual
-	if !b.Wo.DevicePtr().IsNil() {
-		oDim := b.Wo.Shape().Dims()[0]
-		b.matMulTransposed(attnOutPtr, b.Wo, normOutPtr, seqLen, oDim, numHeads*headDim)
+	profileOp("Wo", func() {
+		if !b.Wo.DevicePtr().IsNil() {
+			oDim := b.Wo.Shape().Dims()[0]
+			b.matMulTransposed(attnOutPtr, b.Wo, normOutPtr, seqLen, oDim, numHeads*headDim)
+		}
+	})
+	profileOp("Add1", func() {
 		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
-	}
+	})
 
 	// 7. FFN RMSNorm
-	if !b.FFNNorm.DevicePtr().IsNil() {
-		b.backend.RMSNorm(xPtr, b.FFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
-	}
+	profileOp("RMSNorm2", func() {
+		if !b.FFNNorm.DevicePtr().IsNil() {
+			b.backend.RMSNorm(xPtr, b.FFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+		}
+	})
 
 	// 8. MLP: SwiGLU variant
-	if !b.W1.DevicePtr().IsNil() {
-		w1Dim := b.W1.Shape().Dims()[0]
-		b.matMulTransposed(normOutPtr, b.W1, gatePtr, seqLen, w1Dim, hiddenSize)
-	}
+	profileOp("W1", func() {
+		if !b.W1.DevicePtr().IsNil() {
+			w1Dim := b.W1.Shape().Dims()[0]
+			b.matMulTransposed(normOutPtr, b.W1, gatePtr, seqLen, w1Dim, hiddenSize)
+		}
+	})
 
-	if !b.W3.DevicePtr().IsNil() {
-		w3Dim := b.W3.Shape().Dims()[0]
-		b.matMulTransposed(normOutPtr, b.W3, upPtr, seqLen, w3Dim, hiddenSize)
-	}
+	profileOp("W3", func() {
+		if !b.W3.DevicePtr().IsNil() {
+			w3Dim := b.W3.Shape().Dims()[0]
+			b.matMulTransposed(normOutPtr, b.W3, upPtr, seqLen, w3Dim, hiddenSize)
+		}
+	})
 
-	b.backend.SiLU(gatePtr, gatePtr, seqLen*intermediateSize)
-	b.backend.Mul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
+	profileOp("SiLUMul", func() {
+		b.backend.SiLUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
+	})
 
-	if !b.W2.DevicePtr().IsNil() {
-		w2Dim := b.W2.Shape().Dims()[0]
-		b.matMulTransposed(gatePtr, b.W2, normOutPtr, seqLen, w2Dim, intermediateSize)
+	profileOp("W2", func() {
+		if !b.W2.DevicePtr().IsNil() {
+			w2Dim := b.W2.Shape().Dims()[0]
+			b.matMulTransposed(gatePtr, b.W2, normOutPtr, seqLen, w2Dim, intermediateSize)
+		}
+	})
+	profileOp("Add2", func() {
 		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
-	}
+	})
 
 	return x, nil
 }
