@@ -131,10 +131,10 @@ func NewMedusaScheduler(
 				}
 			}
 
-			// Fall back to CPU training
+			// CPU training is not supported - it doesn't use lm_head initialization
+			// and produces poor results. GPU training is required.
 			if ms.trainer == nil {
-				ms.trainer = medusa.NewOnlineTrainer(hiddenSize, vocabSize, medusaConfig.TrainingConfig)
-				fmt.Println("Using CPU Medusa training")
+				return nil, fmt.Errorf("CPU Medusa training is not supported; GPU training required (use -gpu-training=true or ensure Metal backend is available)")
 			}
 		}
 	}
