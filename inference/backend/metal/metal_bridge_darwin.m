@@ -1190,6 +1190,26 @@ kernel void silu_mul_f16(
     out[gid] = half(silu_g * float(up[gid]));
 }
 
+// FP32 to FP16 conversion kernel
+// Converts float32 array to float16
+kernel void convert_f32_to_f16(
+    device const float* in [[buffer(0)]],
+    device half* out [[buffer(1)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    out[gid] = half(in[gid]);
+}
+
+// FP16 to FP32 conversion kernel
+// Converts float16 array to float32
+kernel void convert_f16_to_f32(
+    device const half* in [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    out[gid] = float(in[gid]);
+}
+
 // RMSNorm for FP16 input/output with FP32 accumulation
 // x: [rows, dim] in FP16, weight: [dim] in FP32, out: [rows, dim] in FP16
 constant int RMSNORM_F16_THREADGROUP_SIZE = 256;
@@ -2629,6 +2649,32 @@ void metal_silu_mul_f16(void* queuePtr, void* pipelinePtr,
     NSArray* buffers = @[
         (__bridge id<MTLBuffer>)gate,
         (__bridge id<MTLBuffer>)up,
+        (__bridge id<MTLBuffer>)out
+    ];
+
+    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+void metal_convert_f32_to_f16(void* queuePtr, void* pipelinePtr,
+                               void* in, void* out, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)in,
+        (__bridge id<MTLBuffer>)out
+    ];
+
+    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+void metal_convert_f16_to_f32(void* queuePtr, void* pipelinePtr,
+                               void* in, void* out, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)in,
         (__bridge id<MTLBuffer>)out
     ];
 

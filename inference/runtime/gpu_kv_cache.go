@@ -17,6 +17,7 @@ type GPUKVCache struct {
 	numKVHeads int
 	headDim    int
 	maxSeqLen  int
+	useFP16    bool // Use FP16 storage for 2x memory savings
 
 	// Per-layer K and V buffers: [maxSeqLen, numKVHeads, headDim]
 	kBuffers []tensor.DevicePtr
@@ -26,20 +27,37 @@ type GPUKVCache struct {
 	seqLen int
 }
 
-// NewGPUKVCache creates a new GPU-resident KV cache.
+// NewGPUKVCache creates a new GPU-resident KV cache (FP32).
 func NewGPUKVCache(b backend.Backend, numLayers, numKVHeads, headDim, maxSeqLen int) *GPUKVCache {
+	return NewGPUKVCacheWithPrecision(b, numLayers, numKVHeads, headDim, maxSeqLen, false)
+}
+
+// NewGPUKVCacheFP16 creates a new GPU-resident KV cache with FP16 storage.
+// Provides 2x memory savings with slightly reduced precision.
+func NewGPUKVCacheFP16(b backend.Backend, numLayers, numKVHeads, headDim, maxSeqLen int) *GPUKVCache {
+	return NewGPUKVCacheWithPrecision(b, numLayers, numKVHeads, headDim, maxSeqLen, true)
+}
+
+// NewGPUKVCacheWithPrecision creates a new GPU-resident KV cache.
+// useFP16: if true, stores K/V in FP16 format for 2x memory savings.
+func NewGPUKVCacheWithPrecision(b backend.Backend, numLayers, numKVHeads, headDim, maxSeqLen int, useFP16 bool) *GPUKVCache {
 	cache := &GPUKVCache{
 		backend:    b,
 		numLayers:  numLayers,
 		numKVHeads: numKVHeads,
 		headDim:    headDim,
 		maxSeqLen:  maxSeqLen,
+		useFP16:    useFP16,
 		kBuffers:   make([]tensor.DevicePtr, numLayers),
 		vBuffers:   make([]tensor.DevicePtr, numLayers),
 	}
 
 	// Allocate GPU buffers for each layer
-	bufferSize := maxSeqLen * numKVHeads * headDim * 4 // float32
+	bytesPerElement := 4 // float32
+	if useFP16 {
+		bytesPerElement = 2 // float16
+	}
+	bufferSize := maxSeqLen * numKVHeads * headDim * bytesPerElement
 
 	for i := 0; i < numLayers; i++ {
 		cache.kBuffers[i] = b.Alloc(bufferSize)
@@ -63,15 +81,25 @@ func (c *GPUKVCache) SeqLen() int {
 	return c.seqLen
 }
 
+// UseFP16 returns true if this cache stores K/V in FP16 format.
+func (c *GPUKVCache) UseFP16() bool {
+	return c.useFP16
+}
+
 // AppendKV appends new K/V data to the cache for a specific layer.
 // kPtr, vPtr should contain [newTokens, numKVHeads, headDim] data.
+// For FP32 cache: expects FP32 input. For FP16 cache: expects FP16 input.
 // Returns the GPU pointers to the full K/V cache for this layer.
 func (c *GPUKVCache) AppendKV(layerIdx int, kPtr, vPtr tensor.DevicePtr, newTokens int) (fullK, fullV tensor.DevicePtr, fullSeqLen int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// Calculate byte offset for current position
-	tokenSize := c.numKVHeads * c.headDim * 4 // bytes per token
+	bytesPerElement := 4 // float32
+	if c.useFP16 {
+		bytesPerElement = 2 // float16
+	}
+	tokenSize := c.numKVHeads * c.headDim * bytesPerElement
 	offset := c.seqLen * tokenSize
 	copySize := newTokens * tokenSize
 

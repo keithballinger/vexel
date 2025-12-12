@@ -42,6 +42,24 @@ type QuantizedMatMul interface {
 	MatMulQ6_K(a, b, out tensor.DevicePtr, m, n, k int)
 }
 
+// FP16Ops is an optional interface for backends that support FP16 (half-precision) operations.
+// FP16 provides 2x memory bandwidth savings for memory-bound operations.
+type FP16Ops interface {
+	// ConvertF32ToF16 converts FP32 data to FP16.
+	// in: [n] in FP32, out: [n] in FP16 (buffer must be n*2 bytes)
+	ConvertF32ToF16(in, out tensor.DevicePtr, n int)
+
+	// ConvertF16ToF32 converts FP16 data to FP32.
+	// in: [n] in FP16, out: [n] in FP32 (buffer must be n*4 bytes)
+	ConvertF16ToF32(in, out tensor.DevicePtr, n int)
+
+	// SDPAF16 performs SDPA with FP16 KV cache.
+	// Q: [numQHeads, headDim] in FP16
+	// K/V: [kvLen, numKVHeads, headDim] in FP16
+	// out: [numQHeads, headDim] in FP16
+	SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32)
+}
+
 // Backend represents a compute backend that can execute tensor operations.
 // All compute operations use DevicePtr for device-agnostic memory access.
 // This interface is implemented by CPU, Metal, and CUDA backends.

@@ -69,13 +69,15 @@ type Backend struct {
 	matvecQ4KPipeline         unsafe.Pointer
 
 	// FP16 (Half-Precision) pipelines
-	addF16Pipeline      unsafe.Pointer
-	mulF16Pipeline      unsafe.Pointer
-	siluF16Pipeline     unsafe.Pointer
-	siluMulF16Pipeline  unsafe.Pointer
-	rmsnormF16Pipeline   unsafe.Pointer
-	matvecQ4F16Pipeline  unsafe.Pointer
-	sdpaDecodeF16Pipeline unsafe.Pointer
+	addF16Pipeline         unsafe.Pointer
+	mulF16Pipeline         unsafe.Pointer
+	siluF16Pipeline        unsafe.Pointer
+	siluMulF16Pipeline     unsafe.Pointer
+	rmsnormF16Pipeline     unsafe.Pointer
+	matvecQ4F16Pipeline    unsafe.Pointer
+	sdpaDecodeF16Pipeline  unsafe.Pointer
+	convertF32ToF16Pipeline unsafe.Pointer
+	convertF16ToF32Pipeline unsafe.Pointer
 }
 
 // NewBackend creates a new Metal backend.
@@ -132,6 +134,8 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.rmsnormF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_f16"))
 	b.matvecQ4F16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_f16"))
 	b.sdpaDecodeF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_f16"))
+	b.convertF32ToF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("convert_f32_to_f16"))
+	b.convertF16ToF32Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("convert_f16_to_f32"))
 
 	return b, nil
 }
@@ -495,4 +499,18 @@ func (b *Backend) SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKV
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
 		C.float(scale))
+}
+
+// ConvertF32ToF16 converts FP32 data to FP16.
+// in: [n] in FP32, out: [n] in FP16 (out buffer must be n*2 bytes)
+func (b *Backend) ConvertF32ToF16(in, out tensor.DevicePtr, n int) {
+	C.metal_convert_f32_to_f16(b.queue, b.convertF32ToF16Pipeline,
+		unsafe.Pointer(in.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
+}
+
+// ConvertF16ToF32 converts FP16 data to FP32.
+// in: [n] in FP16, out: [n] in FP32 (out buffer must be n*4 bytes)
+func (b *Backend) ConvertF16ToF32(in, out tensor.DevicePtr, n int) {
+	C.metal_convert_f16_to_f32(b.queue, b.convertF16ToF32Pipeline,
+		unsafe.Pointer(in.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }

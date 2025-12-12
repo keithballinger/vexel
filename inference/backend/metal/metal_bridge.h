@@ -171,6 +171,14 @@ void metal_rmsnorm_f16(void* queue, void* pipeline,
                        void* x, void* weight, void* out,
                        int batchSize, int dim, float eps);
 
+// FP32 to FP16 conversion
+void metal_convert_f32_to_f16(void* queue, void* pipeline,
+                               void* in, void* out, int n);
+
+// FP16 to FP32 conversion
+void metal_convert_f16_to_f32(void* queue, void* pipeline,
+                               void* in, void* out, int n);
+
 // Q4_0 matvec with FP16 activations: C = A @ B^T
 // A: [1,K] in FP16, B: [N,K] in Q4_0, C: [1,N] in FP16
 void metal_matvec_q4_0_f16(void* queue, void* pipeline,
