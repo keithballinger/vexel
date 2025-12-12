@@ -635,3 +635,106 @@ func (m *ModelRuntime) PrefillWithPagedKV(tokens []int, seqID int64, startPos in
 
 	return logits, nil
 }
+
+// VerifySpeculative runs the model on a sequence of tokens and returns logits for ALL positions.
+// This is used for speculative decoding verification where we need to compare the target model's
+// predictions at each position with the draft model's sampled tokens.
+//
+// tokens: [input_token, draft_token_0, draft_token_1, ..., draft_token_K-1]
+// pos: starting position in the sequence
+// Returns: logits tensor of shape [len(tokens), vocabSize]
+//
+// The logits[i] predicts the token at position i+1, so:
+// - logits[0] should match draft_token_0
+// - logits[1] should match draft_token_1
+// - etc.
+// - logits[K] is for sampling a new token after all drafts are accepted
+func (m *ModelRuntime) VerifySpeculative(tokens []int, pos int) (tensor.Tensor, error) {
+	seqLen := len(tokens)
+	if seqLen == 0 {
+		return tensor.Tensor{}, nil
+	}
+
+	if m.gpuCache == nil {
+		return tensor.Tensor{}, fmt.Errorf("GPU KV cache not initialized")
+	}
+
+	// Reset buffer pool if the backend supports it
+	if pooler, ok := m.backend.(interface{ ResetPool() }); ok {
+		pooler.ResetPool()
+	}
+
+	hiddenSize := m.config.HiddenSize
+	vocabSize := m.config.VocabSize
+
+	if m.ctx == nil {
+		return tensor.Tensor{}, fmt.Errorf("inference context not initialized")
+	}
+
+	arena := m.ctx.GetArena(memory.Scratch)
+	if arena == nil {
+		return tensor.Tensor{}, fmt.Errorf("scratch arena not initialized")
+	}
+
+	m.ctx.ResetScratch()
+
+	allocPtr := func(bytes int) (tensor.DevicePtr, error) {
+		return arena.Alloc(bytes)
+	}
+
+	// 1. Copy token IDs to device
+	tokenBytes := int32ToBytes(tokens)
+	tokenPtr, err := allocPtr(len(tokenBytes))
+	if err != nil {
+		return tensor.Tensor{}, err
+	}
+	m.backend.ToDevice(tokenPtr, tokenBytes)
+
+	// 2. Allocate State [seqLen, Hidden]
+	statePtr, err := allocPtr(seqLen * hiddenSize * 4)
+	if err != nil {
+		return tensor.Tensor{}, err
+	}
+	state := tensor.NewTensor(tensor.NewShape(seqLen, hiddenSize), m.config.DType, statePtr)
+
+	// 3. Embedding Lookup
+	if !m.Embedding.DevicePtr().IsNil() {
+		m.backend.Embedding(tokenPtr, seqLen, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
+	}
+
+	// 4. Allocate scratch tensor
+	scratchPtr, err := allocPtr(int(m.config.ScratchBytes(seqLen)))
+	if err != nil {
+		return tensor.Tensor{}, err
+	}
+	scratch := tensor.NewTensor(tensor.NewShape(seqLen, hiddenSize), m.config.DType, scratchPtr)
+
+	// 5. Run through all layers using GPU KV cache
+	for i := 0; i < m.config.NumHiddenLayers; i++ {
+		layer := m.layers[i]
+		state, err = layer.ExecuteWithGPUKV(state, scratch, m.gpuCache, i, pos)
+		if err != nil {
+			return tensor.Tensor{}, err
+		}
+	}
+
+	// 6. Final Norm - apply to all positions
+	if !m.FinalNorm.DevicePtr().IsNil() {
+		m.backend.RMSNorm(statePtr, m.FinalNorm.DevicePtr(), statePtr, seqLen, hiddenSize, float32(m.config.RMSNormEPS))
+	}
+
+	// 7. Compute Logits for ALL tokens
+	// Output: [seqLen, vocabSize]
+	logitsPtr, err := allocPtr(seqLen * vocabSize * 4)
+	if err != nil {
+		return tensor.Tensor{}, err
+	}
+	logits := tensor.NewTensor(tensor.NewShape(seqLen, vocabSize), m.config.DType, logitsPtr)
+
+	// Run output projection for all positions
+	m.outputHeadMatMul(statePtr, logitsPtr, seqLen, vocabSize, hiddenSize)
+
+	m.backend.Sync()
+
+	return logits, nil
+}
