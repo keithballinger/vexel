@@ -1210,6 +1210,213 @@ kernel void convert_f16_to_f32(
     out[gid] = float(in[gid]);
 }
 
+// =============================================================================
+// Q8_0 Quantization for KV Cache
+// Q8_0 format: 34 bytes per 32 elements (2-byte f16 scale + 32 int8 values)
+// Provides 4x memory reduction vs FP32, 2x vs FP16
+// =============================================================================
+
+constant int Q8_BLOCK_SIZE = 32;
+constant int Q8_BYTES_PER_BLOCK = 34;
+
+// Quantize FP32 to Q8_0
+// in: [n] float32, out: [n/32 * 34] bytes in Q8_0 format
+// Each threadgroup handles one block of 32 elements
+kernel void quantize_f32_to_q8_0(
+    device const float* in [[buffer(0)]],
+    device uchar* out [[buffer(1)]],
+    constant int& n [[buffer(2)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    // Each threadgroup handles one Q8_0 block (32 elements)
+    int blockIdx = gid;
+    int numBlocks = (n + Q8_BLOCK_SIZE - 1) / Q8_BLOCK_SIZE;
+    if (blockIdx >= numBlocks) return;
+
+    int baseIdx = blockIdx * Q8_BLOCK_SIZE;
+    device uchar* blockOut = out + blockIdx * Q8_BYTES_PER_BLOCK;
+
+    // Thread 0 finds max abs and writes scale
+    if (tid == 0) {
+        float maxAbs = 0.0f;
+        for (int i = 0; i < Q8_BLOCK_SIZE && (baseIdx + i) < n; i++) {
+            float val = in[baseIdx + i];
+            float absVal = abs(val);
+            if (absVal > maxAbs) maxAbs = absVal;
+        }
+
+        // Scale: max_abs / 127
+        float scale = maxAbs / 127.0f;
+
+        // Write scale as f16 (first 2 bytes)
+        half scaleHalf = half(scale);
+        device half* scalePtr = (device half*)blockOut;
+        *scalePtr = scaleHalf;
+
+        // Quantize values
+        float invScale = (scale > 0.0f) ? (127.0f / maxAbs) : 0.0f;
+        for (int i = 0; i < Q8_BLOCK_SIZE; i++) {
+            float val = (baseIdx + i < n) ? in[baseIdx + i] : 0.0f;
+            int8_t q = int8_t(round(val * invScale));
+            // Cast int8_t to uchar via uint8_t (bit-preserving cast)
+            blockOut[2 + i] = uchar(uint8_t(q));
+        }
+    }
+}
+
+// Dequantize Q8_0 to FP32
+// in: Q8_0 format, out: [n] float32
+kernel void dequantize_q8_0_to_f32(
+    device const uchar* in [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    constant int& n [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= (uint)n) return;
+
+    int blockIdx = gid / Q8_BLOCK_SIZE;
+    int inBlockIdx = gid % Q8_BLOCK_SIZE;
+
+    device const uchar* block = in + blockIdx * Q8_BYTES_PER_BLOCK;
+
+    // Read scale (f16)
+    half scaleHalf = *((device const half*)block);
+    float scale = float(scaleHalf);
+
+    // Read quantized value (int8)
+    int8_t q = *((device const int8_t*)(block + 2 + inBlockIdx));
+
+    out[gid] = float(q) * scale;
+}
+
+// SDPA decode with Q8_0 KV cache
+// Q: [numQHeads, headDim] in FP32
+// K/V: [kvLen, numKVHeads, headDim] in Q8_0 format
+// out: [numQHeads, headDim] in FP32
+// Each threadgroup handles one Q head
+constant int SDPA_Q8_THREADS = 256;
+
+// Helper to dequantize a single element from Q8_0 block
+inline float dequant_q8_0_elem(device const uchar* block, int elemInBlock) {
+    half scaleHalf = *((device const half*)block);
+    int8_t q = *((device const int8_t*)(block + 2 + elemInBlock));
+    return float(q) * float(scaleHalf);
+}
+
+kernel void sdpa_decode_q8_0(
+    device const float* Q [[buffer(0)]],
+    device const uchar* K [[buffer(1)]],
+    device const uchar* V [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int& kvLen [[buffer(4)]],
+    constant int& numQHeads [[buffer(5)]],
+    constant int& numKVHeads [[buffer(6)]],
+    constant int& headDim [[buffer(7)]],
+    constant float& scale [[buffer(8)]],
+    threadgroup float* shared [[threadgroup(0)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int qHead = gid;
+    if (qHead >= numQHeads) return;
+
+    // GQA: map Q head to KV head
+    int headsPerKV = numQHeads / numKVHeads;
+    int kvHead = qHead / headsPerKV;
+
+    int qOffset = qHead * headDim;
+
+    // Calculate Q8_0 layout for KV cache
+    // Each KV position has numKVHeads * headDim elements, quantized in blocks of 32
+    int kvPosElements = numKVHeads * headDim;
+    int blocksPerPos = (kvPosElements + Q8_BLOCK_SIZE - 1) / Q8_BLOCK_SIZE;
+    int bytesPerPos = blocksPerPos * Q8_BYTES_PER_BLOCK;
+
+    // This head's element range within KV position
+    int kvHeadStart = kvHead * headDim;
+
+    // Shared memory layout: [weights, warpVals]
+    threadgroup float* weights = shared;
+    threadgroup float* warpVals = shared + kvLen;
+
+    // Phase 1a: Compute Q·K scores with Q8_0 dequantization
+    float localMax = -INFINITY;
+    for (int pos = tid; pos < kvLen; pos += SDPA_Q8_THREADS) {
+        float dot = 0.0f;
+        for (int d = 0; d < headDim; d++) {
+            int elemIdx = kvHeadStart + d;
+            int blockIdx = elemIdx / Q8_BLOCK_SIZE;
+            int inBlockIdx = elemIdx % Q8_BLOCK_SIZE;
+            device const uchar* kBlock = K + pos * bytesPerPos + blockIdx * Q8_BYTES_PER_BLOCK;
+            float kVal = dequant_q8_0_elem(kBlock, inBlockIdx);
+            dot += Q[qOffset + d] * kVal;
+        }
+        float score = dot * scale;
+        weights[pos] = score;
+        localMax = max(localMax, score);
+    }
+
+    // Reduce max across threadgroup
+    localMax = simd_max(localMax);
+    if (simd_lane == 0) warpVals[simd_group] = localMax;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid < 8) {
+        localMax = warpVals[tid];
+        localMax = simd_max(localMax);
+        if (tid == 0) warpVals[0] = localMax;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float gMax = warpVals[0];
+
+    // Phase 1b: Compute exp(score - max) and sum
+    float localSum = 0.0f;
+    for (int pos = tid; pos < kvLen; pos += SDPA_Q8_THREADS) {
+        float expScore = exp(weights[pos] - gMax);
+        weights[pos] = expScore;
+        localSum += expScore;
+    }
+
+    // Reduce sum
+    localSum = simd_sum(localSum);
+    if (simd_lane == 0) warpVals[simd_group] = localSum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid < 8) {
+        localSum = warpVals[tid];
+        localSum = simd_sum(localSum);
+        if (tid == 0) warpVals[0] = localSum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float invSum = 1.0f / warpVals[0];
+
+    // Normalize weights
+    for (int pos = tid; pos < kvLen; pos += SDPA_Q8_THREADS) {
+        weights[pos] *= invSum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 2: Compute weighted sum of V with Q8_0 dequantization
+    int outOffset = qHead * headDim;
+    for (int d = tid; d < headDim; d += SDPA_Q8_THREADS) {
+        float sum = 0.0f;
+        int elemIdx = kvHeadStart + d;
+        int blockIdx = elemIdx / Q8_BLOCK_SIZE;
+        int inBlockIdx = elemIdx % Q8_BLOCK_SIZE;
+
+        for (int pos = 0; pos < kvLen; pos++) {
+            device const uchar* vBlock = V + pos * bytesPerPos + blockIdx * Q8_BYTES_PER_BLOCK;
+            float vVal = dequant_q8_0_elem(vBlock, inBlockIdx);
+            sum += weights[pos] * vVal;
+        }
+        out[outOffset + d] = sum;
+    }
+}
+
 // RMSNorm for FP16 input/output with FP32 accumulation
 // x: [rows, dim] in FP16, weight: [dim] in FP32, out: [rows, dim] in FP16
 constant int RMSNORM_F16_THREADGROUP_SIZE = 256;
@@ -2679,6 +2886,88 @@ void metal_convert_f16_to_f32(void* queuePtr, void* pipelinePtr,
     ];
 
     dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+// Q8_0 Quantization dispatch functions
+void metal_quantize_f32_to_q8_0(void* queuePtr, void* pipelinePtr,
+                                 void* in, void* out, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)in offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:1];
+    [encoder setBytes:&n length:sizeof(n) atIndex:2];
+
+    // One threadgroup per Q8_0 block (32 elements)
+    int numBlocks = (n + 31) / 32;
+    MTLSize threadgroups = MTLSizeMake(numBlocks, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(32, 1, 1);  // One thread per block
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_dequantize_q8_0_to_f32(void* queuePtr, void* pipelinePtr,
+                                   void* in, void* out, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)in offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:1];
+    [encoder setBytes:&n length:sizeof(n) atIndex:2];
+
+    // 256 threads per threadgroup, each thread handles one element
+    int threadsPerGroup = 256;
+    int numGroups = (n + threadsPerGroup - 1) / threadsPerGroup;
+    MTLSize threadgroups = MTLSizeMake(numGroups, 1, 1);
+    MTLSize threadsPerThreadgroup = MTLSizeMake(threadsPerGroup, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerThreadgroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_sdpa_decode_q8_0(void* queuePtr, void* pipelinePtr,
+                             void* Q, void* K, void* V, void* out,
+                             int kvLen, int numQHeads, int numKVHeads, int headDim,
+                             float scale) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBytes:&kvLen length:sizeof(kvLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+
+    // Shared memory: weights[kvLen] + warpVals[8]
+    int sharedBytes = (kvLen + 8) * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedBytes atIndex:0];
+
+    // One threadgroup per Q head
+    MTLSize threadgroups = MTLSizeMake(numQHeads, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
 void metal_matvec_q4_0_f16(void* queuePtr, void* pipelinePtr,

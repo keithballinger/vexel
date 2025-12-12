@@ -78,6 +78,11 @@ type Backend struct {
 	sdpaDecodeF16Pipeline  unsafe.Pointer
 	convertF32ToF16Pipeline unsafe.Pointer
 	convertF16ToF32Pipeline unsafe.Pointer
+
+	// Q8_0 Quantization pipelines (for KV cache)
+	quantizeF32ToQ8_0Pipeline   unsafe.Pointer
+	dequantizeQ8_0ToF32Pipeline unsafe.Pointer
+	sdpaDecodeQ8_0Pipeline      unsafe.Pointer
 }
 
 // NewBackend creates a new Metal backend.
@@ -136,6 +141,11 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.sdpaDecodeF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_f16"))
 	b.convertF32ToF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("convert_f32_to_f16"))
 	b.convertF16ToF32Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("convert_f16_to_f32"))
+
+	// Q8_0 quantization pipelines
+	b.quantizeF32ToQ8_0Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("quantize_f32_to_q8_0"))
+	b.dequantizeQ8_0ToF32Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("dequantize_q8_0_to_f32"))
+	b.sdpaDecodeQ8_0Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_q8_0"))
 
 	return b, nil
 }
@@ -513,4 +523,39 @@ func (b *Backend) ConvertF32ToF16(in, out tensor.DevicePtr, n int) {
 func (b *Backend) ConvertF16ToF32(in, out tensor.DevicePtr, n int) {
 	C.metal_convert_f16_to_f32(b.queue, b.convertF16ToF32Pipeline,
 		unsafe.Pointer(in.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
+}
+
+// =============================================================================
+// Q8_0 Quantization Operations
+// Q8_0 format: 34 bytes per 32 elements (2-byte f16 scale + 32 int8 values)
+// Provides 4x memory savings vs FP32 with minimal accuracy loss.
+// =============================================================================
+
+// QuantizeF32ToQ8_0 quantizes FP32 data to Q8_0 format.
+// in: [n] in FP32 (n must be multiple of 32)
+// out: [n/32 * 34] bytes in Q8_0 format
+func (b *Backend) QuantizeF32ToQ8_0(in, out tensor.DevicePtr, n int) {
+	C.metal_quantize_f32_to_q8_0(b.queue, b.quantizeF32ToQ8_0Pipeline,
+		unsafe.Pointer(in.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
+}
+
+// DequantizeQ8_0ToF32 dequantizes Q8_0 data to FP32.
+// in: [n/32 * 34] bytes in Q8_0 format
+// out: [n] in FP32
+func (b *Backend) DequantizeQ8_0ToF32(in, out tensor.DevicePtr, n int) {
+	C.metal_dequantize_q8_0_to_f32(b.queue, b.dequantizeQ8_0ToF32Pipeline,
+		unsafe.Pointer(in.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
+}
+
+// SDPAQ8_0 performs scaled dot-product attention with Q8_0 KV cache.
+// Q: [numQHeads, headDim] in FP32
+// K/V: [kvLen, numKVHeads, headDim] in Q8_0 format
+// out: [numQHeads, headDim] in FP32
+// Provides 4x KV cache memory savings.
+func (b *Backend) SDPAQ8_0(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	C.metal_sdpa_decode_q8_0(b.queue, b.sdpaDecodeQ8_0Pipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale))
 }

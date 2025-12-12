@@ -93,6 +93,9 @@ type BlockRuntime struct {
 
 	// Cached interface for FP16 operations
 	fp16Ops backend.FP16Ops
+
+	// Cached interface for Q8_0 operations
+	q8Ops backend.Q8_0Ops
 }
 
 // NewBlockRuntime creates a new block runtime with config.
@@ -117,6 +120,9 @@ func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 
 	// Cache FP16 operations interface check
 	br.fp16Ops, _ = b.(backend.FP16Ops)
+
+	// Cache Q8_0 operations interface check
+	br.q8Ops, _ = b.(backend.Q8_0Ops)
 
 	return br
 }
@@ -585,9 +591,11 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		upPtr = b.backend.Alloc(upBytes)
 	}
 
-	// FP16 KV cache support: allocate FP16 buffers if needed
+	// FP16/Q8_0 KV cache support: allocate conversion buffers if needed
 	useFP16KVCache := gpuCache != nil && gpuCache.UseFP16() && b.fp16Ops != nil
+	useQ8KVCache := gpuCache != nil && gpuCache.UseQ8_0() && b.q8Ops != nil
 	var kF16Ptr, vF16Ptr, qF16Ptr, attnOutF16Ptr tensor.DevicePtr
+	var kQ8Ptr, vQ8Ptr tensor.DevicePtr
 	if useFP16KVCache && scratchPtr.Location() != tensor.CPU {
 		// Allocate FP16 buffers for K, V (for cache storage)
 		kF16Ptr = b.backend.Alloc(kvSize * 2)  // FP16 = 2 bytes per element
@@ -597,6 +605,14 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			qF16Ptr = b.backend.Alloc(qSize * 2)
 			attnOutF16Ptr = b.backend.Alloc(qSize * 2)
 		}
+	}
+	if useQ8KVCache && scratchPtr.Location() != tensor.CPU {
+		// Allocate Q8_0 buffers for K, V (for cache storage)
+		// Q8_0: 34 bytes per 32 elements
+		numBlocks := (kvSize + Q8BlockSize - 1) / Q8BlockSize
+		q8Size := numBlocks * Q8BytesPerBlock
+		kQ8Ptr = b.backend.Alloc(q8Size)
+		vQ8Ptr = b.backend.Alloc(q8Size)
 	}
 
 	// 1. RMSNorm (Attention)
@@ -652,6 +668,11 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			b.fp16Ops.ConvertF32ToF16(kPtr, kF16Ptr, kvSize)
 			b.fp16Ops.ConvertF32ToF16(vPtr, vF16Ptr, kvSize)
 			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kF16Ptr, vF16Ptr, seqLen)
+		} else if useQ8KVCache {
+			// Quantize FP32 K/V to Q8_0 before storing in cache
+			b.q8Ops.QuantizeF32ToQ8_0(kPtr, kQ8Ptr, kvSize)
+			b.q8Ops.QuantizeF32ToQ8_0(vPtr, vQ8Ptr, kvSize)
+			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kQ8Ptr, vQ8Ptr, seqLen)
 		} else {
 			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kPtr, vPtr, seqLen)
 		}
@@ -680,6 +701,9 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				b.fp16Ops.ConvertF32ToF16(qPtr, qF16Ptr, qSize)
 				b.fp16Ops.SDPAF16(qF16Ptr, fullKPtr, fullVPtr, attnOutF16Ptr, fullSeqLen, numHeads, numKVHeads, headDim, scale)
 				b.fp16Ops.ConvertF16ToF32(attnOutF16Ptr, attnOutPtr, qSize)
+			} else if useQ8KVCache {
+				// Q8_0 path: use Q8_0 SDPA with FP32 Q and Q8_0 K/V
+				b.q8Ops.SDPAQ8_0(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale)
 			} else {
 				b.backend.SDPA(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale)
 			}

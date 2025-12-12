@@ -60,6 +60,27 @@ type FP16Ops interface {
 	SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32)
 }
 
+// Q8_0Ops is an optional interface for backends that support Q8_0 quantized KV cache.
+// Q8_0 format: 34 bytes per 32 elements (2-byte f16 scale + 32 int8 values).
+// Provides 4x memory savings vs FP32 with minimal accuracy loss.
+type Q8_0Ops interface {
+	// QuantizeF32ToQ8_0 quantizes FP32 data to Q8_0 format.
+	// in: [n] in FP32 (n must be multiple of 32)
+	// out: [n/32 * 34] bytes in Q8_0 format
+	QuantizeF32ToQ8_0(in, out tensor.DevicePtr, n int)
+
+	// DequantizeQ8_0ToF32 dequantizes Q8_0 data to FP32.
+	// in: [n/32 * 34] bytes in Q8_0 format
+	// out: [n] in FP32
+	DequantizeQ8_0ToF32(in, out tensor.DevicePtr, n int)
+
+	// SDPAQ8_0 performs SDPA with Q8_0 KV cache.
+	// Q: [numQHeads, headDim] in FP32
+	// K/V: [kvLen, numKVHeads, headDim] in Q8_0 format
+	// out: [numQHeads, headDim] in FP32
+	SDPAQ8_0(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32)
+}
+
 // Backend represents a compute backend that can execute tensor operations.
 // All compute operations use DevicePtr for device-agnostic memory access.
 // This interface is implemented by CPU, Metal, and CUDA backends.

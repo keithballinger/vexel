@@ -179,6 +179,26 @@ void metal_convert_f32_to_f16(void* queue, void* pipeline,
 void metal_convert_f16_to_f32(void* queue, void* pipeline,
                                void* in, void* out, int n);
 
+// =============================================================================
+// Q8_0 Quantization for KV Cache
+// Q8_0 format: 34 bytes per 32 elements (2-byte f16 scale + 32 int8 values)
+// =============================================================================
+
+// Quantize FP32 to Q8_0: in [n] -> out [n/32 * 34 bytes]
+void metal_quantize_f32_to_q8_0(void* queue, void* pipeline,
+                                 void* in, void* out, int n);
+
+// Dequantize Q8_0 to FP32: in [n/32 * 34 bytes] -> out [n]
+void metal_dequantize_q8_0_to_f32(void* queue, void* pipeline,
+                                   void* in, void* out, int n);
+
+// SDPA decode with Q8_0 KV cache
+// Q: [numQHeads, headDim] in FP32, K/V: Q8_0 format, out: [numQHeads, headDim] FP32
+void metal_sdpa_decode_q8_0(void* queue, void* pipeline,
+                             void* Q, void* K, void* V, void* out,
+                             int kvLen, int numQHeads, int numKVHeads, int headDim,
+                             float scale);
+
 // Q4_0 matvec with FP16 activations: C = A @ B^T
 // A: [1,K] in FP16, B: [N,K] in Q4_0, C: [1,N] in FP16
 void metal_matvec_q4_0_f16(void* queue, void* pipeline,
