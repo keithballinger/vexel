@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"unsafe"
+
 	"vexel/inference/backend"
 	"vexel/inference/kv"
 	"vexel/inference/memory"
@@ -130,14 +132,42 @@ func (m *ModelRuntime) outputHeadMatMul(statePtr, logitsPtr tensor.DevicePtr, ba
 	}
 
 	// Check if we can use quantized kernel
+	// Note: Quantized matmul only supports M=1 (matvec), so we process one at a time for batched
 	if m.OutputHead.IsQuantized() {
 		if quantBackend, ok := m.backend.(backend.QuantizedMatMul); ok {
-			switch m.OutputHead.QuantProfile() {
+			profile := m.OutputHead.QuantProfile()
+
+			// For batch operations, process one position at a time
+			if batchSize > 1 && (profile == tensor.Q6_K || profile == tensor.Q4_0 || profile == tensor.Q4_K) {
+				stateRowBytes := uintptr(hiddenSize * 4)
+				logitsRowBytes := uintptr(vocabSize * 4)
+
+				for i := 0; i < batchSize; i++ {
+					rowStatePtr := tensor.DevicePtrOffset(statePtr, uintptr(i)*stateRowBytes)
+					rowLogitsPtr := tensor.DevicePtrOffset(logitsPtr, uintptr(i)*logitsRowBytes)
+
+					switch profile {
+					case tensor.Q6_K:
+						quantBackend.MatMulQ6_K(rowStatePtr, m.OutputHead.DevicePtr(), rowLogitsPtr, 1, vocabSize, hiddenSize)
+					case tensor.Q4_0:
+						quantBackend.MatMulQ4_0(rowStatePtr, m.OutputHead.DevicePtr(), rowLogitsPtr, 1, vocabSize, hiddenSize)
+					case tensor.Q4_K:
+						quantBackend.MatMulQ4_K(rowStatePtr, m.OutputHead.DevicePtr(), rowLogitsPtr, 1, vocabSize, hiddenSize)
+					}
+				}
+				return
+			}
+
+			// Single position: use optimized kernel directly
+			switch profile {
 			case tensor.Q6_K:
 				quantBackend.MatMulQ6_K(statePtr, m.OutputHead.DevicePtr(), logitsPtr, batchSize, vocabSize, hiddenSize)
 				return
 			case tensor.Q4_0:
 				quantBackend.MatMulQ4_0(statePtr, m.OutputHead.DevicePtr(), logitsPtr, batchSize, vocabSize, hiddenSize)
+				return
+			case tensor.Q4_K:
+				quantBackend.MatMulQ4_K(statePtr, m.OutputHead.DevicePtr(), logitsPtr, batchSize, vocabSize, hiddenSize)
 				return
 			}
 		}
@@ -145,4 +175,77 @@ func (m *ModelRuntime) outputHeadMatMul(statePtr, logitsPtr tensor.DevicePtr, ba
 
 	// Fall back to F32 matmul
 	m.backend.MatMulTransposed(statePtr, m.OutputHead.DevicePtr(), logitsPtr, batchSize, vocabSize, hiddenSize)
+}
+
+// GetOutputHeadWeightsF32 returns the output head (lm_head) weights as F32.
+// This is useful for initializing Medusa heads from the base model.
+// Returns weights in [vocab_size, hidden_size] layout.
+func (m *ModelRuntime) GetOutputHeadWeightsF32() []float32 {
+	if m.OutputHead.DevicePtr().IsNil() {
+		return nil
+	}
+
+	vocabSize := m.config.VocabSize
+	hiddenSize := m.config.HiddenSize
+	numElements := vocabSize * hiddenSize
+
+	// Download from GPU
+	var dataSize int
+	if m.OutputHead.IsQuantized() {
+		profile := m.OutputHead.QuantProfile()
+		switch profile {
+		case tensor.Q6_K:
+			// Q6_K: 210 bytes per 256 elements
+			numBlocks := (numElements + 255) / 256
+			dataSize = numBlocks * 210
+		case tensor.Q4_K:
+			// Q4_K: 144 bytes per 256 elements
+			numBlocks := (numElements + 255) / 256
+			dataSize = numBlocks * 144
+		case tensor.Q4_0:
+			// Q4_0: 18 bytes per 32 elements
+			numBlocks := (numElements + 31) / 32
+			dataSize = numBlocks * 18
+		default:
+			// Unknown quantization, try F32
+			dataSize = numElements * 4
+		}
+	} else {
+		dataSize = numElements * 4
+	}
+
+	rawData := make([]byte, dataSize)
+	m.backend.ToHost(rawData, m.OutputHead.DevicePtr())
+	m.backend.Sync()
+
+	// Dequantize if needed
+	if m.OutputHead.IsQuantized() {
+		profile := m.OutputHead.QuantProfile()
+		var tensorType gguf.TensorType
+		switch profile {
+		case tensor.Q6_K:
+			tensorType = gguf.TensorTypeQ6_K
+		case tensor.Q4_K:
+			tensorType = gguf.TensorTypeQ4_K
+		case tensor.Q4_0:
+			tensorType = gguf.TensorTypeQ4_0
+		default:
+			tensorType = gguf.TensorTypeF32
+		}
+		return gguf.Dequantize(rawData, tensorType, numElements)
+	}
+
+	// Already F32, convert bytes to float32
+	result := make([]float32, numElements)
+	for i := 0; i < numElements; i++ {
+		bits := uint32(rawData[i*4]) | uint32(rawData[i*4+1])<<8 |
+			uint32(rawData[i*4+2])<<16 | uint32(rawData[i*4+3])<<24
+		result[i] = float32frombits(bits)
+	}
+	return result
+}
+
+// float32frombits converts a uint32 bit pattern to float32.
+func float32frombits(b uint32) float32 {
+	return *(*float32)(unsafe.Pointer(&b))
 }

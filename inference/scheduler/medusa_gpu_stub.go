@@ -8,7 +8,7 @@ import (
 )
 
 // createGPUTrainer returns nil when GPU training is not available.
-func createGPUTrainer(hiddenSize, vocabSize int, config medusa.OnlineConfig, b backend.Backend) medusa.Trainer {
+func createGPUTrainer(hiddenSize, vocabSize int, config medusa.OnlineConfig, b backend.Backend, lmHeadWeights []float32) medusa.Trainer {
 	return nil
 }
 

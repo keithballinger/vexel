@@ -38,8 +38,15 @@ type GPUOnlineTrainer struct {
 
 // NewGPUOnlineTrainer creates a GPU-accelerated online trainer.
 func NewGPUOnlineTrainer(hiddenSize, vocabSize int, config OnlineConfig, b backend.Backend) *GPUOnlineTrainer {
+	return NewGPUOnlineTrainerWithInit(hiddenSize, vocabSize, config, b, nil)
+}
+
+// NewGPUOnlineTrainerWithInit creates a GPU trainer with optional lm_head weight initialization.
+// If lmHeadWeights is provided, Medusa heads FC2 are initialized from it (instead of random).
+// This dramatically improves speculation accuracy since heads start knowing how to predict tokens.
+func NewGPUOnlineTrainerWithInit(hiddenSize, vocabSize int, config OnlineConfig, b backend.Backend, lmHeadWeights []float32) *GPUOnlineTrainer {
 	t := &GPUOnlineTrainer{
-		gpuHeads: NewGPUHeads(config.NumHeads, hiddenSize, vocabSize, b),
+		gpuHeads: NewGPUHeadsWithInit(config.NumHeads, hiddenSize, vocabSize, b, lmHeadWeights),
 		buffer:   NewRingBuffer(config.BufferCapacity),
 		config:   config,
 		rng:      rand.New(rand.NewSource(time.Now().UnixNano())),

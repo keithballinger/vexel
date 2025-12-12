@@ -31,14 +31,30 @@ import (
 
 var seqCounter int64
 
-// WikipediaSample is test text for feeding to the model.
+// corpusPath is the path to the Wikipedia corpus file
+var corpusPath = "data/wikipedia_corpus.txt"
+
+// loadCorpus loads the Wikipedia corpus from file
+func loadCorpus() (string, error) {
+	// Try relative path first
+	data, err := os.ReadFile(corpusPath)
+	if err != nil {
+		// Try from executable directory
+		execPath, _ := os.Executable()
+		execDir := strings.TrimSuffix(execPath, "/medusa_test")
+		altPath := execDir + "/" + corpusPath
+		data, err = os.ReadFile(altPath)
+		if err != nil {
+			return "", err
+		}
+	}
+	return string(data), nil
+}
+
+// WikipediaSample is fallback test text if corpus file not found.
 const WikipediaSample = `A computer is a machine that can be programmed to automatically carry out sequences of arithmetic or logical operations. Modern digital electronic computers can perform generic sets of operations known as programs. These programs enable computers to perform a wide range of tasks.
 
-The first computers were used primarily for numerical calculations. However, as any information can be encoded numerically, people soon realized that computers are capable of general-purpose information processing. The history of computing hardware covers the developments from early simple devices to aid calculation to modern day computers.
-
-Charles Babbage, an English mechanical engineer and polymath, originated the concept of a programmable computer. Considered the father of the computer, he conceptualized and invented the first mechanical computer in the early 19th century.
-
-Alan Turing is widely considered to be the father of theoretical computer science and artificial intelligence. During the Second World War, Turing worked for the Government Code and Cypher School at Bletchley Park, Britain's codebreaking centre.`
+The first computers were used primarily for numerical calculations. However, as any information can be encoded numerically, people soon realized that computers are capable of general-purpose information processing.`
 
 func main() {
 	modelPath := flag.String("model", "", "Path to GGUF model file")
@@ -132,19 +148,25 @@ func main() {
 	}
 
 	// Create Medusa scheduler
+	// Use greedy sampling for speculation to work - random sampling causes mismatches
 	schedCfg := scheduler.Config{
 		MaxBatchSize: 1,
 		MaxSequences: 1,
 		MaxTokens:    *maxTokens,
 		SamplerConfig: sampler.Config{
-			Temperature: 0.7,
-			TopK:        40,
-			TopP:        0.9,
+			Temperature: 0, // Greedy sampling for speculation
+			TopK:        0,
+			TopP:        0,
 		},
 	}
 
-	// Training config - conservative settings to avoid NaN gradients
+	// Training config - very low LR to preserve lm_head initialization
+	// When skip-training is set, use learning rate of 0 to disable weight updates
 	batchSize := 8
+	lr := float32(0.0001)
+	if *skipTraining {
+		lr = 0 // Disable weight updates to test pure initialization
+	}
 	medusaCfg := scheduler.MedusaConfig{
 		EnableOnlineTraining: true,
 		UseGPUTraining:       *useGPUTraining,
@@ -155,7 +177,7 @@ func main() {
 			WarmupSamples:  *warmupSamples,
 			MinAccuracy:    0.2,
 			BatchSize:      batchSize,
-			LearningRate:   0.002,
+			LearningRate:   lr,
 			TrainInterval:  100 * time.Millisecond,
 			EvalInterval:   1 * time.Second,
 		},
@@ -330,20 +352,52 @@ done:
 }
 
 func createPromptsFromWikipedia(n int) []string {
-	// Split Wikipedia sample into sentences
-	sentences := strings.Split(WikipediaSample, ".")
+	// Try to load the large corpus first
+	corpus, err := loadCorpus()
+	if err != nil {
+		log.Printf("Warning: Could not load corpus file: %v, using fallback", err)
+		corpus = WikipediaSample
+	} else {
+		log.Printf("Loaded corpus: %d characters", len(corpus))
+	}
+
+	// Split corpus into paragraphs (double newline separated)
+	paragraphs := strings.Split(corpus, "\n\n")
+
+	// Filter to reasonable length paragraphs (50-500 chars)
+	goodParagraphs := make([]string, 0, len(paragraphs))
+	for _, p := range paragraphs {
+		p = strings.TrimSpace(p)
+		// Skip headers (start with ===) and very short/long paragraphs
+		if len(p) >= 50 && len(p) <= 500 && !strings.HasPrefix(p, "===") {
+			goodParagraphs = append(goodParagraphs, p)
+		}
+	}
+	log.Printf("Found %d suitable paragraphs for prompts", len(goodParagraphs))
+
 	prompts := make([]string, 0, n)
 
-	for i := 0; i < n && i < len(sentences)-1; i++ {
-		// Use each sentence as a prompt, asking the model to continue
-		sentence := strings.TrimSpace(sentences[i])
-		if len(sentence) > 20 {
-			prompt := fmt.Sprintf("Continue this text: %s.", sentence)
-			prompts = append(prompts, prompt)
+	// Sample paragraphs evenly distributed across the corpus
+	if len(goodParagraphs) > 0 {
+		step := len(goodParagraphs) / n
+		if step < 1 {
+			step = 1
+		}
+		for i := 0; i < n && i*step < len(goodParagraphs); i++ {
+			p := goodParagraphs[i*step]
+			// Use first sentence or first 100 chars as prompt
+			endIdx := strings.Index(p, ".")
+			if endIdx > 20 && endIdx < 150 {
+				prompt := fmt.Sprintf("Continue this text: %s.", p[:endIdx])
+				prompts = append(prompts, prompt)
+			} else if len(p) > 100 {
+				prompt := fmt.Sprintf("Continue this text: %s", p[:100])
+				prompts = append(prompts, prompt)
+			}
 		}
 	}
 
-	// Add some general prompts if we need more
+	// Add fallback prompts if we need more
 	generalPrompts := []string{
 		"Explain how computers work in simple terms.",
 		"What was Alan Turing's contribution to computing?",

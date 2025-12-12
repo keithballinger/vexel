@@ -22,6 +22,10 @@ type GPUHead struct {
 	// CPU copies for gradient computation (hybrid approach)
 	FC1CPU []float32
 	FC2CPU []float32
+
+	// BypassFC1 skips FC1+ReLU, using FC2 directly on hidden state
+	// Set true when initialized from lm_head to preserve the learned representation
+	BypassFC1 bool
 }
 
 // GPUHeads manages multiple Medusa prediction heads with GPU acceleration.
@@ -53,6 +57,13 @@ type GPUHeads struct {
 
 // NewGPUHeads creates GPU-accelerated Medusa heads.
 func NewGPUHeads(numHeads, hiddenSize, vocabSize int, b backend.Backend) *GPUHeads {
+	return NewGPUHeadsWithInit(numHeads, hiddenSize, vocabSize, b, nil)
+}
+
+// NewGPUHeadsWithInit creates GPUHeads with optional initialization from lm_head weights.
+// If lmHeadWeights is provided (shape [vocab_size, hidden_size]), FC2 is initialized from it
+// instead of random. This significantly improves speculation accuracy.
+func NewGPUHeadsWithInit(numHeads, hiddenSize, vocabSize int, b backend.Backend, lmHeadWeights []float32) *GPUHeads {
 	h := &GPUHeads{
 		NumHeads:   numHeads,
 		HiddenSize: hiddenSize,
@@ -61,9 +72,11 @@ func NewGPUHeads(numHeads, hiddenSize, vocabSize int, b backend.Backend) *GPUHea
 		backend:    b,
 	}
 
-	// Xavier initialization scale
+	// Xavier initialization scale for FC1
 	scale1 := float32(math.Sqrt(2.0 / float64(hiddenSize)))
-	scale2 := float32(math.Sqrt(2.0 / float64(hiddenSize)))
+
+	// Check if we have lm_head weights for FC2 initialization
+	hasLMHead := len(lmHeadWeights) == vocabSize*hiddenSize
 
 	for i := 0; i < numHeads; i++ {
 		// Allocate GPU memory
@@ -73,15 +86,42 @@ func NewGPUHeads(numHeads, hiddenSize, vocabSize int, b backend.Backend) *GPUHea
 		h.heads[i].FC1 = b.Alloc(fc1Size)
 		h.heads[i].FC2 = b.Alloc(fc2Size)
 
-		// Initialize on CPU
+		// Initialize FC1 on CPU
 		h.heads[i].FC1CPU = make([]float32, hiddenSize*hiddenSize)
-		h.heads[i].FC2CPU = make([]float32, hiddenSize*vocabSize)
-
-		for j := range h.heads[i].FC1CPU {
-			h.heads[i].FC1CPU[j] = (rand.Float32()*2 - 1) * scale1
+		if hasLMHead {
+			// When initializing from lm_head, bypass FC1 entirely
+			// This allows hidden state to pass directly to FC2 (which is lm_head)
+			h.heads[i].BypassFC1 = true
+			// Still need identity FC1 for GPU training path
+			for j := 0; j < hiddenSize; j++ {
+				h.heads[i].FC1CPU[j*hiddenSize+j] = 1.0
+			}
+		} else {
+			// Random initialization with near-identity for normal training
+			for j := range h.heads[i].FC1CPU {
+				h.heads[i].FC1CPU[j] = (rand.Float32()*2 - 1) * scale1 * 0.1 // Small init
+			}
+			for j := 0; j < hiddenSize; j++ {
+				h.heads[i].FC1CPU[j*hiddenSize+j] += 0.9 // Near-identity on diagonal
+			}
 		}
-		for j := range h.heads[i].FC2CPU {
-			h.heads[i].FC2CPU[j] = (rand.Float32()*2 - 1) * scale2
+
+		// Initialize FC2 on CPU
+		h.heads[i].FC2CPU = make([]float32, hiddenSize*vocabSize)
+		if hasLMHead {
+			// Copy from lm_head weights (transposed: lm_head is [vocab, hidden], FC2 is [hidden, vocab])
+			for hi := 0; hi < hiddenSize; hi++ {
+				for vi := 0; vi < vocabSize; vi++ {
+					// lmHeadWeights[vi * hiddenSize + hi] -> FC2CPU[hi * vocabSize + vi]
+					h.heads[i].FC2CPU[hi*vocabSize+vi] = lmHeadWeights[vi*hiddenSize+hi]
+				}
+			}
+		} else {
+			// Random initialization
+			scale2 := float32(math.Sqrt(2.0 / float64(hiddenSize)))
+			for j := range h.heads[i].FC2CPU {
+				h.heads[i].FC2CPU[j] = (rand.Float32()*2 - 1) * scale2
+			}
 		}
 
 		// Copy to GPU
@@ -152,19 +192,27 @@ func (h *GPUHeads) Forward(headIdx int, hidden []float32) []float32 {
 	hiddenSize := h.HiddenSize
 	vocabSize := h.VocabSize
 
-	// FC1: intermediate = LeakyReLU(hidden @ FC1)
-	// LeakyReLU with alpha=0.01 to prevent dead neurons
-	const leakyAlpha = float32(0.01)
-	intermediate := make([]float32, hiddenSize)
-	for i := 0; i < hiddenSize; i++ {
-		var sum float32
-		for j := 0; j < hiddenSize; j++ {
-			sum += hidden[j] * head.FC1CPU[j*hiddenSize+i]
-		}
-		if sum > 0 {
-			intermediate[i] = sum
-		} else {
-			intermediate[i] = leakyAlpha * sum
+	// Get intermediate representation
+	var intermediate []float32
+	if head.BypassFC1 {
+		// Bypass FC1+ReLU: use hidden state directly
+		// This preserves the lm_head initialization exactly
+		intermediate = hidden
+	} else {
+		// FC1: intermediate = LeakyReLU(hidden @ FC1)
+		// LeakyReLU with alpha=0.01 to prevent dead neurons
+		const leakyAlpha = float32(0.01)
+		intermediate = make([]float32, hiddenSize)
+		for i := 0; i < hiddenSize; i++ {
+			var sum float32
+			for j := 0; j < hiddenSize; j++ {
+				sum += hidden[j] * head.FC1CPU[j*hiddenSize+i]
+			}
+			if sum > 0 {
+				intermediate[i] = sum
+			} else {
+				intermediate[i] = leakyAlpha * sum
+			}
 		}
 	}
 
@@ -407,8 +455,8 @@ func (h *GPUHeads) TrainStep(samples []TrainingSample, lr float32) float32 {
 			validBatch, hiddenSize, hiddenSize)
 
 		// SGD update with weight decay on GPU: w = w*(1-lr*wd) - lr*grad
-		// Strong weight decay (0.1) prevents mode collapse during long training
-		const weightDecay = float32(0.1)
+		// Moderate weight decay - too high destroys good initialization
+		const weightDecay = float32(0.001)
 		scaledLR := lr / float32(validBatch)
 		trainOps.SGDUpdate(head.FC1, h.scratchGrad1, scaledLR, weightDecay, hiddenSize*hiddenSize)
 		trainOps.SGDUpdate(head.FC2, h.scratchGrad2, scaledLR, weightDecay, hiddenSize*vocabSize)

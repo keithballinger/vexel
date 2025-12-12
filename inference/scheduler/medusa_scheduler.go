@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"time"
 
 	"vexel/inference/medusa"
@@ -99,11 +100,31 @@ func NewMedusaScheduler(
 
 		// Create new trainer if we don't have pre-trained heads
 		if ms.trainer == nil {
+			// Get lm_head weights for initializing Medusa heads
+			// This dramatically improves speculation since heads start knowing how to predict tokens
+			lmHeadWeights := rt.GetOutputHeadWeightsF32()
+			if lmHeadWeights != nil {
+				// Check for variation in weights
+				var minW, maxW float32 = lmHeadWeights[0], lmHeadWeights[0]
+				var sumW float64
+				for _, w := range lmHeadWeights[:1000] { // Sample first 1000
+					if w < minW {
+						minW = w
+					}
+					if w > maxW {
+						maxW = w
+					}
+					sumW += float64(w)
+				}
+				fmt.Printf("Initializing Medusa heads from lm_head weights (%d elements, min=%.4f, max=%.4f, mean=%.6f)\n",
+					len(lmHeadWeights), minW, maxW, sumW/1000)
+			}
+
 			// Try GPU training if requested and available
 			if medusaConfig.UseGPUTraining && gpuTrainingAvailable() {
 				// Get backend from runtime for GPU training
 				if b := rt.Backend(); b != nil {
-					ms.trainer = createGPUTrainer(hiddenSize, vocabSize, medusaConfig.TrainingConfig, b)
+					ms.trainer = createGPUTrainer(hiddenSize, vocabSize, medusaConfig.TrainingConfig, b, lmHeadWeights)
 					if ms.trainer != nil {
 						fmt.Println("Using GPU-accelerated Medusa training")
 					}
@@ -313,14 +334,16 @@ func (ms *MedusaScheduler) collectTrainingSample(hidden []float32, tokenID int) 
 
 	// If we have enough history, create training samples
 	// When we have [(h0,t0), (h1,t1), (h2,t2), (h3,t3), (h4,t4)]:
-	// - hidden state h0 that predicted t0
-	// - should learn to predict future tokens [t1, t2, t3, t4]
-	if len(ms.recentTokens) > ms.medusaConfig.NumHeads {
-		// Use the OLDEST hidden state (h0) with the NEXT NumHeads tokens (t1, t2, t3, t4)
+	// - hidden state h0 produced logits for predicting t0
+	// - head 0 should predict t0 (same as base model)
+	// - head 1 should predict t1, head 2 -> t2, head 3 -> t3
+	// So targets are [t0, t1, t2, t3], NOT [t1, t2, t3, t4]!
+	if len(ms.recentTokens) >= ms.medusaConfig.NumHeads {
+		// Use the OLDEST hidden state (h0) with its future tokens [t0, t1, t2, t3]
 		oldestHidden := ms.recentHiddens[0]
-		futureTokens := ms.recentTokens[1 : ms.medusaConfig.NumHeads+1]
+		futureTokens := ms.recentTokens[0:ms.medusaConfig.NumHeads]
 
-		ms.trainer.AddSample(oldestHidden, futureTokens, len(ms.recentTokens)-1)
+		ms.trainer.AddSample(oldestHidden, futureTokens, len(ms.recentTokens))
 
 		// Slide window - remove oldest entry
 		ms.recentTokens = ms.recentTokens[1:]
@@ -428,26 +451,73 @@ func (ms *MedusaScheduler) runMedusaDecodeStep(ctx context.Context, batch []*Seq
 	numAccepted := 0
 	var finalToken int
 
-	for i := 0; i < numHeads; i++ {
-		targetLogits := allLogitsData[i*vocabSize : (i+1)*vocabSize]
-		targetToken := ms.sampler.Sample(targetLogits)
-
-		// Check if draft matches target
-		if draftTokens[i] == targetToken {
-			numAccepted++
-			ms.specMetrics.DraftTokensAccepted++
-		} else {
-			// Rejection: use target's token as the correction
-			finalToken = targetToken
-			break
+	// Debug: print draft vs target for first few tokens
+	debugSpec := os.Getenv("MEDUSA_DEBUG") != ""
+	if debugSpec {
+		// Also print a few values from lastHidden to verify it's changing
+		hiddenSample := ms.lastHidden[0]
+		if len(ms.lastHidden) > 100 {
+			hiddenSample = ms.lastHidden[100]
 		}
+		// Compare head 0's prediction with what the base model would predict
+		// by running logits[0] argmax (which should match head 0 if FC2 = lm_head)
+		logits0 := allLogitsData[0:vocabSize]
+		basePred := argmaxFloat32(logits0)
+		fmt.Printf("[Spec] inputToken=%d, head0=%d, basePred=%d, hidden[100]=%.4f\n",
+			inputToken, draftTokens[0], basePred, hiddenSample)
 	}
 
-	// If all drafts accepted, sample one more token from the last position
-	if numAccepted == numHeads {
-		lastLogits := allLogitsData[numHeads*vocabSize:]
-		finalToken = ms.sampler.Sample(lastLogits)
+	// IMPORTANT: Medusa head i predicts position +i relative to lastHidden.
+	// Since lastHidden is from position P-1:
+	// - head 0 predicts position P (which should equal inputToken)
+	// - head 1 predicts position P+1 (should match logits[0])
+	// - head 2 predicts position P+2 (should match logits[1])
+	// - etc.
+	// So we compare draftTokens[i+1] with logits[i] for i >= 0.
+	// First, verify that head 0's prediction matches inputToken.
+	if draftTokens[0] == inputToken {
+		// Head 0 correctly predicted inputToken
+		numAccepted++
+		ms.specMetrics.DraftTokensAccepted++
+		if debugSpec {
+			fmt.Printf("[Spec] head 0: draft=%d matches inputToken=%d\n", draftTokens[0], inputToken)
+		}
+
+		// Now check remaining heads against verification logits
+		for i := 0; i < numHeads-1; i++ {
+			targetLogits := allLogitsData[i*vocabSize : (i+1)*vocabSize]
+			targetToken := ms.sampler.Sample(targetLogits)
+
+			if debugSpec {
+				fmt.Printf("[Spec] head %d: draft=%d, target=%d, match=%v\n", i+1, draftTokens[i+1], targetToken, draftTokens[i+1] == targetToken)
+			}
+
+			// Check if draft[i+1] matches target (logits[i] predicts position P+1+i)
+			if draftTokens[i+1] == targetToken {
+				numAccepted++
+				ms.specMetrics.DraftTokensAccepted++
+			} else {
+				// Rejection: use target's token as the correction
+				finalToken = targetToken
+				break
+			}
+		}
+
+		// If all drafts accepted, sample one more token from the last position
+		if numAccepted == numHeads {
+			lastLogits := allLogitsData[(numHeads-1)*vocabSize : numHeads*vocabSize]
+			finalToken = ms.sampler.Sample(lastLogits)
+		}
+	} else {
+		if debugSpec {
+			fmt.Printf("[Spec] head 0: draft=%d != inputToken=%d (reject)\n", draftTokens[0], inputToken)
+		}
+		// Head 0 didn't match inputToken, so we can't use any drafts
+		// Use the token from standard decode
+		targetLogits := allLogitsData[0:vocabSize]
+		finalToken = ms.sampler.Sample(targetLogits)
 	}
+
 
 	// Step 6: Truncate KV cache to only keep accepted tokens
 	// The verification added (1 + numHeads) tokens to cache

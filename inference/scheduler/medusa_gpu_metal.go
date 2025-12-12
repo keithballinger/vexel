@@ -8,8 +8,10 @@ import (
 )
 
 // createGPUTrainer creates a GPU-accelerated trainer if available.
-func createGPUTrainer(hiddenSize, vocabSize int, config medusa.OnlineConfig, b backend.Backend) medusa.Trainer {
-	return medusa.NewGPUOnlineTrainer(hiddenSize, vocabSize, config, b)
+// lmHeadWeights should be the base model's output projection (lm_head) weights
+// in [vocab_size, hidden_size] layout for initializing Medusa heads.
+func createGPUTrainer(hiddenSize, vocabSize int, config medusa.OnlineConfig, b backend.Backend, lmHeadWeights []float32) medusa.Trainer {
+	return medusa.NewGPUOnlineTrainerWithInit(hiddenSize, vocabSize, config, b, lmHeadWeights)
 }
 
 // gpuTrainingAvailable returns true if GPU training is available.
