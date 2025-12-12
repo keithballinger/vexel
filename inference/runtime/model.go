@@ -96,14 +96,23 @@ func (m *ModelRuntime) CreatePagedKVCache(maxBlocks int) *kv.PagedKVCache {
 
 // CreateGPUKVCache creates a GPU-resident KV cache for faster inference.
 // This avoids CPU roundtrips for KV data during decode.
+// Automatically uses FP16 storage if the backend supports it (2x memory savings).
 func (m *ModelRuntime) CreateGPUKVCache(maxSeqLen int) *GPUKVCache {
 	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
-	cache := NewGPUKVCache(
+
+	// Auto-enable FP16 if backend supports it
+	useFP16 := false
+	if _, ok := m.backend.(backend.FP16Ops); ok {
+		useFP16 = true
+	}
+
+	cache := NewGPUKVCacheWithPrecision(
 		m.backend,
 		m.config.NumHiddenLayers,
 		m.config.NumKeyValueHeads,
 		headDim,
 		maxSeqLen,
+		useFP16,
 	)
 	m.gpuCache = cache
 	return cache

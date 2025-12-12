@@ -131,7 +131,11 @@ func main() {
 	if *useGPU && gpuAvailable() {
 		maxSeqLen := 512 // Max sequence length for GPU KV cache
 		gpuCache := rt.CreateGPUKVCache(maxSeqLen)
-		fmt.Printf("GPU KV cache: max seq len %d\n", maxSeqLen)
+		if gpuCache.UseFP16() {
+			fmt.Printf("GPU KV cache: max seq len %d (FP16 - 2x memory savings)\n", maxSeqLen)
+		} else {
+			fmt.Printf("GPU KV cache: max seq len %d (FP32)\n", maxSeqLen)
+		}
 		_ = gpuCache // Stored in runtime
 	} else {
 		maxBlocks := 256
