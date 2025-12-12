@@ -1,0 +1,649 @@
+package scheduler
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"time"
+
+	"vexel/inference/medusa"
+	"vexel/inference/pkg/tokenizer"
+	"vexel/inference/runtime"
+	"vexel/inference/tensor"
+)
+
+// MedusaConfig configures Medusa-enabled scheduling.
+type MedusaConfig struct {
+	// Enable online training of Medusa heads during inference
+	EnableOnlineTraining bool
+
+	// UseGPUTraining enables GPU-accelerated training (requires Metal backend)
+	UseGPUTraining bool
+
+	// Path to pre-trained Medusa heads (optional)
+	HeadsPath string
+
+	// Number of Medusa heads (future token predictions)
+	NumHeads int
+
+	// Training configuration
+	TrainingConfig medusa.OnlineConfig
+}
+
+// DefaultMedusaConfig returns reasonable defaults for Medusa scheduling.
+func DefaultMedusaConfig() MedusaConfig {
+	return MedusaConfig{
+		EnableOnlineTraining: true,
+		NumHeads:             4,
+		TrainingConfig:       medusa.DefaultOnlineConfig(),
+	}
+}
+
+// MedusaScheduler wraps Scheduler with Medusa speculative decoding support.
+type MedusaScheduler struct {
+	*Scheduler
+
+	trainer      medusa.Trainer
+	medusaConfig MedusaConfig
+
+	// Ring buffers for collecting (hidden, token) pairs during training
+	// We need to track historical hidden states to pair with future tokens
+	recentTokens  []int
+	recentHiddens [][]float32
+	maxRecent     int
+
+	// Cached hidden state from last decode (for Medusa head inference)
+	lastHidden []float32
+
+	// Speculative decoding metrics
+	specMetrics SpeculativeMetrics
+}
+
+// NewMedusaScheduler creates a Medusa-enabled scheduler.
+func NewMedusaScheduler(
+	rt *runtime.ModelRuntime,
+	tok *tokenizer.Tokenizer,
+	config Config,
+	medusaConfig MedusaConfig,
+) (*MedusaScheduler, error) {
+	base, err := NewScheduler(rt, tok, config)
+	if err != nil {
+		return nil, err
+	}
+
+	ms := &MedusaScheduler{
+		Scheduler:     base,
+		medusaConfig:  medusaConfig,
+		recentTokens:  make([]int, 0, medusaConfig.NumHeads+1),
+		recentHiddens: make([][]float32, 0, medusaConfig.NumHeads+1),
+		maxRecent:     medusaConfig.NumHeads + 1,
+	}
+
+	// Initialize trainer
+	if medusaConfig.EnableOnlineTraining {
+		hiddenSize := rt.Config().HiddenSize
+		vocabSize := rt.Config().VocabSize
+
+		// Try to load pre-trained heads
+		if medusaConfig.HeadsPath != "" {
+			heads, err := medusa.Load(medusaConfig.HeadsPath)
+			if err == nil {
+				ms.trainer = medusa.NewOnlineTrainerWithHeads(heads, medusaConfig.TrainingConfig)
+				fmt.Printf("Loaded Medusa heads from %s (phase: %s)\n",
+					medusaConfig.HeadsPath, ms.trainer.Phase())
+			} else {
+				fmt.Printf("Warning: could not load Medusa heads from %s: %v\n",
+					medusaConfig.HeadsPath, err)
+			}
+		}
+
+		// Create new trainer if we don't have pre-trained heads
+		if ms.trainer == nil {
+			// Try GPU training if requested and available
+			if medusaConfig.UseGPUTraining && gpuTrainingAvailable() {
+				// Get backend from runtime for GPU training
+				if b := rt.Backend(); b != nil {
+					ms.trainer = createGPUTrainer(hiddenSize, vocabSize, medusaConfig.TrainingConfig, b)
+					if ms.trainer != nil {
+						fmt.Println("Using GPU-accelerated Medusa training")
+					}
+				}
+			}
+
+			// Fall back to CPU training
+			if ms.trainer == nil {
+				ms.trainer = medusa.NewOnlineTrainer(hiddenSize, vocabSize, medusaConfig.TrainingConfig)
+				fmt.Println("Using CPU Medusa training")
+			}
+		}
+	}
+
+	return ms, nil
+}
+
+// Start begins the scheduler and trainer loops.
+func (ms *MedusaScheduler) Start(ctx context.Context) {
+	// Start online trainer if enabled
+	if ms.trainer != nil {
+		ms.trainer.Start(ctx)
+	}
+}
+
+// Stop stops the scheduler and trainer.
+func (ms *MedusaScheduler) Stop() {
+	if ms.trainer != nil {
+		ms.trainer.Stop()
+	}
+}
+
+// Run starts the Medusa scheduler's main loop.
+func (ms *MedusaScheduler) Run(ctx context.Context) error {
+	ms.Start(ctx)
+	defer ms.Stop()
+
+	ticker := time.NewTicker(1 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := ms.step(ctx); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// step performs a single scheduling iteration with Medusa support.
+func (ms *MedusaScheduler) step(ctx context.Context) error {
+	ready := ms.collectReady()
+	ms.metrics.ActiveSequences = len(ms.sequences)
+
+	batch := ms.formBatches(ready)
+	if len(batch) == 0 {
+		return nil
+	}
+
+	// Check if we should use Medusa speculation
+	useMedusa := ms.trainer != nil && ms.trainer.IsHot()
+
+	if useMedusa {
+		return ms.runMedusaDecodeStep(ctx, batch)
+	}
+
+	// Fall back to standard decode with sample collection
+	return ms.runDecodeStepWithTraining(ctx, batch)
+}
+
+// runDecodeStepWithTraining runs decode and collects training samples.
+func (ms *MedusaScheduler) runDecodeStepWithTraining(ctx context.Context, batch []*Sequence) error {
+	if len(batch) == 0 {
+		return nil
+	}
+
+	useGPUCache := ms.runtime.GPUKVCache() != nil
+
+	// Process each sequence - check if any need prefill
+	for _, seq := range batch {
+		if seq.State() == StatePending && len(seq.PromptTokens()) > 0 && !seq.IsPrefillComplete() {
+			if useGPUCache {
+				if err := ms.runGPUPrefill(seq); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+	}
+
+	// Filter to sequences that need decode
+	decodeSeqs := make([]*Sequence, 0, len(batch))
+	for _, seq := range batch {
+		if seq.State() == StateDecoding || (seq.State() == StatePending && seq.IsPrefillComplete()) {
+			decodeSeqs = append(decodeSeqs, seq)
+		}
+	}
+
+	if len(decodeSeqs) == 0 {
+		return nil
+	}
+
+	// Process one sequence at a time for training data collection
+	for _, seq := range decodeSeqs {
+		token, pos, hasMore := seq.NextInputToken()
+		if !hasMore {
+			token = 1
+			pos = 0
+		}
+
+		var logits tensor.Tensor
+		var hidden []float32
+		var err error
+
+		startTime := time.Now()
+
+		if useGPUCache && ms.trainer != nil {
+			// Use hidden-state-capturing decode for training
+			logits, hidden, err = ms.runtime.DecodeWithGPUKVAndHidden([]int{token}, pos)
+		} else if useGPUCache {
+			logits, err = ms.runtime.DecodeWithGPUKV([]int{token}, pos)
+		} else {
+			inputs := runtime.NewBatchRuntimeInputsWithPos([]int{token}, []int{pos}, nil)
+			logits, err = ms.runtime.DecodeStep(inputs)
+		}
+
+		decodeTime := time.Since(startTime)
+
+		if err != nil {
+			return err
+		}
+
+		ms.metrics.TotalTokens++
+		ms.metrics.DecodeTokens++
+		ms.metrics.DecodeTime += decodeTime
+
+		// Sample token
+		vocabSize := ms.runtime.Config().VocabSize
+		logitsData := ms.getLogitsOnCPU(logits, vocabSize)
+
+		if logitsData == nil {
+			seq.PushToken("?")
+			continue
+		}
+
+		seq.AdvancePosition()
+		if seq.State() == StatePending {
+			seq.SetState(StateDecoding)
+		}
+
+		tokenID := ms.sampler.Sample(logitsData)
+		seq.AddGeneratedToken(tokenID)
+
+		// Collect training sample if we have hidden state
+		if hidden != nil && ms.trainer != nil {
+			ms.collectTrainingSample(hidden, tokenID)
+		}
+
+		// Cache hidden state for potential speculation next step
+		ms.lastHidden = hidden
+
+		// Check for EOS
+		eosToken := 2
+		if ms.tokenizer != nil {
+			eosToken = ms.tokenizer.EOS()
+		}
+		if tokenID == eosToken {
+			seq.SetState(StateFinished)
+			seq.Close()
+			continue
+		}
+
+		// Check max tokens
+		if ms.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= ms.config.MaxTokens {
+			seq.SetState(StateFinished)
+			seq.Close()
+			continue
+		}
+
+		// Decode and push token
+		var text string
+		if ms.tokenizer != nil {
+			text, _ = ms.tokenizer.Decode([]int{tokenID})
+		} else {
+			text = fmt.Sprintf(" %d", tokenID)
+		}
+		seq.PushToken(text)
+	}
+
+	return nil
+}
+
+// collectTrainingSample adds a sample to the trainer's buffer.
+// We maintain sliding windows of (hidden, token) pairs.
+// When we have enough history, we can pair hidden state h0 with future tokens [t1, t2, t3, t4].
+func (ms *MedusaScheduler) collectTrainingSample(hidden []float32, tokenID int) {
+	// Make a copy of hidden state since it may be reused
+	hiddenCopy := make([]float32, len(hidden))
+	copy(hiddenCopy, hidden)
+
+	// Add current (hidden, token) pair to history
+	ms.recentTokens = append(ms.recentTokens, tokenID)
+	ms.recentHiddens = append(ms.recentHiddens, hiddenCopy)
+
+	// If we have enough history, create training samples
+	// When we have [(h0,t0), (h1,t1), (h2,t2), (h3,t3), (h4,t4)]:
+	// - hidden state h0 that predicted t0
+	// - should learn to predict future tokens [t1, t2, t3, t4]
+	if len(ms.recentTokens) > ms.medusaConfig.NumHeads {
+		// Use the OLDEST hidden state (h0) with the NEXT NumHeads tokens (t1, t2, t3, t4)
+		oldestHidden := ms.recentHiddens[0]
+		futureTokens := ms.recentTokens[1 : ms.medusaConfig.NumHeads+1]
+
+		ms.trainer.AddSample(oldestHidden, futureTokens, len(ms.recentTokens)-1)
+
+		// Slide window - remove oldest entry
+		ms.recentTokens = ms.recentTokens[1:]
+		ms.recentHiddens = ms.recentHiddens[1:]
+	}
+}
+
+// runMedusaDecodeStep uses Medusa heads for speculative decoding.
+func (ms *MedusaScheduler) runMedusaDecodeStep(ctx context.Context, batch []*Sequence) error {
+	if len(batch) == 0 {
+		return nil
+	}
+
+	// Only support single sequence for speculation
+	if len(batch) > 1 {
+		return ms.runDecodeStepWithTraining(ctx, batch)
+	}
+
+	seq := batch[0]
+	useGPUCache := ms.runtime.GPUKVCache() != nil
+
+	// Handle prefill first
+	if seq.State() == StatePending && len(seq.PromptTokens()) > 0 && !seq.IsPrefillComplete() {
+		if useGPUCache {
+			if err := ms.runGPUPrefill(seq); err != nil {
+				return err
+			}
+		}
+		// After prefill, fall back to normal decode to get initial hidden state
+		return ms.runDecodeStepWithTraining(ctx, batch)
+	}
+
+	// Check if sequence is ready for decode
+	if seq.State() != StateDecoding && !(seq.State() == StatePending && seq.IsPrefillComplete()) {
+		return nil
+	}
+
+	// If we don't have a cached hidden state, do a normal decode first
+	if ms.lastHidden == nil {
+		return ms.runDecodeStepWithTraining(ctx, batch)
+	}
+
+	// Get current input token and position
+	inputToken, pos, hasMore := seq.NextInputToken()
+	if !hasMore {
+		inputToken = 1
+		pos = 0
+	}
+
+	// Step 1: Generate draft tokens using Medusa heads
+	heads := ms.trainer.Heads()
+	numHeads := heads.GetNumHeads()
+	draftTokens := make([]int, numHeads)
+
+	for i := 0; i < numHeads; i++ {
+		logits := heads.Forward(i, ms.lastHidden)
+		if logits != nil {
+			draftTokens[i] = argmaxFloat32(logits)
+		}
+	}
+
+	ms.specMetrics.DraftTokensGenerated += numHeads
+
+	// Step 2: Build verification sequence: [input_token, draft_0, draft_1, ..., draft_K-1]
+	verifyTokens := make([]int, 1+numHeads)
+	verifyTokens[0] = inputToken
+	copy(verifyTokens[1:], draftTokens)
+
+	// Step 3: Run target model on all tokens at once
+	// First, save the current KV cache position for potential rollback
+	cache := ms.runtime.GPUKVCache()
+	startPos := pos
+	if cache != nil {
+		startPos = cache.SeqLen()
+	}
+
+	startTime := time.Now()
+	allLogits, hiddenStates, err := ms.runtime.VerifySpeculativeWithHidden(verifyTokens, startPos)
+	verifyTime := time.Since(startTime)
+
+	if err != nil {
+		// Fall back to standard decode on error
+		return ms.runDecodeStepWithTraining(ctx, batch)
+	}
+
+	ms.specMetrics.VerificationSteps++
+	ms.specMetrics.VerifyTime += verifyTime
+
+	// Step 4: Get logits and verify each draft token
+	vocabSize := ms.runtime.Config().VocabSize
+	allLogitsData := ms.getLogitsOnCPU(allLogits, (1+numHeads)*vocabSize)
+
+	if allLogitsData == nil {
+		return ms.runDecodeStepWithTraining(ctx, batch)
+	}
+
+	// Hidden states: hiddenStates[i] is the pre-norm hidden state for token i
+	// hiddenStates[0] -> input token
+	// hiddenStates[1] -> draft_0
+	// etc.
+
+	// Step 5: Accept tokens until first rejection
+	// logits[i] predicts token at position i+1
+	// So logits[0] predicts draft_0, logits[1] predicts draft_1, etc.
+	numAccepted := 0
+	var finalToken int
+
+	for i := 0; i < numHeads; i++ {
+		targetLogits := allLogitsData[i*vocabSize : (i+1)*vocabSize]
+		targetToken := ms.sampler.Sample(targetLogits)
+
+		// Check if draft matches target
+		if draftTokens[i] == targetToken {
+			numAccepted++
+			ms.specMetrics.DraftTokensAccepted++
+		} else {
+			// Rejection: use target's token as the correction
+			finalToken = targetToken
+			break
+		}
+	}
+
+	// If all drafts accepted, sample one more token from the last position
+	if numAccepted == numHeads {
+		lastLogits := allLogitsData[numHeads*vocabSize:]
+		finalToken = ms.sampler.Sample(lastLogits)
+	}
+
+	// Step 6: Truncate KV cache to only keep accepted tokens
+	// The verification added (1 + numHeads) tokens to cache
+	// We want to keep (1 + numAccepted) tokens (input + accepted drafts)
+	// But actually, we need to rollback to startPos + (1 + numAccepted)
+	if cache != nil {
+		newCacheLen := startPos + 1 + numAccepted
+		cache.Truncate(newCacheLen)
+	}
+
+	// Step 7: Output all accepted tokens + final token
+	acceptedTokens := make([]int, 0, numAccepted+1)
+
+	// First, output the accepted draft tokens
+	for i := 0; i < numAccepted; i++ {
+		acceptedTokens = append(acceptedTokens, draftTokens[i])
+	}
+
+	// Add the final token (correction or bonus token)
+	acceptedTokens = append(acceptedTokens, finalToken)
+
+	// Update metrics
+	ms.metrics.TotalTokens += len(acceptedTokens)
+	ms.metrics.DecodeTokens += len(acceptedTokens)
+
+	// Process each accepted token
+	eosToken := 2
+	if ms.tokenizer != nil {
+		eosToken = ms.tokenizer.EOS()
+	}
+
+	for _, tokenID := range acceptedTokens {
+		seq.AdvancePosition()
+		if seq.State() == StatePending {
+			seq.SetState(StateDecoding)
+		}
+
+		seq.AddGeneratedToken(tokenID)
+
+		// Check for EOS
+		if tokenID == eosToken {
+			seq.SetState(StateFinished)
+			seq.Close()
+			ms.lastHidden = nil
+			return nil
+		}
+
+		// Check max tokens
+		if ms.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= ms.config.MaxTokens {
+			seq.SetState(StateFinished)
+			seq.Close()
+			ms.lastHidden = nil
+			return nil
+		}
+
+		// Decode and push token
+		var text string
+		if ms.tokenizer != nil {
+			text, _ = ms.tokenizer.Decode([]int{tokenID})
+		} else {
+			text = fmt.Sprintf(" %d", tokenID)
+		}
+		seq.PushToken(text)
+	}
+
+	// Step 8: Use hidden states from VerifySpeculativeWithHidden
+	// The hidden state at position numAccepted is what we need for next speculation
+	// (position 0 = input token, position 1 = draft_0, etc.)
+	// After accepting numAccepted tokens + final token, the relevant hidden state is at index numAccepted
+	// because that's the position that produced the final token's logits
+
+	if len(hiddenStates) > numAccepted && hiddenStates[numAccepted] != nil {
+		ms.lastHidden = hiddenStates[numAccepted]
+
+		// Collect training samples for ALL positions we have hidden states for
+		// Each hidden state at position i predicts the token at position i+1
+		if ms.trainer != nil {
+			for i := 0; i < len(hiddenStates) && i < len(verifyTokens); i++ {
+				// Build future tokens starting from position i+1
+				futureStart := i + 1
+				if futureStart < len(verifyTokens) {
+					// The token at position i+1 is what this hidden state should predict
+					// For training, we want the actual tokens that follow
+					actualToken := verifyTokens[futureStart]
+					ms.collectTrainingSample(hiddenStates[i], actualToken)
+				}
+			}
+		}
+	} else {
+		ms.lastHidden = nil
+	}
+
+	return nil
+}
+
+// argmaxFloat32 returns the index of the maximum value in the slice.
+func argmaxFloat32(values []float32) int {
+	if len(values) == 0 {
+		return 0
+	}
+	maxIdx := 0
+	maxVal := values[0]
+	for i, v := range values {
+		if v > maxVal {
+			maxVal = v
+			maxIdx = i
+		}
+	}
+	return maxIdx
+}
+
+// MedusaMetrics returns Medusa-specific metrics.
+type MedusaMetrics struct {
+	Phase            string
+	SamplesCollected int64
+	TrainingSteps    int64
+	CurrentLoss      float32
+	HeadAccuracies   []float32
+
+	// Speculative decoding metrics
+	DraftTokensGenerated int
+	DraftTokensAccepted  int
+	AcceptanceRate       float64
+	EffectiveSpeedup     float64
+}
+
+// MedusaMetrics returns current Medusa training and speculation metrics.
+func (ms *MedusaScheduler) MedusaMetrics() MedusaMetrics {
+	result := MedusaMetrics{
+		DraftTokensGenerated: ms.specMetrics.DraftTokensGenerated,
+		DraftTokensAccepted:  ms.specMetrics.DraftTokensAccepted,
+		AcceptanceRate:       ms.specMetrics.AcceptanceRate(),
+		EffectiveSpeedup:     ms.specMetrics.Speedup(),
+	}
+
+	if ms.trainer == nil {
+		result.Phase = "disabled"
+		return result
+	}
+
+	m := ms.trainer.Metrics()
+	result.Phase = m.Phase.String()
+	result.SamplesCollected = m.SamplesCollected
+	result.TrainingSteps = m.TrainingSteps
+	result.CurrentLoss = m.CurrentLoss
+	result.HeadAccuracies = m.HeadAccuracies
+
+	return result
+}
+
+// SaveHeads saves the trained Medusa heads to a file.
+func (ms *MedusaScheduler) SaveHeads(path string) error {
+	if ms.trainer == nil {
+		return fmt.Errorf("no trainer initialized")
+	}
+	return ms.trainer.SaveHeads(path)
+}
+
+// Trainer returns the online trainer (for inspection/debugging).
+func (ms *MedusaScheduler) Trainer() medusa.Trainer {
+	return ms.trainer
+}
+
+// ForceHot forces the trainer into Hot phase for testing speculation.
+func (ms *MedusaScheduler) ForceHot() {
+	if ms.trainer != nil {
+		ms.trainer.ForceHot()
+	}
+}
+
+// getLogitsOnCPU returns logits as a float32 slice on CPU.
+func (ms *MedusaScheduler) getLogitsOnCPU(logits tensor.Tensor, numElements int) []float32 {
+	ptr := logits.DevicePtr()
+	if ptr.IsNil() {
+		return nil
+	}
+
+	// If already on CPU, use unsafe slice directly
+	if ptr.Location() == tensor.CPU {
+		return tensor.ToFloat32Slice(logits)
+	}
+
+	// GPU: need to copy to host
+	backend := ms.runtime.Backend()
+	if backend == nil {
+		return nil
+	}
+
+	hostData := make([]byte, numElements*4)
+	backend.ToHost(hostData, ptr)
+	backend.Sync()
+
+	result := make([]float32, numElements)
+	for i := 0; i < numElements; i++ {
+		bits := uint32(hostData[i*4]) | uint32(hostData[i*4+1])<<8 | uint32(hostData[i*4+2])<<16 | uint32(hostData[i*4+3])<<24
+		result[i] = math.Float32frombits(bits)
+	}
+	return result
+}

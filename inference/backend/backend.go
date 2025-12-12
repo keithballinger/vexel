@@ -81,6 +81,28 @@ type Q8_0Ops interface {
 	SDPAQ8_0(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32)
 }
 
+// TrainingOps is an optional interface for backends that support neural network training.
+// These operations enable GPU-accelerated gradient computation and weight updates.
+type TrainingOps interface {
+	// ReLUInplace applies ReLU activation in-place: x = max(0, x)
+	ReLUInplace(x tensor.DevicePtr, n int)
+
+	// ReLUBackward applies ReLU gradient mask: dx *= (x > 0)
+	// x: forward activations, dx: gradient (modified in place)
+	ReLUBackward(x, dx tensor.DevicePtr, n int)
+
+	// BatchedOuterProduct computes out[i,j] += sum_b(a[b,i] * b[b,j])
+	// a: [batch, M], b: [batch, N], out: [M, N]
+	// Used for computing weight gradients in backpropagation.
+	BatchedOuterProduct(a, b, out tensor.DevicePtr, batch, M, N int)
+
+	// SGDUpdate applies SGD weight update with weight decay: w = w*(1-lr*wd) - lr*grad
+	SGDUpdate(w, grad tensor.DevicePtr, lr, weightDecay float32, n int)
+
+	// Zero fills a buffer with zeros.
+	Zero(x tensor.DevicePtr, n int)
+}
+
 // Backend represents a compute backend that can execute tensor operations.
 // All compute operations use DevicePtr for device-agnostic memory access.
 // This interface is implemented by CPU, Metal, and CUDA backends.

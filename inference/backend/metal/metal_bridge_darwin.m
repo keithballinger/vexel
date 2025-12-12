@@ -8,6 +8,30 @@ static NSString* metalShaderSource = @R"(
 #include <metal_stdlib>
 using namespace metal;
 
+// Matrix multiplication: C = A @ B (non-transposed)
+// A: [M, K], B: [K, N], C: [M, N]
+// Each thread computes one element of C
+kernel void matmul_f32(
+    device const float* A [[buffer(0)]],
+    device const float* B [[buffer(1)]],
+    device float* C [[buffer(2)]],
+    constant int& M [[buffer(3)]],
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    int row = gid.y;
+    int col = gid.x;
+    if (row >= M || col >= N) return;
+
+    float sum = 0.0f;
+    for (int k = 0; k < K; k++) {
+        // A[row, k] * B[k, col]
+        sum += A[row * K + k] * B[k * N + col];
+    }
+    C[row * N + col] = sum;
+}
+
 // Matrix multiplication: C = A @ B^T with SIMD optimization
 // A: [M, K], B: [N, K], C: [M, N]
 // Each thread computes one element of C
@@ -1136,6 +1160,76 @@ kernel void silu_mul_f32(
     float g = gate[gid];
     float silu_g = g / (1.0f + exp(-g));
     out[gid] = silu_g * up[gid];
+}
+
+// =============================================================================
+// Training Kernels for Medusa Head Training
+// =============================================================================
+
+// LeakyReLU in-place: x = x > 0 ? x : alpha * x
+// Using alpha=0.01 to prevent dead neurons during training
+constant float LEAKY_RELU_ALPHA = 0.01f;
+
+kernel void relu_inplace_f32(
+    device float* x [[buffer(0)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    float val = x[gid];
+    x[gid] = val > 0.0f ? val : LEAKY_RELU_ALPHA * val;
+}
+
+// LeakyReLU backward: dx = dx * (x > 0 ? 1 : alpha)
+kernel void relu_backward_f32(
+    device const float* x [[buffer(0)]],      // forward input (pre-activation)
+    device float* dx [[buffer(1)]],           // gradient (modified in-place)
+    uint gid [[thread_position_in_grid]]
+) {
+    dx[gid] = (x[gid] > 0.0f) ? dx[gid] : LEAKY_RELU_ALPHA * dx[gid];
+}
+
+// Batched outer product for gradient accumulation
+// C[i,j] += sum_b(A[b,i] * B[b,j]) for all b in batch
+// A: [batch, M], B: [batch, N], C: [M, N]
+// Used for computing dFC1 and dFC2 gradients
+kernel void batched_outer_product_f32(
+    device const float* A [[buffer(0)]],      // [batch, M]
+    device const float* B [[buffer(1)]],      // [batch, N]
+    device float* C [[buffer(2)]],            // [M, N]
+    constant int& batch [[buffer(3)]],
+    constant int& M [[buffer(4)]],
+    constant int& N [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    int i = gid.y;  // M dimension
+    int j = gid.x;  // N dimension
+    if (i >= M || j >= N) return;
+
+    float sum = 0.0f;
+    for (int b = 0; b < batch; b++) {
+        sum += A[b * M + i] * B[b * N + j];
+    }
+    C[i * N + j] += sum;
+}
+
+/// SGD weight update with weight decay: w = w * (1 - lr * wd) - lr * grad
+// This is L2 regularization which prevents weights from growing unbounded
+kernel void sgd_update_f32(
+    device float* w [[buffer(0)]],
+    device const float* grad [[buffer(1)]],
+    constant float& lr [[buffer(2)]],
+    constant float& weightDecay [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    float decay = 1.0f - lr * weightDecay;
+    w[gid] = w[gid] * decay - lr * grad[gid];
+}
+
+// Zero out a buffer (for initializing gradients)
+kernel void zero_f32(
+    device float* x [[buffer(0)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    x[gid] = 0.0f;
 }
 
 // =============================================================================
@@ -2409,11 +2503,25 @@ void metal_matmul_transposed_f32(void* queuePtr, void* pipelinePtr,
     dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(N, M, 1));
 }
 
-void metal_matmul_f32(void* queue, void* pipeline,
+void metal_matmul_f32(void* queuePtr, void* pipelinePtr,
                       void* A, void* B, void* C,
                       int M, int N, int K) {
-    // For now, use transposed version
-    metal_matmul_transposed_f32(queue, pipeline, A, B, C, M, N, K);
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)A,
+        (__bridge id<MTLBuffer>)B,
+        (__bridge id<MTLBuffer>)C
+    ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&M length:sizeof(M)],
+        [NSData dataWithBytes:&N length:sizeof(N)],
+        [NSData dataWithBytes:&K length:sizeof(K)]
+    ];
+
+    // Grid covers output matrix [N, M]
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(N, M, 1));
 }
 
 // Optimized matrix-vector multiply: C = A @ B^T for M=1 case
@@ -2800,6 +2908,77 @@ void metal_mul_f32(void* queuePtr, void* pipelinePtr,
         (__bridge id<MTLBuffer>)out
     ];
 
+    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+// =============================================================================
+// Training Kernel C Dispatch Functions
+// =============================================================================
+
+void metal_relu_inplace_f32(void* queuePtr, void* pipelinePtr, void* x, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[(__bridge id<MTLBuffer>)x];
+    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+void metal_relu_backward_f32(void* queuePtr, void* pipelinePtr,
+                             void* x, void* dx, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)x,
+        (__bridge id<MTLBuffer>)dx
+    ];
+    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+void metal_batched_outer_product_f32(void* queuePtr, void* pipelinePtr,
+                                     void* A, void* B, void* C,
+                                     int batch, int M, int N) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)A,
+        (__bridge id<MTLBuffer>)B,
+        (__bridge id<MTLBuffer>)C
+    ];
+
+    NSArray* params = @[
+        [NSData dataWithBytes:&batch length:sizeof(batch)],
+        [NSData dataWithBytes:&M length:sizeof(M)],
+        [NSData dataWithBytes:&N length:sizeof(N)]
+    ];
+    // Grid is [N, M] to cover all output elements
+    dispatch_kernel(queue, pipeline, buffers, params, MTLSizeMake(N, M, 1));
+}
+
+void metal_sgd_update_f32(void* queuePtr, void* pipelinePtr,
+                          void* w, void* grad, float lr, float weightDecay, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)w,
+        (__bridge id<MTLBuffer>)grad
+    ];
+
+    NSArray* constants = @[
+        [NSData dataWithBytes:&lr length:sizeof(lr)],
+        [NSData dataWithBytes:&weightDecay length:sizeof(weightDecay)]
+    ];
+
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
+}
+
+void metal_zero_f32(void* queuePtr, void* pipelinePtr, void* x, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[(__bridge id<MTLBuffer>)x];
     dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
 }
 

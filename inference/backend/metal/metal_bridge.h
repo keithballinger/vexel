@@ -109,6 +109,29 @@ void metal_add_f32(void* queue, void* pipeline,
 void metal_mul_f32(void* queue, void* pipeline,
                    void* a, void* b, void* out, int n);
 
+// =============================================================================
+// Training Operations for Medusa Heads
+// =============================================================================
+
+// ReLU in-place: x = max(0, x)
+void metal_relu_inplace_f32(void* queue, void* pipeline, void* x, int n);
+
+// ReLU backward: dx = dx * (x > 0), masks gradients where input was <= 0
+void metal_relu_backward_f32(void* queue, void* pipeline, void* x, void* dx, int n);
+
+// Batched outer product: C[i,j] += sum_b(A[b,i] * B[b,j])
+// A: [batch, M], B: [batch, N], C: [M, N]
+void metal_batched_outer_product_f32(void* queue, void* pipeline,
+                                      void* A, void* B, void* C,
+                                      int batch, int M, int N);
+
+// SGD weight update with weight decay: w = w*(1-lr*wd) - lr*grad
+void metal_sgd_update_f32(void* queue, void* pipeline,
+                          void* w, void* grad, float lr, float weightDecay, int n);
+
+// Zero out buffer
+void metal_zero_f32(void* queue, void* pipeline, void* x, int n);
+
 void metal_embedding_f32(void* queue,
                          void* tokens, void* table, void* out,
                          int numTokens, int vocabSize, int dim);

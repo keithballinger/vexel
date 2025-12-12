@@ -47,7 +47,8 @@ type Backend struct {
 	pool *bufferPool
 
 	// Cached pipeline states
-	matmulPipeline               unsafe.Pointer
+	matmulPipeline               unsafe.Pointer // For matmul_transposed_f32 (C = A @ B^T)
+	matmulNonTransposedPipeline  unsafe.Pointer // For matmul_f32 (C = A @ B)
 	matvecPipeline               unsafe.Pointer
 	matvecQ4Pipeline             unsafe.Pointer
 	matvecQ4MultiOutputPipeline  unsafe.Pointer
@@ -83,6 +84,13 @@ type Backend struct {
 	quantizeF32ToQ8_0Pipeline   unsafe.Pointer
 	dequantizeQ8_0ToF32Pipeline unsafe.Pointer
 	sdpaDecodeQ8_0Pipeline      unsafe.Pointer
+
+	// Training pipelines (for Medusa heads)
+	reluInplacePipeline        unsafe.Pointer
+	reluBackwardPipeline       unsafe.Pointer
+	batchedOuterProductPipeline unsafe.Pointer
+	sgdUpdatePipeline          unsafe.Pointer
+	zeroPipeline               unsafe.Pointer
 }
 
 // NewBackend creates a new Metal backend.
@@ -111,6 +119,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 
 	// Create pipeline states
 	b.matmulPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_transposed_f32"))
+	b.matmulNonTransposedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_f32"))
 	b.matvecPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_transposed_f32"))
 	b.matvecQ4Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_transposed_f32"))
 	b.matvecQ4MultiOutputPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_multi_output_f32"))
@@ -146,6 +155,13 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.quantizeF32ToQ8_0Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("quantize_f32_to_q8_0"))
 	b.dequantizeQ8_0ToF32Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("dequantize_q8_0_to_f32"))
 	b.sdpaDecodeQ8_0Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_q8_0"))
+
+	// Training pipelines
+	b.reluInplacePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("relu_inplace_f32"))
+	b.reluBackwardPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("relu_backward_f32"))
+	b.batchedOuterProductPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("batched_outer_product_f32"))
+	b.sgdUpdatePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sgd_update_f32"))
+	b.zeroPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("zero_f32"))
 
 	return b, nil
 }
@@ -271,7 +287,7 @@ func (b *Backend) CopyBuffer(src tensor.DevicePtr, srcOffset int, dst tensor.Dev
 
 // MatMul performs C = A @ B where A is [M,K], B is [K,N], C is [M,N].
 func (b *Backend) MatMul(a, bMat, out tensor.DevicePtr, m, n, k int) {
-	C.metal_matmul_f32(b.queue, b.matmulPipeline,
+	C.metal_matmul_f32(b.queue, b.matmulNonTransposedPipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(m), C.int(n), C.int(k))
 }
@@ -284,7 +300,8 @@ func (b *Backend) MatMulTransposed(a, bMat, out tensor.DevicePtr, m, n, k int) {
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(n), C.int(k))
 	} else {
-		C.metal_matmul_f32(b.queue, b.matmulPipeline,
+		// Use transposed matmul kernel
+		C.metal_matmul_transposed_f32(b.queue, b.matmulPipeline,
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(m), C.int(n), C.int(k))
 	}
@@ -391,6 +408,44 @@ func (b *Backend) Add(a, bIn, out tensor.DevicePtr, n int) {
 func (b *Backend) Mul(a, bIn, out tensor.DevicePtr, n int) {
 	C.metal_mul_f32(b.queue, b.mulPipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bIn.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
+}
+
+// =============================================================================
+// Training Operations for Medusa Heads
+// =============================================================================
+
+// ReLUInplace performs in-place ReLU: x = max(0, x)
+func (b *Backend) ReLUInplace(x tensor.DevicePtr, n int) {
+	C.metal_relu_inplace_f32(b.queue, b.reluInplacePipeline,
+		unsafe.Pointer(x.Addr()), C.int(n))
+}
+
+// ReLUBackward performs ReLU backward: dx = dx * (x > 0)
+// x is the pre-ReLU input, dx is the gradient (modified in-place)
+func (b *Backend) ReLUBackward(x, dx tensor.DevicePtr, n int) {
+	C.metal_relu_backward_f32(b.queue, b.reluBackwardPipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(dx.Addr()), C.int(n))
+}
+
+// BatchedOuterProduct computes out[i,j] += sum_b(a[b,i] * bIn[b,j])
+// a: [batch, M], bIn: [batch, N], out: [M, N]
+// Used for computing weight gradients dFC1 and dFC2
+func (b *Backend) BatchedOuterProduct(a, bIn, out tensor.DevicePtr, batch, M, N int) {
+	C.metal_batched_outer_product_f32(b.queue, b.batchedOuterProductPipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bIn.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(batch), C.int(M), C.int(N))
+}
+
+// SGDUpdate performs w = w*(1-lr*wd) - lr*grad (SGD with weight decay)
+func (b *Backend) SGDUpdate(w, grad tensor.DevicePtr, lr, weightDecay float32, n int) {
+	C.metal_sgd_update_f32(b.queue, b.sgdUpdatePipeline,
+		unsafe.Pointer(w.Addr()), unsafe.Pointer(grad.Addr()), C.float(lr), C.float(weightDecay), C.int(n))
+}
+
+// Zero sets all elements to zero
+func (b *Backend) Zero(x tensor.DevicePtr, n int) {
+	C.metal_zero_f32(b.queue, b.zeroPipeline,
+		unsafe.Pointer(x.Addr()), C.int(n))
 }
 
 // Embedding performs embedding lookup.
