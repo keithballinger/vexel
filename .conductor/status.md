@@ -12,10 +12,11 @@ Performance optimization - FP16 + batched copy complete.
 ## Latest Performance Metrics (Warm Start)
 | Metric | Vexel | llama.cpp | Gap |
 |--------|-------|-----------|-----|
-| Prefill | **~272 tok/s** | ~748 tok/s | **2.7x** |
-| Decode | **~165 tok/s** | ~258 tok/s | **1.6x** |
+| Prefill | **~175 tok/s** | ~748 tok/s | **4.3x** |
+| Decode | **~168 tok/s** | ~258 tok/s | **1.5x** |
 
 *Note: Cold start prefill is ~89 tok/s due to shader compilation.*
+*Note: Prefill varies 134-181 tok/s; decode is stable at 166-168 tok/s.*
 
 **Model:** TinyLlama 1.1B Q4_0
 **Hardware:** M4 Pro
@@ -47,10 +48,15 @@ Performance optimization - FP16 + batched copy complete.
 Report: perf_reports/report-20251213-073746.md
 
 ## Recent Progress
+- [x] **Tested Q4_0 kernel variants for decode (2025-12-13)**
+  - Multi-output (8/tg): 167-168 tok/s (best)
+  - NR2 (16/tg): 165 tok/s
+  - NR4 (32/tg): 161 tok/s
+  - Collab/Optimized: 147-150 tok/s
+  - Switched to multi-output kernel for decode
 - [x] **Integrated buffer copy with command batching (2025-12-13)**
   - Added CopyBufferBatched that uses same command buffer as compute ops
   - Eliminated per-layer sync overhead for KV cache updates
-  - Result: Warm prefill 272 tok/s (2.7x gap to llama.cpp)
 - [x] **Fixed FP16 KV cache race condition (2025-12-13)**
   - Root cause: F32→F16 conversions added to batched command buffer, but CopyBuffer created separate immediate command buffer
   - Fix: Added EndBatch/BeginBatch sync after conversions before AppendKV (block.go:691-696)
