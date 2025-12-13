@@ -24,6 +24,9 @@ void metal_copy_from_buffer(void* dst, void* buffer, size_t size);
 // GPU-to-GPU buffer copy (uses blit encoder)
 void metal_copy_buffer(void* queue, void* srcBuffer, size_t srcOffset,
                        void* dstBuffer, size_t dstOffset, size_t size);
+// Batched version - integrates with command batching, no separate commit
+void metal_copy_buffer_batched(void* queue, void* srcBuffer, size_t srcOffset,
+                               void* dstBuffer, size_t dstOffset, size_t size);
 
 // Shader compilation
 void* metal_compile_library(void* device, const char* source);

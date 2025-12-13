@@ -22,6 +22,9 @@ type Batcher interface {
 // This avoids roundtripping through CPU memory.
 type BufferCopier interface {
 	CopyBuffer(src tensor.DevicePtr, srcOffset int, dst tensor.DevicePtr, dstOffset int, size int)
+	// CopyBufferBatched copies data from one GPU buffer to another, integrating with command batching.
+	// When batching is active, this avoids creating a separate command buffer and sync overhead.
+	CopyBufferBatched(src tensor.DevicePtr, srcOffset int, dst tensor.DevicePtr, dstOffset int, size int)
 }
 
 // QuantizedMatMul is an optional interface for backends that support quantized matrix operations.

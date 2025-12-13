@@ -322,6 +322,13 @@ func (b *Backend) CopyBuffer(src tensor.DevicePtr, srcOffset int, dst tensor.Dev
 		unsafe.Pointer(dst.Addr()), C.size_t(dstOffset), C.size_t(size))
 }
 
+// CopyBufferBatched copies data integrating with command batching.
+// When batching is active, this avoids creating a separate command buffer.
+func (b *Backend) CopyBufferBatched(src tensor.DevicePtr, srcOffset int, dst tensor.DevicePtr, dstOffset int, size int) {
+	C.metal_copy_buffer_batched(b.queue, unsafe.Pointer(src.Addr()), C.size_t(srcOffset),
+		unsafe.Pointer(dst.Addr()), C.size_t(dstOffset), C.size_t(size))
+}
+
 // =============================================================================
 // Compute Kernels
 // =============================================================================

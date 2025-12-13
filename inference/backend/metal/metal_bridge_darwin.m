@@ -3163,6 +3163,41 @@ void metal_copy_buffer(void* queue, void* srcBuffer, size_t srcOffset,
     // [commandBuffer waitUntilCompleted]; // Make async to avoid CPU blocking
 }
 
+// Global batch state (thread-local would be better for multi-threading)
+static id<MTLCommandQueue> g_batchQueue = nil;
+static id<MTLCommandBuffer> g_batchCmdBuffer = nil;
+static id<MTLComputeCommandEncoder> g_batchEncoder = nil;
+
+// GPU-to-GPU buffer copy that integrates with command batching.
+// If in batch mode, ends compute encoder, does blit on same command buffer,
+// then starts a new compute encoder - avoiding separate command buffer overhead.
+void metal_copy_buffer_batched(void* queue, void* srcBuffer, size_t srcOffset,
+                               void* dstBuffer, size_t dstOffset, size_t size) {
+    id<MTLBuffer> src = (__bridge id<MTLBuffer>)srcBuffer;
+    id<MTLBuffer> dst = (__bridge id<MTLBuffer>)dstBuffer;
+
+    if (g_batchEncoder != nil) {
+        // In batch mode: end compute encoder, do blit, start new compute encoder
+        // All on the same command buffer - no sync needed
+        [g_batchEncoder endEncoding];
+
+        id<MTLBlitCommandEncoder> blit = [g_batchCmdBuffer blitCommandEncoder];
+        [blit copyFromBuffer:src sourceOffset:srcOffset toBuffer:dst destinationOffset:dstOffset size:size];
+        [blit endEncoding];
+
+        // Resume compute encoding on the same command buffer
+        g_batchEncoder = [g_batchCmdBuffer computeCommandEncoder];
+    } else {
+        // Not in batch mode: use standard copy
+        id<MTLCommandQueue> q = (__bridge id<MTLCommandQueue>)queue;
+        id<MTLCommandBuffer> commandBuffer = [q commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+        [blit copyFromBuffer:src sourceOffset:srcOffset toBuffer:dst destinationOffset:dstOffset size:size];
+        [blit endEncoding];
+        [commandBuffer commit];
+    }
+}
+
 // Shader compilation
 void* metal_compile_library(void* device, const char* source) {
     id<MTLDevice> dev = (__bridge id<MTLDevice>)device;
@@ -3221,10 +3256,7 @@ void metal_sync(void* commandQueue) {
 // =============================================================================
 // Command Buffer Batching
 // =============================================================================
-// Global batch state (thread-local would be better for multi-threading)
-static id<MTLCommandQueue> g_batchQueue = nil;
-static id<MTLCommandBuffer> g_batchCmdBuffer = nil;
-static id<MTLComputeCommandEncoder> g_batchEncoder = nil;
+// Global batch state defined earlier in file (see forward declarations)
 
 // Begin a batch of operations - all subsequent kernel dispatches use the same command buffer
 void metal_begin_batch(void* queuePtr) {

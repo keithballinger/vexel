@@ -155,11 +155,11 @@ func (c *GPUKVCache) AppendKV(layerIdx int, kPtr, vPtr tensor.DevicePtr, newToke
 	copySize := newTokens * tokenSize
 
 	// Copy new K/V into cache at the right position using GPU-to-GPU copy
+	// Use batched version to integrate with command batching (avoids sync overhead)
 	if copier, ok := c.backend.(backend.BufferCopier); ok {
-		copier.CopyBuffer(kPtr, 0, c.kBuffers[layerIdx], offset, copySize)
-		copier.CopyBuffer(vPtr, 0, c.vBuffers[layerIdx], offset, copySize)
+		copier.CopyBufferBatched(kPtr, 0, c.kBuffers[layerIdx], offset, copySize)
+		copier.CopyBufferBatched(vPtr, 0, c.vBuffers[layerIdx], offset, copySize)
 	}
-	// Note: No sync needed - Metal command queue serializes work in submission order
 
 	// Calculate the sequence length including the new tokens BEFORE updating
 	fullSeqLen = c.seqLen + newTokens
