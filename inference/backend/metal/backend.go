@@ -369,9 +369,8 @@ func (b *Backend) MatMulQ4_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 				C.int(n), C.int(k))
 			return
 		}
-		// Single row (decode) - use NR2 matvec (2 outputs per simdgroup)
-		// Better activation reuse: load activations once, compute 2 outputs
-		C.metal_matvec_q4_0_nr2_f32(b.queue, b.matvecQ4NR2Pipeline,
+		// Single row (decode) - use multi-output matvec (8 outputs per threadgroup)
+		C.metal_matvec_q4_0_multi_output_f32(b.queue, b.matvecQ4MultiOutputPipeline,
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(n), C.int(k))
 	} else if m >= 8 && b.matmulQ4SimdgroupPipeline != nil {

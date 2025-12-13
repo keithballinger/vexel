@@ -241,6 +241,7 @@ func main() {
 		}
 
 		cancel()
+		runtime.PrintProfile() // Print profiling stats if DEBUG_PROFILE=1
 		os.Exit(0)
 	}()
 
@@ -259,6 +260,9 @@ func main() {
 		go sched.Run(runCtx)
 		internal.RunChatLoopWithConfig(os.Stdin, os.Stdout, sched, replConfig)
 	}
+
+	// Print profiling stats if enabled
+	runtime.PrintProfile()
 }
 
 // resolveModelPath finds the model file from the given path.
