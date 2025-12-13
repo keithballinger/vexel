@@ -39,6 +39,10 @@ void metal_sync(void* commandQueue);
 void metal_begin_batch(void* commandQueue);
 void metal_end_batch(void);
 
+// GPU Profiling - enable with VEXEL_GPU_PROFILE=1
+void metal_get_gpu_profile(uint64_t* totalTimeNs, uint64_t* batchCount, uint64_t* kernelCount, uint64_t* syncTimeNs);
+void metal_reset_gpu_profile(void);
+
 // Kernel execution
 void metal_matmul_f32(void* queue, void* pipeline,
                       void* A, void* B, void* C,

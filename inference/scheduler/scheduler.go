@@ -6,6 +6,7 @@ import (
 	"math"
 	"sync"
 	"time"
+	"unsafe"
 	"vexel/inference/pkg/sampler"
 	"vexel/inference/pkg/tokenizer"
 	"vexel/inference/runtime"
@@ -595,6 +596,7 @@ func (s *Scheduler) Metrics() SchedulerMetrics {
 
 // getLogitsOnCPU returns logits as a float32 slice on CPU.
 // If the logits are on GPU, it copies them to host first.
+// NOTE: Caller must ensure GPU work is complete (e.g., Decode functions call Sync).
 func (s *Scheduler) getLogitsOnCPU(logits tensor.Tensor, numElements int) []float32 {
 	ptr := logits.DevicePtr()
 	if ptr.IsNil() {
@@ -613,17 +615,13 @@ func (s *Scheduler) getLogitsOnCPU(logits tensor.Tensor, numElements int) []floa
 		return nil
 	}
 
-	// Allocate host buffer
-	hostData := make([]byte, numElements*4)
-	backend.Sync() // Wait for GPU before reading shared memory
+	// Allocate host buffer as float32 directly to avoid byte-to-float conversion
+	result := make([]float32, numElements)
+	hostData := unsafe.Slice((*byte)(unsafe.Pointer(&result[0])), numElements*4)
+	// NOTE: Sync is NOT needed here - the Decode functions already call Sync()
+	// before returning, ensuring GPU work is complete.
 	backend.ToHost(hostData, ptr)
 
-	// Convert bytes to float32
-	result := make([]float32, numElements)
-	for i := 0; i < numElements; i++ {
-		bits := uint32(hostData[i*4]) | uint32(hostData[i*4+1])<<8 | uint32(hostData[i*4+2])<<16 | uint32(hostData[i*4+3])<<24
-		result[i] = float32FromBits(bits)
-	}
 	return result
 }
 

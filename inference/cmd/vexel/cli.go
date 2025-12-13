@@ -242,6 +242,7 @@ func main() {
 
 		cancel()
 		runtime.PrintProfile() // Print profiling stats if DEBUG_PROFILE=1
+		printGPUProfile()      // Print GPU stats if VEXEL_GPU_PROFILE=1
 		os.Exit(0)
 	}()
 
@@ -263,6 +264,7 @@ func main() {
 
 	// Print profiling stats if enabled
 	runtime.PrintProfile()
+	printGPUProfile()
 }
 
 // resolveModelPath finds the model file from the given path.

@@ -672,13 +672,12 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 
 	// 4. Append K/V to GPU cache and get pointers for SDPA
 	// This uses GPU-to-GPU copy - no CPU roundtrip!
-	// CRITICAL: Must sync before CopyBuffer when batching is enabled!
-	// CopyBuffer creates its own command buffer, but the batched commands
-	// (RMSNorm, Q/K/V projections, RoPE) haven't been committed yet.
-	// Without this sync, CopyBuffer reads uninitialized data.
+	// NOTE: Mid-layer sync is required for correct output. Without it, the encoder
+	// ordering causes incorrect results. The sync commits the current batch and
+	// starts a new one. Investigation ongoing - see docs/llama_cpp_kernel_analysis.md
 	if useBatching {
-		b.batcher.EndBatch()   // Commit and execute the batch
-		b.batcher.BeginBatch() // Start a new batch for remaining ops
+		b.batcher.EndBatch()
+		b.batcher.BeginBatch()
 	}
 
 	var fullKPtr, fullVPtr tensor.DevicePtr

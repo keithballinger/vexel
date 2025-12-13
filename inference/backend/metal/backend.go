@@ -329,6 +329,44 @@ func (b *Backend) CopyBufferBatched(src tensor.DevicePtr, srcOffset int, dst ten
 		unsafe.Pointer(dst.Addr()), C.size_t(dstOffset), C.size_t(size))
 }
 
+// GPUProfileStats holds GPU profiling statistics.
+type GPUProfileStats struct {
+	TotalTimeNs uint64
+	BatchCount  uint64
+	KernelCount uint64
+	SyncTimeNs  uint64
+}
+
+// GetGPUProfile returns GPU profiling statistics (enable with VEXEL_GPU_PROFILE=1).
+func GetGPUProfile() GPUProfileStats {
+	var totalTime, batchCount, kernelCount, syncTime C.uint64_t
+	C.metal_get_gpu_profile(&totalTime, &batchCount, &kernelCount, &syncTime)
+	return GPUProfileStats{
+		TotalTimeNs: uint64(totalTime),
+		BatchCount:  uint64(batchCount),
+		KernelCount: uint64(kernelCount),
+		SyncTimeNs:  uint64(syncTime),
+	}
+}
+
+// ResetGPUProfile clears GPU profiling statistics.
+func ResetGPUProfile() {
+	C.metal_reset_gpu_profile()
+}
+
+// PrintGPUProfile prints GPU profiling statistics to stderr.
+func PrintGPUProfile() {
+	stats := GetGPUProfile()
+	if stats.BatchCount == 0 {
+		return
+	}
+	gpuMs := float64(stats.TotalTimeNs) / 1e6
+	syncMs := float64(stats.SyncTimeNs) / 1e6
+	avgBatchUs := float64(stats.TotalTimeNs) / float64(stats.BatchCount) / 1e3
+	fmt.Fprintf(os.Stderr, "[GPU PROFILE] GPU: %.2f ms, Sync: %.2f ms, Batches: %d, Avg: %.2f µs/batch\n",
+		gpuMs, syncMs, stats.BatchCount, avgBatchUs)
+}
+
 // =============================================================================
 // Compute Kernels
 // =============================================================================

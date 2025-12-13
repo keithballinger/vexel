@@ -3,9 +3,9 @@ package scheduler
 import (
 	"context"
 	"fmt"
-	"math"
 	"os"
 	"time"
+	"unsafe"
 
 	"vexel/inference/medusa"
 	"vexel/inference/pkg/tokenizer"
@@ -689,6 +689,7 @@ func (ms *MedusaScheduler) ForceHot() {
 }
 
 // getLogitsOnCPU returns logits as a float32 slice on CPU.
+// NOTE: Caller must ensure GPU work is complete (e.g., Decode functions call Sync).
 func (ms *MedusaScheduler) getLogitsOnCPU(logits tensor.Tensor, numElements int) []float32 {
 	ptr := logits.DevicePtr()
 	if ptr.IsNil() {
@@ -706,14 +707,12 @@ func (ms *MedusaScheduler) getLogitsOnCPU(logits tensor.Tensor, numElements int)
 		return nil
 	}
 
-	hostData := make([]byte, numElements*4)
-	backend.ToHost(hostData, ptr)
-	backend.Sync()
-
+	// Allocate host buffer as float32 directly to avoid byte-to-float conversion
 	result := make([]float32, numElements)
-	for i := 0; i < numElements; i++ {
-		bits := uint32(hostData[i*4]) | uint32(hostData[i*4+1])<<8 | uint32(hostData[i*4+2])<<16 | uint32(hostData[i*4+3])<<24
-		result[i] = math.Float32frombits(bits)
-	}
+	hostData := unsafe.Slice((*byte)(unsafe.Pointer(&result[0])), numElements*4)
+	// NOTE: Sync is NOT needed here - the Decode functions already call Sync()
+	// before returning, ensuring GPU work is complete.
+	backend.ToHost(hostData, ptr)
+
 	return result
 }

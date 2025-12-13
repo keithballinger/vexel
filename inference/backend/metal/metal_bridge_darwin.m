@@ -1,6 +1,7 @@
 // metal_bridge.m - Objective-C Metal implementation
 #import <Metal/Metal.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
+#import <mach/mach_time.h>
 #include "metal_bridge.h"
 
 // Embedded Metal shader source
@@ -3168,6 +3169,20 @@ static id<MTLCommandQueue> g_batchQueue = nil;
 static id<MTLCommandBuffer> g_batchCmdBuffer = nil;
 static id<MTLComputeCommandEncoder> g_batchEncoder = nil;
 
+// GPU profiling state
+static uint64_t g_gpuTotalTime = 0;
+static uint64_t g_gpuBatchCount = 0;
+static uint64_t g_gpuKernelCount = 0;
+static uint64_t g_gpuSyncTime = 0;
+static mach_timebase_info_data_t g_timebaseInfo = {0, 0};
+
+static inline uint64_t mach_to_ns(uint64_t mach_time_val) {
+    if (g_timebaseInfo.denom == 0) {
+        mach_timebase_info(&g_timebaseInfo);
+    }
+    return mach_time_val * g_timebaseInfo.numer / g_timebaseInfo.denom;
+}
+
 // GPU-to-GPU buffer copy that integrates with command batching.
 // If in batch mode, ends compute encoder, does blit on same command buffer,
 // then starts a new compute encoder - avoiding separate command buffer overhead.
@@ -3247,10 +3262,12 @@ void* metal_create_pipeline(void* device, void* library, const char* functionNam
 
 // Synchronization
 void metal_sync(void* commandQueue) {
+    uint64_t start = mach_absolute_time();
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)commandQueue;
     id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
     [cmdBuffer commit];
     [cmdBuffer waitUntilCompleted];
+    g_gpuSyncTime += mach_to_ns(mach_absolute_time() - start);
 }
 
 // =============================================================================
@@ -3276,9 +3293,27 @@ void metal_end_batch(void) {
     }
     [g_batchEncoder endEncoding];
     [g_batchCmdBuffer commit];
+    // Don't waitUntilCompleted here - that would serialize all GPU work
+    // Profiling is done in metal_sync instead
+    g_gpuBatchCount++;
     g_batchEncoder = nil;
     g_batchCmdBuffer = nil;
     g_batchQueue = nil;
+}
+
+// GPU Profiling functions
+void metal_get_gpu_profile(uint64_t* totalTimeNs, uint64_t* batchCount, uint64_t* kernelCount, uint64_t* syncTimeNs) {
+    if (totalTimeNs) *totalTimeNs = g_gpuTotalTime;
+    if (batchCount) *batchCount = g_gpuBatchCount;
+    if (kernelCount) *kernelCount = g_gpuKernelCount;
+    if (syncTimeNs) *syncTimeNs = g_gpuSyncTime;
+}
+
+void metal_reset_gpu_profile(void) {
+    g_gpuTotalTime = 0;
+    g_gpuBatchCount = 0;
+    g_gpuKernelCount = 0;
+    g_gpuSyncTime = 0;
 }
 
 // Check if we're in batch mode
