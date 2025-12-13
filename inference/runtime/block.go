@@ -619,34 +619,51 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		vQ8Ptr = b.backend.Alloc(q8Size)
 	}
 
-	// 1. RMSNorm (Attention)
-	profileOp("RMSNorm", func() {
-		if !b.AttnNorm.DevicePtr().IsNil() {
-			b.backend.RMSNorm(xPtr, b.AttnNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
-		}
-	})
+	// 1. RMSNorm + Q/K/V Projections
+	// Try to use fused RMSNorm+MatMul for Decode (seqLen=1) if weights are Q4_0
+	canFuseAttn := seqLen == 1 && b.fusedOps != nil &&
+		b.Wq.QuantProfile() == tensor.Q4_0 &&
+		b.Wk.QuantProfile() == tensor.Q4_0 &&
+		b.Wv.QuantProfile() == tensor.Q4_0
 
-	// 2. Q/K/V Projections
-	profileOp("Wq", func() {
-		if !b.Wq.DevicePtr().IsNil() {
-			qDim := b.Wq.Shape().Dims()[0]
-			b.matMulTransposed(normOutPtr, b.Wq, qPtr, seqLen, qDim, hiddenSize)
-		}
-	})
+	if canFuseAttn {
+		profileOp("FusedRMSNorm+QKV", func() {
+			// Q
+			b.fusedOps.MatMulQ4_0_FusedRMSNorm(xPtr, b.AttnNorm.DevicePtr(), b.Wq.DevicePtr(), qPtr, 1, qSize, hiddenSize, float32(b.RMSNormEPS))
+			// K
+			b.fusedOps.MatMulQ4_0_FusedRMSNorm(xPtr, b.AttnNorm.DevicePtr(), b.Wk.DevicePtr(), kPtr, 1, kvSize, hiddenSize, float32(b.RMSNormEPS))
+			// V
+			b.fusedOps.MatMulQ4_0_FusedRMSNorm(xPtr, b.AttnNorm.DevicePtr(), b.Wv.DevicePtr(), vPtr, 1, kvSize, hiddenSize, float32(b.RMSNormEPS))
+		})
+	} else {
+		// Standard path
+		profileOp("RMSNorm", func() {
+			if !b.AttnNorm.DevicePtr().IsNil() {
+				b.backend.RMSNorm(xPtr, b.AttnNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+			}
+		})
 
-	profileOp("Wk", func() {
-		if !b.Wk.DevicePtr().IsNil() {
-			kDim := b.Wk.Shape().Dims()[0]
-			b.matMulTransposed(normOutPtr, b.Wk, kPtr, seqLen, kDim, hiddenSize)
-		}
-	})
+		profileOp("Wq", func() {
+			if !b.Wq.DevicePtr().IsNil() {
+				qDim := b.Wq.Shape().Dims()[0]
+				b.matMulTransposed(normOutPtr, b.Wq, qPtr, seqLen, qDim, hiddenSize)
+			}
+		})
 
-	profileOp("Wv", func() {
-		if !b.Wv.DevicePtr().IsNil() {
-			vDim := b.Wv.Shape().Dims()[0]
-			b.matMulTransposed(normOutPtr, b.Wv, vPtr, seqLen, vDim, hiddenSize)
-		}
-	})
+		profileOp("Wk", func() {
+			if !b.Wk.DevicePtr().IsNil() {
+				kDim := b.Wk.Shape().Dims()[0]
+				b.matMulTransposed(normOutPtr, b.Wk, kPtr, seqLen, kDim, hiddenSize)
+			}
+		})
+
+		profileOp("Wv", func() {
+			if !b.Wv.DevicePtr().IsNil() {
+				vDim := b.Wv.Shape().Dims()[0]
+				b.matMulTransposed(normOutPtr, b.Wv, vPtr, seqLen, vDim, hiddenSize)
+			}
+		})
+	}
 
 	// 3. RoPE - Apply to Q and K
 	profileOp("RoPE", func() {
@@ -744,41 +761,79 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		b.debugBlockTensor(fmt.Sprintf("L%d After Wo (attn output)", layerIdx), normOutPtr, seqLen*hiddenSize)
 		b.debugBlockTensor(fmt.Sprintf("L%d x before Add1", layerIdx), xPtr, seqLen*hiddenSize)
 	}
-	// 7. Add1 + FFN RMSNorm (fused when available)
-	if b.fusedOps != nil && !b.FFNNorm.DevicePtr().IsNil() {
-		// Fused: x = x + normOut, then normOut = RMSNorm(x)
-		profileOp("Add1+RMSNorm2", func() {
-			b.fusedOps.AddRMSNorm(xPtr, normOutPtr, b.FFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
-		})
-	} else {
-		profileOp("Add1", func() {
-			b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
-		})
-		profileOp("RMSNorm2", func() {
-			if !b.FFNNorm.DevicePtr().IsNil() {
-				b.backend.RMSNorm(xPtr, b.FFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
-			}
-		})
-	}
+	// 7. Add1 + FFN RMSNorm + MLP Projections
+	// We fused Add+RMSNorm before, but now we want to fuse RMSNorm+MatMul.
+	// We can't easily fuse Add+RMSNorm+MatMul.
+	// Strategies:
+	// A. Add (separate). Fused RMSNorm+MatMul (for Gate/Up).
+	//    Cost: Read x, Write x (Add). Read x (Gate). Read x (Up). Total 4 ops.
+	//    Old: Add (2). RMSNorm (2). Gate (1). Up (1). Total 6 ops.
+	//    Savings: 2 ops (norm write/read).
+	// B. Fused Add+RMSNorm. Standard MatMul.
+	//    Cost: Add+RMSNorm (Read x, Read resid, Write norm). Gate (Read norm). Up (Read norm). Total 5 ops.
+	//    Note: Add+RMSNorm writes `normOut`. Does it update `x`?
+	//    Our `AddRMSNorm` kernel updates `x` in place AND writes `out`.
+	//    So: Read x, Read resid, Write x, Write norm. Total 4 ops.
+	//    Then Gate (Read norm), Up (Read norm). Total 6 ops.
+	//    Strategy A seems better: Add (Read x, Read resid, Write x) -> 3 ops.
+	//    Then Fused RMSNorm+MatMul (Read x, Read normW) x 2.
+	//    Total traffic:
+	//    A: Add (3*K). Fused (2*K). Fused (2*K). Total 7*K.
+	//    B: Add+RMSNorm (4*K). MatMul (1.5*K). MatMul (1.5*K). Total 7*K.
+	//    Tie?
+	//    Wait, `MatMul` reads `W` too.
+	//    Let's assume Fused RMSNorm+MatMul is better because it avoids allocating/writing `normOut`.
+	//    Also `AddRMSNorm` logic in `metal_bridge` is `x = x + residual; out = RMSNorm(x)`.
+	//    It writes both.
+	//    If we use separate Add, then Fused RMSNorm+MatMul:
+	//    Add: `x += residual`. (Read x, Read res, Write x).
+	//    Fused: `gate = (RMS(x) @ W1)`. (Read x).
+	//    Fused: `up = (RMS(x) @ W3)`. (Read x).
+	//    So we skip writing `normOut`.
+
+	// 7. Add1
+	profileOp("Add1", func() {
+		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
+	})
 	if debugDecode && layerIdx <= 1 {
 		b.backend.Sync()
 		b.debugBlockTensor(fmt.Sprintf("L%d x after Add1", layerIdx), xPtr, seqLen*hiddenSize)
 	}
 
 	// 8. MLP: SwiGLU variant
-	profileOp("W1", func() {
-		if !b.W1.DevicePtr().IsNil() {
-			w1Dim := b.W1.Shape().Dims()[0]
-			b.matMulTransposed(normOutPtr, b.W1, gatePtr, seqLen, w1Dim, hiddenSize)
-		}
-	})
+	canFuseFFN := seqLen == 1 && b.fusedOps != nil &&
+		b.W1.QuantProfile() == tensor.Q4_0 &&
+		b.W3.QuantProfile() == tensor.Q4_0
 
-	profileOp("W3", func() {
-		if !b.W3.DevicePtr().IsNil() {
+	if canFuseFFN {
+		profileOp("FusedRMSNorm+GateUp", func() {
+			w1Dim := b.W1.Shape().Dims()[0]
+			b.fusedOps.MatMulQ4_0_FusedRMSNorm(xPtr, b.FFNNorm.DevicePtr(), b.W1.DevicePtr(), gatePtr, 1, w1Dim, hiddenSize, float32(b.RMSNormEPS))
 			w3Dim := b.W3.Shape().Dims()[0]
-			b.matMulTransposed(normOutPtr, b.W3, upPtr, seqLen, w3Dim, hiddenSize)
-		}
-	})
+			b.fusedOps.MatMulQ4_0_FusedRMSNorm(xPtr, b.FFNNorm.DevicePtr(), b.W3.DevicePtr(), upPtr, 1, w3Dim, hiddenSize, float32(b.RMSNormEPS))
+		})
+	} else {
+		// Standard path (RMSNorm then MatMul)
+		profileOp("RMSNorm2", func() {
+			if !b.FFNNorm.DevicePtr().IsNil() {
+				b.backend.RMSNorm(xPtr, b.FFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+			}
+		})
+
+		profileOp("W1", func() {
+			if !b.W1.DevicePtr().IsNil() {
+				w1Dim := b.W1.Shape().Dims()[0]
+				b.matMulTransposed(normOutPtr, b.W1, gatePtr, seqLen, w1Dim, hiddenSize)
+			}
+		})
+
+		profileOp("W3", func() {
+			if !b.W3.DevicePtr().IsNil() {
+				w3Dim := b.W3.Shape().Dims()[0]
+				b.matMulTransposed(normOutPtr, b.W3, upPtr, seqLen, w3Dim, hiddenSize)
+			}
+		})
+	}
 
 	profileOp("SiLUMul", func() {
 		b.backend.SiLUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)

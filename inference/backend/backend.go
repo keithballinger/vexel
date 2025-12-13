@@ -71,6 +71,12 @@ type FusedOps interface {
 	// x = x + residual (in-place), then out = RMSNorm(x, weight)
 	// x, residual: [rows, cols], weight: [cols], out: [rows, cols]
 	AddRMSNorm(x, residual, weight, out tensor.DevicePtr, rows, cols int, eps float32)
+
+	// MatMulQ4_0_FusedRMSNorm performs RMSNorm on x, then Q4_0 MatVec.
+	// x: [1, K] (or [M, K] in future), normWeight: [K]
+	// wMat: [N, K] Q4_0, out: [1, N]
+	// Computes: out = (RMSNorm(x, normWeight)) @ wMat^T
+	MatMulQ4_0_FusedRMSNorm(x, normWeight, wMat, out tensor.DevicePtr, m, n, k int, eps float32)
 }
 
 // Q8_0Ops is an optional interface for backends that support Q8_0 quantized KV cache.

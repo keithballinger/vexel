@@ -76,6 +76,14 @@ func (s *SpyBackend) Add(a, b, out tensor.DevicePtr, n int) {
 func (s *SpyBackend) Mul(a, b, out tensor.DevicePtr, n int) {
 	s.MulCalls++
 }
+func (s *SpyBackend) AddRMSNorm(x, residual, weight, out tensor.DevicePtr, rows, cols int, eps float32) {
+	s.RMSNormCalls++
+	s.AddCalls++
+}
+func (s *SpyBackend) MatMulQ4_0_FusedRMSNorm(x, normWeight, wMat, out tensor.DevicePtr, m, n, k int, eps float32) {
+	s.MatmulCalls++
+	s.RMSNormCalls++
+}
 
 func TestBlockExecution(t *testing.T) {
 	spy := &SpyBackend{}

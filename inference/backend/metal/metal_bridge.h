@@ -113,6 +113,11 @@ void metal_add_rmsnorm_f32(void* queue, void* pipeline,
                            void* x, void* residual, void* weight, void* out,
                            int batchSize, int dim, float eps);
 
+// Fused RMSNorm + Q4_0 MatVec
+void metal_matvec_q4_0_fused_rmsnorm_f32(void* queue, void* pipeline,
+                                         void* x, void* normWeight, void* wMat, void* out,
+                                         int n, int k, float eps);
+
 void metal_rope_f32(void* queue, void* pipeline,
                     void* q, void* k,
                     int batchSize, int seqLen, int numHeads, int headDim,

@@ -1470,6 +1470,170 @@ kernel void rmsnorm_f32(
 }
 
 // =============================================================================
+// FUSED RMSNORM + Q4_0 MATVEC KERNEL
+// =============================================================================
+// Combines RMSNorm(x) and Q4_0 MatVec(x_norm, W) into one kernel.
+// Avoids writing x_norm to global memory and reading it back.
+//
+// Steps:
+// 1. Load x into shared memory (cooperative)
+// 2. Compute sum of squares of x (cooperative reduction)
+// 3. Compute RMS = rsqrt(mean + eps)
+// 4. Perform MatVec using (x_shared[i] * rms * weight[i]) as activation
+//
+// Grid: ceil(N/32) threadgroups of 256 threads (standard optimized matvec grid)
+// Shared memory: K floats for x, plus overhead for reduction
+
+kernel void matvec_q4_0_fused_rmsnorm_f32(
+    device const float* x [[buffer(0)]],           // [K] input activations
+    device const float* normWeight [[buffer(1)]],  // [K] RMSNorm weights
+    device const uchar* W [[buffer(2)]],           // [N, K] Q4_0 weights
+    device float* out [[buffer(3)]],               // [N] output logits
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
+    threadgroup float* shared_x [[threadgroup(0)]], // [K] shared activations
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    // Phase 1: Cooperative Load & Sum Squares
+    // 256 threads load K elements (e.g. 2048 / 256 = 8 elements per thread)
+    float localSumSq = 0.0f;
+    for (int i = tid; i < K; i += 256) {
+        float val = x[i];
+        shared_x[i] = val; // Store raw x
+        localSumSq += val * val;
+    }
+
+    // Warp-level reduction of sum-squares
+    localSumSq = simd_sum(localSumSq);
+
+    // Threadgroup reduction (via shared memory scratch at end of buffer?)
+    // Or just use first few floats of shared_x if we are careful? No, need x.
+    // We need a small scratch area. Let's assume shared_x is size K.
+    // We can use a dedicated variable for reduction or reuse a known safe spot?
+    // Better: allocate extra shared memory in dispatch.
+    // Let's assume shared memory size passed is (K + 8) * 4 bytes.
+    // Scratch at offset K.
+    threadgroup float* scratch = shared_x + K;
+
+    if (simd_lane == 0) {
+        scratch[simd_group] = localSumSq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Final reduction by first warp
+    float totalSumSq = 0.0f;
+    if (simd_group == 0) {
+        float val = (simd_lane < 8) ? scratch[simd_lane] : 0.0f;
+        totalSumSq = simd_sum(val);
+    }
+    
+    // Broadcast RMS to all threads (using scratch[0])
+    if (tid == 0) {
+        scratch[0] = rsqrt(totalSumSq / float(K) + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float rms = scratch[0];
+
+    // Phase 2: MatVec using normalized x
+    // Similar to matvec_q4_0_optimized_f32, but we apply norm on the fly
+    // Each simdgroup handles 4 outputs (32 total per threadgroup)
+    
+    int base_output = gid * 32 + simd_group * 4;
+    
+    float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
+    int numBlocks = (K + 32 - 1) / 32;
+
+    // Row pointers
+    device const uchar* row0 = (base_output + 0 < N) ? W + (base_output + 0) * numBlocks * 18 : nullptr;
+    device const uchar* row1 = (base_output + 1 < N) ? W + (base_output + 1) * numBlocks * 18 : nullptr;
+    device const uchar* row2 = (base_output + 2 < N) ? W + (base_output + 2) * numBlocks * 18 : nullptr;
+    device const uchar* row3 = (base_output + 3 < N) ? W + (base_output + 3) * numBlocks * 18 : nullptr;
+
+    for (int block = simd_lane; block < numBlocks; block += 32) {
+        int base_k = block * 32;
+        if (base_k >= K) break;
+
+        // Load 32 activations from shared memory
+        // Apply RMSNorm: x_norm = x_raw * rms * normWeight
+        // We need to load normWeight from global (vectorized)
+        device const float4* w_ptr = (device const float4*)(normWeight + base_k);
+        float4 w0 = w_ptr[0];
+        float4 w1 = w_ptr[1];
+        float4 w2 = w_ptr[2];
+        float4 w3 = w_ptr[3];
+        float4 w4 = w_ptr[4];
+        float4 w5 = w_ptr[5];
+        float4 w6 = w_ptr[6];
+        float4 w7 = w_ptr[7];
+
+        threadgroup const float4* x_ptr = (threadgroup const float4*)(shared_x + base_k);
+        float4 x0 = x_ptr[0];
+        float4 x1 = x_ptr[1];
+        float4 x2 = x_ptr[2];
+        float4 x3 = x_ptr[3];
+        float4 x4 = x_ptr[4];
+        float4 x5 = x_ptr[5];
+        float4 x6 = x_ptr[6];
+        float4 x7 = x_ptr[7];
+
+        // Normalize activations
+        float4 a0 = x0 * rms * w0;
+        float4 a1 = x1 * rms * w1;
+        float4 a2 = x2 * rms * w2;
+        float4 a3 = x3 * rms * w3;
+        float4 a4 = x4 * rms * w4;
+        float4 a5 = x5 * rms * w5;
+        float4 a6 = x6 * rms * w6;
+        float4 a7 = x7 * rms * w7;
+
+        // Re-pack into 8 float4s for dot product (0,4,1,5,2,6,3,7 order used in optimized kernel)
+        // Actually, optimized kernel loads 0,1,2,3 then 4,5,6,7. Let's match usage.
+        // The macro uses a0..a3 (low) and a4..a7 (high).
+        
+        #define PROCESS_ROW(row_ptr, sum_var) \
+        if (row_ptr) { \
+            device const uchar* blockPtr = row_ptr + block * 18; \
+            float scale = as_type<half>(*((device const ushort*)blockPtr)); \
+            device const uchar* qs = blockPtr + 2; \
+            float4 q_lo_0 = float4(qs[0] & 0xF, qs[1] & 0xF, qs[2] & 0xF, qs[3] & 0xF) - 8.0f; \
+            float4 q_hi_0 = float4(qs[0] >> 4, qs[1] >> 4, qs[2] >> 4, qs[3] >> 4) - 8.0f; \
+            float4 q_lo_1 = float4(qs[4] & 0xF, qs[5] & 0xF, qs[6] & 0xF, qs[7] & 0xF) - 8.0f; \
+            float4 q_hi_1 = float4(qs[4] >> 4, qs[5] >> 4, qs[6] >> 4, qs[7] >> 4) - 8.0f; \
+            float4 q_lo_2 = float4(qs[8] & 0xF, qs[9] & 0xF, qs[10] & 0xF, qs[11] & 0xF) - 8.0f; \
+            float4 q_hi_2 = float4(qs[8] >> 4, qs[9] >> 4, qs[10] >> 4, qs[11] >> 4) - 8.0f; \
+            float4 q_lo_3 = float4(qs[12] & 0xF, qs[13] & 0xF, qs[14] & 0xF, qs[15] & 0xF) - 8.0f; \
+            float4 q_hi_3 = float4(qs[12] >> 4, qs[13] >> 4, qs[14] >> 4, qs[15] >> 4) - 8.0f; \
+            sum_var += scale * (dot(a0, q_lo_0) + dot(a4, q_hi_0) + \
+                                dot(a1, q_lo_1) + dot(a5, q_hi_1) + \
+                                dot(a2, q_lo_2) + dot(a6, q_hi_2) + \
+                                dot(a3, q_lo_3) + dot(a7, q_hi_3)); \
+        }
+
+        PROCESS_ROW(row0, sum0);
+        PROCESS_ROW(row1, sum1);
+        PROCESS_ROW(row2, sum2);
+        PROCESS_ROW(row3, sum3);
+        #undef PROCESS_ROW
+    }
+
+    sum0 = simd_sum(sum0);
+    sum1 = simd_sum(sum1);
+    sum2 = simd_sum(sum2);
+    sum3 = simd_sum(sum3);
+
+    if (simd_lane == 0) {
+        if (base_output + 0 < N) out[base_output + 0] = sum0;
+        if (base_output + 1 < N) out[base_output + 1] = sum1;
+        if (base_output + 2 < N) out[base_output + 2] = sum2;
+        if (base_output + 3 < N) out[base_output + 3] = sum3;
+    }
+}
+
+// =============================================================================
 // FUSED ADD + RMSNORM KERNEL
 // =============================================================================
 // Fuses residual addition with RMSNorm to save one memory round-trip.
@@ -4226,6 +4390,41 @@ void metal_sdpa_flash_decode_f32(void* queuePtr, void* pipelinePtr,
 
     // One threadgroup per Q head
     MTLSize threadgroups = MTLSizeMake(numQHeads, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_matvec_q4_0_fused_rmsnorm_f32(void* queuePtr, void* pipelinePtr,
+                                         void* x, void* normWeight, void* wMat, void* out,
+                                         int n, int k, float eps) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)x offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)normWeight offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)wMat offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBytes:&n length:sizeof(n) atIndex:4];
+    [encoder setBytes:&k length:sizeof(k) atIndex:5];
+    [encoder setBytes:&eps length:sizeof(eps) atIndex:6];
+
+    // Shared memory: K floats for x, + 8 floats scratch for reduction
+    int sharedMemSize = (k + 8) * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    // Grid: 32 outputs per threadgroup (8 simdgroups * 4 outputs)
+    int outputsPerTG = 32;
+    int threadgroupSize = 256;
+    int numThreadgroups = (n + outputsPerTG - 1) / outputsPerTG;
+
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
     MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];

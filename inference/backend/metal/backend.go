@@ -59,6 +59,7 @@ type Backend struct {
 	matvecQ4NR4Pipeline         unsafe.Pointer
 	matvecQ4CollabPipeline      unsafe.Pointer
 	matvecQ4OptimizedPipeline   unsafe.Pointer
+	matvecQ4FusedRMSNormPipeline unsafe.Pointer
 	softmaxPipeline             unsafe.Pointer
 	rmsnormPipeline             unsafe.Pointer
 	addRMSNormPipeline          unsafe.Pointer
@@ -159,6 +160,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matvecQ4NR4Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_nr4_f32"))
 	b.matvecQ4CollabPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_collab_f32"))
 	b.matvecQ4OptimizedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_optimized_f32"))
+	b.matvecQ4FusedRMSNormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_fused_rmsnorm_f32"))
 	b.softmaxPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("softmax_f32"))
 	b.rmsnormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_f32"))
 	b.addRMSNormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_rmsnorm_f32"))
@@ -437,6 +439,21 @@ func (b *Backend) MatMulQ4_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(m), C.int(n), C.int(k))
 	}
+}
+
+// MatMulQ4_0_FusedRMSNorm performs fused RMSNorm(x) + Q4_0 MatVec.
+// Only supports M=1 (decode) currently.
+func (b *Backend) MatMulQ4_0_FusedRMSNorm(x, normWeight, wMat, out tensor.DevicePtr, m, n, k int, eps float32) {
+	if m != 1 {
+		panic("MatMulQ4_0_FusedRMSNorm only supports M=1")
+	}
+	if b.matvecQ4FusedRMSNormPipeline == nil {
+		panic("MatMulQ4_0_FusedRMSNorm called but pipeline unavailable")
+	}
+	C.metal_matvec_q4_0_fused_rmsnorm_f32(b.queue, b.matvecQ4FusedRMSNormPipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(normWeight.Addr()),
+		unsafe.Pointer(wMat.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(n), C.int(k), C.float(eps))
 }
 
 // RMSNorm performs RMS normalization.
