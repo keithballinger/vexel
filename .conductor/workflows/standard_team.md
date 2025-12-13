@@ -8,6 +8,7 @@
 4. **Test-Driven Development:** Write unit tests before implementing functionality
 5. **High Code Coverage:** Aim for >80% code coverage for all modules
 6. **User Experience First:** Every decision should prioritize user experience
+7. **Benchmark Discipline:** Run the perf harness after each task and record results
 
 ## Task Workflow
 
@@ -27,6 +28,11 @@ All tasks follow a strict lifecycle:
 4. **Implement to Pass Tests (Green Phase):**
    - Write the minimum amount of application code necessary to make the failing tests pass.
    - Run the test suite again and confirm that all tests now pass. This is the "Green" phase.
+
+5. **Run Perf Harness:**
+   - Execute `scripts/perf_harness.sh` (or the project-specific perf script) after code changes.
+   - Compare Vexel vs. llama.cpp outputs and throughput.
+   - Copy the latest results into `plan.md` next to the completed task and append the run to `.conductor/status.md`.
 
 5. **Refactor (Optional but Recommended):**
    - With the safety of passing tests, refactor the implementation code and the test code to improve clarity, remove duplication, and enhance performance without changing the external behavior.

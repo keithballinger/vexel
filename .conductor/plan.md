@@ -418,6 +418,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [ ] Benchmark: Test with larger models (7B, 13B) if applicable.
 - [ ] Document: Performance tuning guide with optimal settings.
 - [ ] Document: Architecture-specific optimizations (M1/M2/M3).
+- [ ] Implement Vexel vs. llama.cpp harness (perf + correctness) and keep reports.
+- [ ] Run perf harness after each major task and record results in plan.md and status.md.
 
 **Target Final Performance:**
 | Metric | Current | Target | Required Improvement |
