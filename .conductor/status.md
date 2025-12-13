@@ -1,28 +1,32 @@
 # Project Status
 
-**Last Updated:** 2025-12-12 23:27
+**Last Updated:** 2025-12-13 06:35
 **Status:** 🟢 On Track
 
 ## Current Phase
 Phase 9: Performance Optimization (Target: Match llama.cpp)
 
 ## Current Task
-Investigate remaining prefill gap (2.7-3x vs llama.cpp).
+Investigate remaining performance gap (prefill 6.2x, decode 1.7x vs llama.cpp).
 
 ## Latest Performance Metrics
 | Metric | Vexel | llama.cpp | Gap |
 |--------|-------|-----------|-----|
-| Prefill (Short) | **~1400-1700 tok/s** | ~1600 tok/s | **Parity** |
-| Decode | **~950 tok/s** (?) | ~260 tok/s | **+3.6x** |
+| Prefill | **~115 tok/s** | ~710 tok/s | **6.2x** |
+| Decode | **~147 tok/s** | ~257 tok/s | **1.7x** |
 
 **Model:** TinyLlama 1.1B Q4_0
 **Hardware:** M4 Pro
 
+**Bug Fix (2025-12-13):**
+- **Root Cause Found:** Duplicate decode loop in `scheduler.go` was processing each token twice
+- **Symptoms:** Inflated tok/s metrics (reported ~950 tok/s), physics-violating bandwidth claims
+- **Fix:** Removed duplicate loop (commit 7e476cc), added mutex for thread-safe metrics
+- **Result:** Metrics now reflect actual performance (~147 tok/s decode = ~90 GB/s bandwidth, realistic for M4 Pro)
+
 **Optimization Notes:**
 - **Command Batching:** Implemented `BeginBatch`/`EndBatch` to group layer operations into single Metal command buffers.
 - **Async Copy:** Removed synchronous wait in `metal_copy_buffer` to allow GPU-side KV updates without blocking CPU.
-- **Result:** Massive reduction in CPU overhead.
-- **Anomaly:** Decode rate (950 tok/s) implies >500 GB/s bandwidth, exceeding M4 Pro spec (273 GB/s). Requires verification of weight loading and kernel execution path.
 
 ### Recent Ad-Hoc E2E Runs (TinyLlama Q4_0, Metal)
 | Prompt | Max Tokens | Vexel Prefill | Vexel Decode | llama.cpp Prompt Eval | llama.cpp Decode |
@@ -34,17 +38,17 @@ Investigate remaining prefill gap (2.7-3x vs llama.cpp).
 
 **Flash Attention 2 kernel-only synthetic throughput:** ~119,885 tok/s (seqLen=512, heads=32, headDim=64, avg over 10 iters).
 
-### Latest Harness Run (2025-12-12 23:27, VEXEL_FA2_MIN_SEQ=16, TinyLlama Q4_0, Metal, temp=0/top-k=1/top-p=0)
+### Latest Harness Run (2025-12-13 06:32, after duplicate loop fix)
 | Prompt | Max Tokens | Vexel Prefill | Vexel Decode | llama.cpp Prompt Eval | llama.cpp Decode | Similarity |
 |--------|------------|---------------|--------------|-----------------------|------------------|------------|
-| "Hello!" | 50 | 15.9 tok/s | 22.8 tok/s | 522.36 tok/s | 265.26 tok/s | 0.016 |
-| "Unit testing in Go" | 64 | 39.2 tok/s | 23.9 tok/s | 947.71 tok/s | 264.69 tok/s | 0.014 |
-| "RoPE summary" | 128 | 38.0 tok/s | 15.0 tok/s | 824.93 tok/s | 269.36 tok/s | 0.013 |
-| "Flash Attention 2 vs Flash Attention 1" | 96 | 40.1 tok/s | 15.8 tok/s | 823.09 tok/s | 269.01 tok/s | 0.013 |
-| "Go HTTP handler (JSON in/out)" | 192 | 40.1 tok/s | 23.6 tok/s | 959.69 tok/s | 262.28 tok/s | 0.013 |
-Report: perf_reports/report-20251212-232701.md
+| "Hello!" | 50 | 114.9 tok/s | 147.4 tok/s | 710.33 tok/s | 256.88 tok/s | 0.015 |
+Report: perf_reports/report-20251213-063242.md
 
 ## Recent Progress
+- [x] **Fixed duplicate decode loop bug (2025-12-13)**
+  - Root cause of physics-violating 950 tok/s metrics
+  - Scheduler was processing each token twice due to copy-paste error
+  - Added mutex for thread-safe metrics access
 - [x] **Implemented F16 Flash Attention 2 for prefill (2x bandwidth savings)**
   - Implemented `FlashAttention2F16` kernel using half-precision I/O and shared memory tiles
   - Fixed critical threadgroup barrier deadlock issue in all FA2 kernels
