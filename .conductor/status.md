@@ -1,19 +1,21 @@
 # Project Status
 
-**Last Updated:** 2025-12-13 07:45
+**Last Updated:** 2025-12-13 08:10
 **Status:** 🟢 On Track
 
 ## Current Phase
 Phase 9: Performance Optimization (Target: Match llama.cpp)
 
 ## Current Task
-Continue performance optimization - FP16 KV cache fix complete.
+Performance optimization - FP16 + batched copy complete.
 
-## Latest Performance Metrics
+## Latest Performance Metrics (Warm Start)
 | Metric | Vexel | llama.cpp | Gap |
 |--------|-------|-----------|-----|
-| Prefill | **~104 tok/s** | ~748 tok/s | **7.2x** |
-| Decode | **~160 tok/s** | ~258 tok/s | **1.6x** |
+| Prefill | **~272 tok/s** | ~748 tok/s | **2.7x** |
+| Decode | **~165 tok/s** | ~258 tok/s | **1.6x** |
+
+*Note: Cold start prefill is ~89 tok/s due to shader compilation.*
 
 **Model:** TinyLlama 1.1B Q4_0
 **Hardware:** M4 Pro
@@ -45,6 +47,10 @@ Continue performance optimization - FP16 KV cache fix complete.
 Report: perf_reports/report-20251213-073746.md
 
 ## Recent Progress
+- [x] **Integrated buffer copy with command batching (2025-12-13)**
+  - Added CopyBufferBatched that uses same command buffer as compute ops
+  - Eliminated per-layer sync overhead for KV cache updates
+  - Result: Warm prefill 272 tok/s (2.7x gap to llama.cpp)
 - [x] **Fixed FP16 KV cache race condition (2025-12-13)**
   - Root cause: F32→F16 conversions added to batched command buffer, but CopyBuffer created separate immediate command buffer
   - Fix: Added EndBatch/BeginBatch sync after conversions before AppendKV (block.go:691-696)
@@ -89,15 +95,13 @@ Report: perf_reports/report-20251213-073746.md
 ## Next Actions (Priority Order)
 
 ### High Priority - Performance
-1. **Eliminate forced sync in layer loop** (block.go:691-696)
-   - Currently forces EndBatch/BeginBatch at KV cache point every layer
-   - Root cause: CopyBuffer creates separate command buffer
-   - Fix: Integrate CopyBuffer into command batching, or use async copy
+1. **Reduce cold start overhead**
+   - Shader compilation on first run causes ~3x slower prefill
+   - Consider pipeline caching or pre-compilation
 
-2. **Investigate prefill regression**
-   - Previous: ~115 tok/s, now: ~104 tok/s with FP16
-   - FP16 should improve prefill, not regress it
-   - May be measurement variance or sync overhead
+2. **Further decode optimization**
+   - Gap to llama.cpp: 1.6x (165 vs 258 tok/s)
+   - Memory bandwidth limited - investigate vectorized loads
 
 ### Medium Priority
 3. Profile and benchmark Q4_K model performance
