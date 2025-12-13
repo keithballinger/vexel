@@ -180,6 +180,22 @@ func (c *GPUKVCache) GetKV(layerIdx int) (k, v tensor.DevicePtr, seqLen int) {
 	return c.kBuffers[layerIdx], c.vBuffers[layerIdx], c.seqLen
 }
 
+// Truncate rolls back the KV cache to a specific sequence length.
+// This is used for speculative decoding when draft tokens are rejected.
+// The cache buffers are not cleared - we just update the sequence pointer.
+func (c *GPUKVCache) Truncate(newSeqLen int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if newSeqLen < 0 {
+		newSeqLen = 0
+	}
+	if newSeqLen > c.seqLen {
+		newSeqLen = c.seqLen
+	}
+	c.seqLen = newSeqLen
+}
+
 // Free releases all GPU buffers.
 func (c *GPUKVCache) Free() {
 	for i := 0; i < c.numLayers; i++ {

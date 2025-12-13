@@ -68,7 +68,8 @@ func TestMatMul(t *testing.T) {
 	b.ToDevice(bBuf, float32ToBytes(B))
 
 	// Execute matmul
-	b.MatMul(aBuf, bBuf, cBuf, M, N, K)
+	// B is provided as [N,K], so use transposed matmul to compute A @ B^T.
+	b.MatMulTransposed(aBuf, bBuf, cBuf, M, N, K)
 	b.Sync()
 
 	// Read result

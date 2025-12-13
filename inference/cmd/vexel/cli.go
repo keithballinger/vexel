@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"vexel/inference/cmd/vexel/internal"
+	"vexel/inference/medusa"
 	"vexel/inference/memory"
 	"vexel/inference/pkg/gguf"
 	"vexel/inference/pkg/sampler"
@@ -29,6 +32,12 @@ func main() {
 	maxTokens := flag.Int("max-tokens", 256, "Maximum tokens to generate per response")
 	completionMode := flag.Bool("completion", false, "Use completion mode (no chat template)")
 	useGPU := flag.Bool("gpu", false, "Use GPU acceleration (Metal on macOS, requires -tags metal)")
+
+	// Medusa online training flags
+	onlineTraining := flag.Bool("online-training", false, "Enable online Medusa head training during inference")
+	medusaHeadsPath := flag.String("medusa-heads", "", "Path to pre-trained Medusa heads file (.medusa)")
+	saveMedusaPath := flag.String("save-medusa", "", "Path to save trained Medusa heads on exit")
+
 	flag.Parse()
 
 	fmt.Println("Vexel Inference Engine - Interactive Mode")
@@ -168,13 +177,71 @@ func main() {
 			TopP:        float32(*topP),
 		},
 	}
-	sched, _ := scheduler.NewScheduler(rt, tok, schedCfg)
+
+	// Create context with cancellation for graceful shutdown
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Set up signal handling for graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	var medusaSched *scheduler.MedusaScheduler
+
+	// Use Medusa scheduler if online training or pre-trained heads
+	if *onlineTraining || *medusaHeadsPath != "" {
+		medusaCfg := scheduler.MedusaConfig{
+			EnableOnlineTraining: *onlineTraining,
+			HeadsPath:            *medusaHeadsPath,
+			NumHeads:             4,
+			TrainingConfig:       medusa.DefaultOnlineConfig(),
+		}
+
+		var err error
+		medusaSched, err = scheduler.NewMedusaScheduler(rt, tok, schedCfg, medusaCfg)
+		if err != nil {
+			log.Fatalf("Failed to create Medusa scheduler: %v", err)
+		}
+
+		fmt.Printf("Medusa enabled: online-training=%v", *onlineTraining)
+		if *medusaHeadsPath != "" {
+			fmt.Printf(", heads=%s", *medusaHeadsPath)
+		}
+		fmt.Println()
+	}
+
 	fmt.Printf("Sampling: temp=%.2f, top-k=%d, top-p=%.2f, max-tokens=%d\n",
 		*temperature, *topK, *topP, *maxTokens)
 
 	// Start scheduler
 	go func() {
-		sched.Run(context.Background())
+		if medusaSched != nil {
+			medusaSched.Run(runCtx)
+		} else {
+			sched, _ := scheduler.NewScheduler(rt, tok, schedCfg)
+			sched.Run(runCtx)
+		}
+	}()
+
+	// Handle shutdown in background
+	go func() {
+		<-sigCh
+		fmt.Println("\nShutting down...")
+
+		// Save Medusa heads if requested
+		if medusaSched != nil && *saveMedusaPath != "" {
+			fmt.Printf("Saving Medusa heads to %s...\n", *saveMedusaPath)
+			if err := medusaSched.SaveHeads(*saveMedusaPath); err != nil {
+				fmt.Printf("Warning: failed to save Medusa heads: %v\n", err)
+			} else {
+				metrics := medusaSched.MedusaMetrics()
+				fmt.Printf("Saved! Phase: %s, Samples: %d, Steps: %d\n",
+					metrics.Phase, metrics.SamplesCollected, metrics.TrainingSteps)
+			}
+		}
+
+		cancel()
+		os.Exit(0)
 	}()
 
 	// Run interactive loop
@@ -182,7 +249,16 @@ func main() {
 	if *completionMode {
 		replConfig.ChatMode = false
 	}
-	internal.RunChatLoopWithConfig(os.Stdin, os.Stdout, sched, replConfig)
+
+	// Use the appropriate scheduler for the REPL
+	if medusaSched != nil {
+		internal.RunChatLoopWithConfig(os.Stdin, os.Stdout, medusaSched.Scheduler, replConfig)
+	} else {
+		sched, _ := scheduler.NewScheduler(rt, tok, schedCfg)
+		// Start this scheduler too
+		go sched.Run(runCtx)
+		internal.RunChatLoopWithConfig(os.Stdin, os.Stdout, sched, replConfig)
+	}
 }
 
 // resolveModelPath finds the model file from the given path.

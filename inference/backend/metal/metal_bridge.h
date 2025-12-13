@@ -59,6 +59,26 @@ void metal_matvec_q4_0_multi_output_f32(void* queue, void* pipeline,
                                          void* A, void* B, void* C,
                                          int N, int K);
 
+// Q4_0 NR2 matvec: 16 outputs per threadgroup (2 per simdgroup, better activation reuse)
+void metal_matvec_q4_0_nr2_f32(void* queue, void* pipeline,
+                                void* A, void* B, void* C,
+                                int N, int K);
+
+// Q4_0 NR4 matvec: 32 outputs per threadgroup (4 per simdgroup, maximum activation reuse)
+void metal_matvec_q4_0_nr4_f32(void* queue, void* pipeline,
+                                void* A, void* B, void* C,
+                                int N, int K);
+
+// Q4_0 collaborative matvec: llama.cpp-style 2 threads per block (better register distribution)
+void metal_matvec_q4_0_collab_f32(void* queue, void* pipeline,
+                                   void* A, void* B, void* C,
+                                   int N, int K);
+
+// Q4_0 optimized matvec: 32 outputs per threadgroup with shared memory activation caching
+void metal_matvec_q4_0_optimized_f32(void* queue, void* pipeline,
+                                      void* A, void* B, void* C,
+                                      int N, int K);
+
 // Batched Q4_0 matmul: C = A @ B^T where A is [M,K], B is [N,K] Q4_0, C is [M,N]
 void metal_matmul_q4_0_batched_f32(void* queue, void* pipeline,
                                     void* A, void* B, void* C,
@@ -79,9 +99,19 @@ void metal_matvec_q4k_multi_output_f32(void* queue, void* pipeline,
                                         void* A, void* B, void* C,
                                         int N, int K);
 
+// Q4_K batched matmul: C = A @ B^T where A is [M,K], B is [N,K] Q4_K, C is [M,N]
+void metal_matmul_q4k_batched_f32(void* queue, void* pipeline,
+                                   void* A, void* B, void* C,
+                                   int M, int N, int K);
+
 void metal_rmsnorm_f32(void* queue, void* pipeline,
                        void* x, void* weight, void* out,
                        int batchSize, int dim, float eps);
+
+// Fused Add + RMSNorm: x = x + residual (in-place), then out = RMSNorm(x)
+void metal_add_rmsnorm_f32(void* queue, void* pipeline,
+                           void* x, void* residual, void* weight, void* out,
+                           int batchSize, int dim, float eps);
 
 void metal_rope_f32(void* queue, void* pipeline,
                     void* q, void* k,

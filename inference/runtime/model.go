@@ -103,10 +103,11 @@ func (m *ModelRuntime) CreateGPUKVCache(maxSeqLen int) *GPUKVCache {
 	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
 
 	// Auto-enable FP16 if backend supports it
+	// TEMPORARILY DISABLED - debugging garbled output
 	useFP16 := false
-	if _, ok := m.backend.(backend.FP16Ops); ok {
-		useFP16 = true
-	}
+	// if _, ok := m.backend.(backend.FP16Ops); ok {
+	// 	useFP16 = true
+	// }
 
 	cache := NewGPUKVCacheWithPrecision(
 		m.backend,

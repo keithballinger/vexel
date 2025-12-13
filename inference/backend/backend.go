@@ -60,6 +60,15 @@ type FP16Ops interface {
 	SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32)
 }
 
+// FusedOps is an optional interface for backends that support fused kernel operations.
+// Fused kernels combine multiple operations to reduce memory bandwidth.
+type FusedOps interface {
+	// AddRMSNorm performs fused residual addition + RMSNorm.
+	// x = x + residual (in-place), then out = RMSNorm(x, weight)
+	// x, residual: [rows, cols], weight: [cols], out: [rows, cols]
+	AddRMSNorm(x, residual, weight, out tensor.DevicePtr, rows, cols int, eps float32)
+}
+
 // Q8_0Ops is an optional interface for backends that support Q8_0 quantized KV cache.
 // Q8_0 format: 34 bytes per 32 elements (2-byte f16 scale + 32 int8 values).
 // Provides 4x memory savings vs FP32 with minimal accuracy loss.

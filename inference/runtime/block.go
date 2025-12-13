@@ -96,6 +96,9 @@ type BlockRuntime struct {
 
 	// Cached interface for Q8_0 operations
 	q8Ops backend.Q8_0Ops
+
+	// Cached interface for fused operations
+	fusedOps backend.FusedOps
 }
 
 // NewBlockRuntime creates a new block runtime with config.
@@ -123,6 +126,9 @@ func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 
 	// Cache Q8_0 operations interface check
 	br.q8Ops, _ = b.(backend.Q8_0Ops)
+
+	// Cache fused operations interface check
+	br.fusedOps, _ = b.(backend.FusedOps)
 
 	return br
 }
@@ -731,20 +737,26 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		b.debugBlockTensor(fmt.Sprintf("L%d After Wo (attn output)", layerIdx), normOutPtr, seqLen*hiddenSize)
 		b.debugBlockTensor(fmt.Sprintf("L%d x before Add1", layerIdx), xPtr, seqLen*hiddenSize)
 	}
-	profileOp("Add1", func() {
-		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
-	})
+	// 7. Add1 + FFN RMSNorm (fused when available)
+	if b.fusedOps != nil && !b.FFNNorm.DevicePtr().IsNil() {
+		// Fused: x = x + normOut, then normOut = RMSNorm(x)
+		profileOp("Add1+RMSNorm2", func() {
+			b.fusedOps.AddRMSNorm(xPtr, normOutPtr, b.FFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+		})
+	} else {
+		profileOp("Add1", func() {
+			b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
+		})
+		profileOp("RMSNorm2", func() {
+			if !b.FFNNorm.DevicePtr().IsNil() {
+				b.backend.RMSNorm(xPtr, b.FFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+			}
+		})
+	}
 	if debugDecode && layerIdx <= 1 {
 		b.backend.Sync()
 		b.debugBlockTensor(fmt.Sprintf("L%d x after Add1", layerIdx), xPtr, seqLen*hiddenSize)
 	}
-
-	// 7. FFN RMSNorm
-	profileOp("RMSNorm2", func() {
-		if !b.FFNNorm.DevicePtr().IsNil() {
-			b.backend.RMSNorm(xPtr, b.FFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
-		}
-	})
 
 	// 8. MLP: SwiGLU variant
 	profileOp("W1", func() {

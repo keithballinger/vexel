@@ -82,12 +82,21 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			)
 			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
 			q4Count++
-		// TODO: Q4_K raw loading disabled until batched kernel for M>1 is implemented
-		// } else if info.Type == gguf.TensorTypeQ4_K && m.isWeightMatrix(hfName) {
-		// 	// Q4_K weight matrices use GPU-native quantized inference
-		// 	rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
-		// 	...
-		// }
+		} else if info.Type == gguf.TensorTypeQ4_K && m.isWeightMatrix(hfName) {
+			// Q4_K native GPU kernel - uses get_scale_min_k4 format
+			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
+			if err != nil {
+				fmt.Printf("Warning: failed to load raw Q4_K tensor %s: %v\n", hfName, err)
+				continue
+			}
+			t = tensor.NewQuantTensor(
+				tensor.NewShape(dims...),
+				m.config.DType,
+				tensor.NewDevicePtr(tensor.CPU, uintptr(unsafe.Pointer(&rawData[0]))),
+				tensor.Q4_K,
+			)
+			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
+			q4Count++
 		} else if info.Type == gguf.TensorTypeQ6_K && hfName == "lm_head.weight" {
 			// Keep lm_head as Q6_K for GPU-native quantized inference
 			// All output head paths now use M=1, so Q6_K matvec kernel works

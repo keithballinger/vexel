@@ -8,7 +8,7 @@ The workflow file you discover in the `.conductor/workflows/` directory is your 
     -   List and read the single prose guide in `.conductor/prose_styleguides/`.
     -   List and read all code style guides in `.conductor/code_styleguides/`.
     -   List and read the single workflow in `.conductor/workflows/`.
--   **Read Core Files:** Read `plan.md` and `status.md`.
+-   **Read Core Files:** Read `./conductor/plan.md` and `.conductor/status.md`.
 
 **3. IDENTIFY AND PROPOSE NEXT TASK**
 -   Scan `plan.md` to find the current task (`[~]`) or the next task (`[ ]`).
