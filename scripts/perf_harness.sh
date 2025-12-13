@@ -27,8 +27,10 @@ done <<'EOF'
 Hello!
 Describe the benefits of unit testing in Go in three concise sentences.
 Write a brief summary of how rotary positional embeddings work in transformers.
+Explain how Flash Attention 2 differs from Flash Attention 1 and why it is faster.
+Provide a short Go HTTP handler that parses JSON input and returns a JSON response.
 EOF
-TOKENS=(50 64 128)
+TOKENS=(50 64 128 96 192)
 
 mkdir -p "$OUT_DIR"
 report="$OUT_DIR/report-$(date +%Y%m%d-%H%M%S).md"
@@ -41,6 +43,11 @@ echo "|---|---|---|---|---|---|" >>"$report"
 run_case() {
   local prompt="$1"
   local tokens="$2"
+
+  parse_tokps_pair() {
+    # Return first two occurrences of "<number> tokens per second" separated by space
+    perl -nle 'if(/([0-9]+(?:\.[0-9]+)?) tokens per second/){push @a,$1} END{print join(" ", @a)}' "$1"
+  }
 
   local v_log l_log
   v_log=$(mktemp)
@@ -59,18 +66,14 @@ run_case() {
   fi
 
   # llama.cpp
-  "$LLAMA_BIN" -m "$MODEL_PATH" -p "$prompt" -n "$tokens" --no-warmup >"$l_log"
+  LLAMA_LOG_COLORS=0 "$LLAMA_BIN" -m "$MODEL_PATH" -p "$prompt" -n "$tokens" --no-warmup >"$l_log" 2>&1
   local llama_prompt llama_decode
-  llama_prompt="N/A"; llama_decode="N/A"
-  local prompt_line decode_line
-  prompt_line=$(grep -m1 "prompt eval time" "$l_log" || true)
-  decode_line=$(grep -m1 "eval time" "$l_log" || true)
-  if [[ -n "$prompt_line" ]]; then
-    llama_prompt=$(echo "$prompt_line" | awk '{print $(NF-3)}')
-  fi
-  if [[ -n "$decode_line" ]]; then
-    llama_decode=$(echo "$decode_line" | awk '{print $(NF-3)}')
-  fi
+  local tokps
+  tokps=$(parse_tokps_pair "$l_log")
+  llama_prompt=$(echo "$tokps" | awk '{print $1}')
+  llama_decode=$(echo "$tokps" | awk '{print $2}')
+  [[ -z "$llama_prompt" ]] && llama_prompt="N/A"
+  [[ -z "$llama_decode" ]] && llama_decode="N/A"
 
   echo "| ${prompt//|/\\|} | $tokens | $prefill tok/s | $decode tok/s | $llama_prompt tok/s | $llama_decode tok/s |" >>"$report"
 

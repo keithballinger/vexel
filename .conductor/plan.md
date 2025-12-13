@@ -418,7 +418,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [ ] Benchmark: Test with larger models (7B, 13B) if applicable.
 - [ ] Document: Performance tuning guide with optimal settings.
 - [ ] Document: Architecture-specific optimizations (M1/M2/M3).
-- [ ] Implement Vexel vs. llama.cpp harness (perf + correctness) and keep reports.
+- [~] Implement Vexel vs. llama.cpp harness (perf + correctness) and keep reports. (Started: 2025-12-12 23:08)
+  - Latest harness run (2025-12-12 23:10, VEXEL_FA2_MIN_SEQ=16): Vexel prefill 15.3–40.8 tok/s, decode 14.8–17.6; llama.cpp prompt 552–1084 tok/s, decode 265–269. Report: perf_reports/report-20251212-231010.md
 - [ ] Run perf harness after each major task and record results in plan.md and status.md.
 
 **Target Final Performance:**

@@ -1,13 +1,13 @@
 # Project Status
 
-**Last Updated:** 2025-12-12
+**Last Updated:** 2025-12-12 23:10
 **Status:** 🟢 On Track
 
 ## Current Phase
 Phase 9: Performance Optimization (Target: Match llama.cpp)
 
 ## Current Task
-Flash Attention 2 optimized and enabled for prefill.
+Implement Vexel vs. llama.cpp harness (perf + correctness) and keep reports.
 
 ## Latest Performance Metrics
 | Metric | Vexel | llama.cpp | Gap |
@@ -30,15 +30,18 @@ Flash Attention 2 optimized and enabled for prefill.
 
 **Flash Attention 2 kernel-only synthetic throughput:** ~119,885 tok/s (seqLen=512, heads=32, headDim=64, avg over 10 iters).
 
-### Latest Harness Run (VEXEL_FA2_MIN_SEQ=16, TinyLlama Q4_0, Metal)
+### Latest Harness Run (2025-12-12 23:10, VEXEL_FA2_MIN_SEQ=16, TinyLlama Q4_0, Metal)
 | Prompt | Max Tokens | Vexel Prefill | Vexel Decode | llama.cpp Prompt Eval | llama.cpp Decode |
 |--------|------------|---------------|--------------|-----------------------|------------------|
-| "Hello!" | 50 | 14.8 tok/s | 17.7 tok/s | N/A | N/A |
-| "Unit testing in Go" | 64 | 40.3 tok/s | 18.7 tok/s | N/A | N/A |
-| "RoPE summary" | 128 | 39.0 tok/s | 16.4 tok/s | N/A | N/A |
-Note: llama.cpp parsing failed in this harness run due to log format; Vexel numbers captured.
+| "Hello!" | 50 | 15.3 tok/s | 16.2 tok/s | 552.16 tok/s | 268.37 tok/s |
+| "Unit testing in Go" | 64 | 40.8 tok/s | 17.6 tok/s | 893.34 tok/s | 265.86 tok/s |
+| "RoPE summary" | 128 | 39.0 tok/s | 15.3 tok/s | 842.24 tok/s | 268.27 tok/s |
+| "Flash Attention 2 vs Flash Attention 1" | 96 | 40.8 tok/s | 15.9 tok/s | 829.94 tok/s | 269.35 tok/s |
+| "Go HTTP handler (JSON in/out)" | 192 | 38.8 tok/s | 14.8 tok/s | 1084.41 tok/s | 266.42 tok/s |
+Report: perf_reports/report-20251212-231010.md
 
 ## Recent Progress
+- [x] Perf harness now captures llama.cpp timings (stderr) and exercises five prompts/lengths with FA2 threshold override
 - [x] Fixed Q4_0 kernel bug causing garbage output
 - [x] Created comprehensive Q4_0 kernel test suite (9 tests)
 - [x] Implemented SIMD vectorized Q4_0 kernels
