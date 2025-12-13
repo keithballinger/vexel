@@ -155,6 +155,93 @@ func TestProfileOperations(t *testing.T) {
 	copyTime := time.Since(start) / time.Duration(iterations)
 	fmt.Printf("ToHost+ToDevice [%d bytes]: %.3f ms\n", kvBytes, float64(copyTime.Microseconds())/1000)
 
+	// =========================================================================
+	// PREFILL PROFILING (M=512)
+	// =========================================================================
+	fmt.Println("\n=== Per-Operation Timing (Prefill, M=512) ===")
+	M = 512
+	prefillIter := 20
+
+	// 1. MatMulQ4_0 (Simdgroup)
+	prefillInputPtr = backend.Alloc(M * K * 4)
+	prefillOutPtr = backend.Alloc(M * N * 4)
+	backend.Sync()
+
+	start = time.Now()
+	for i := 0; i < prefillIter; i++ {
+		backend.MatMulQ4_0(prefillInputPtr, wqPtr, prefillOutPtr, M, N, K)
+	}
+	backend.Sync()
+	matmulPrefillTime := time.Since(start) / time.Duration(prefillIter)
+	fmt.Printf("MatMulQ4_0 [512,2048] x [2048,2048]: %.3f ms (%.1f GB/s effective)\n",
+		float64(matmulPrefillTime.Microseconds())/1000,
+		float64(M*N*K*2)/float64(matmulPrefillTime.Nanoseconds())) // approximate FLOPs/bandwidth? Weights: N*K/2 bytes. Read weights once per batch?
+		// Weights 2048*2048*0.5625 bytes = 2.3MB. Input 512*2048*4 = 4MB. Output 4MB.
+		// Total IO = 10MB per call.
+		// Throughput = 10MB / time.
+
+	// 2. FlashAttention2 F16
+	// Convert Q, K, V to F16 first
+	qSize = M * numHeads * headDim
+	kSize = M * numKVHeads * headDim
+	qF32 := backend.Alloc(qSize * 4)
+	kF32 := backend.Alloc(kSize * 4)
+	// vF32 unused in timing loop
+	qF16 := backend.Alloc(qSize * 2)
+	kF16 := backend.Alloc(kSize * 2)
+	vF16 := backend.Alloc(kSize * 2)
+	outF16 := backend.Alloc(qSize * 2)
+	
+	// Measure F16 conversion time
+	start = time.Now()
+	for i := 0; i < prefillIter; i++ {
+		backend.ConvertF32ToF16(qF32, qF16, qSize)
+	}
+	backend.Sync()
+	convertTime := time.Since(start) / time.Duration(prefillIter)
+	fmt.Printf("ConvertF32ToF16 [Q size]: %.3f ms\n", float64(convertTime.Microseconds())/1000)
+
+	// Measure FA2 F16
+	start = time.Now()
+	for i := 0; i < prefillIter; i++ {
+		backend.SDPAPrefillF16(qF16, kF16, vF16, outF16, M, numHeads, numKVHeads, headDim, 0.125)
+	}
+	backend.Sync()
+	fa2Time := time.Since(start) / time.Duration(prefillIter)
+	fmt.Printf("FlashAttention2 F16 [seqLen=512]: %.3f ms\n", float64(fa2Time.Microseconds())/1000)
+
+	// Estimate total prefill time
+	fmt.Println("\n=== Estimated Prefill Time (22 layers, 512 tokens) ===")
+	// Matmul: 7 per layer
+	// Attention: 1 FA2 + conversion overhead
+	// RoPE, RMSNorm: scaled by 512 (approx)
+	
+	// Measure RoPE/RMSNorm for M=512
+	start = time.Now()
+	for i := 0; i < prefillIter; i++ {
+		backend.RMSNorm(prefillInputPtr, normWeight, prefillInputPtr, M, K, 1e-6)
+	}
+	backend.Sync()
+	normPrefillTime := time.Since(start) / time.Duration(prefillIter)
+
+	start = time.Now()
+	for i := 0; i < prefillIter; i++ {
+		backend.RoPE(qF32, kF32, headDim, numHeads, numKVHeads, M, 0, 10000.0)
+	}
+	backend.Sync()
+	ropePrefillTime := time.Since(start) / time.Duration(prefillIter)
+
+	layerTime := 7*matmulPrefillTime + fa2Time + convertTime*3 + 2*normPrefillTime + ropePrefillTime
+	totalPrefill := layerTime * 22
+	tokPerSec := 512.0 / totalPrefill.Seconds()
+
+	fmt.Printf("Per Layer: %.2f ms\n", float64(layerTime.Microseconds())/1000)
+	fmt.Printf("  MatMul (x7): %.2f ms\n", float64(7*matmulPrefillTime.Microseconds())/1000)
+	fmt.Printf("  Attn (FA2+Conv): %.2f ms\n", float64((fa2Time+3*convertTime).Microseconds())/1000)
+	fmt.Printf("  Norm+RoPE: %.2f ms\n", float64((2*normPrefillTime+ropePrefillTime).Microseconds())/1000)
+	fmt.Printf("Total (22 layers): %.2f ms\n", float64(totalPrefill.Microseconds())/1000)
+	fmt.Printf("Estimated Throughput: %.1f tok/s\n", tokPerSec)
+
 	// Estimate decode step time
 	fmt.Println("\n=== Estimated Decode Time (22 layers) ===")
 	// Per layer: 2 RMSNorm, 4 Q4 matmul (Q,K,V,O), RoPE, SDPA, 3 FFN matmul

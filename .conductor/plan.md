@@ -420,11 +420,23 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [ ] Document: Architecture-specific optimizations (M1/M2/M3).
 - [x] Implement Vexel vs. llama.cpp harness (perf + correctness) and keep reports. (Started: 2025-12-12 23:08, Completed: 2025-12-12 23:25)
   - Latest harness run (2025-12-12 23:27, VEXEL_FA2_MIN_SEQ=16): Vexel prefill 15.9–40.1 tok/s, decode 14.8–23.9; llama.cpp prompt 522–1092 tok/s, decode 262–269; similarity 0.013–0.016. Report: perf_reports/report-20251212-232701.md
-- [ ] Run perf harness after each major task and record results in plan.md and status.md.
+- [x] Run performance harness to quantify improvements. (Completed: 2025-12-13 02:25)
+  - Results: Prefill 496 tok/s (vs 1962), Decode 94 tok/s (vs 261).
+- [ ] Optimize Q4_0 Decode Kernel.
+  - Investigate non-coalesced reads in `matvec_q4_0_optimized`.
+  - Tunable parameters (threadgroup size, work per thread).
+  - Aim for 150+ tok/s.
+- [ ] Profile and benchmark Q4_K model performance.
   - Next run should include correctness diff vs. llama.cpp
-- [~] Flash Attention tuning: lower FA2 threshold and enable mixed-precision activations to reduce bandwidth. (Started: 2025-12-12 23:30)
+- [x] Flash Attention tuning: lower FA2 threshold and enable mixed-precision activations to reduce bandwidth. (Started: 2025-12-12 23:30, Completed: 2025-12-13 00:45)
   - Default FA2 threshold lowered to 16 (clamped min 8 via VEXEL_FA2_MIN_SEQ)
-- [ ] Kernel fusion: RMSNorm + MatMul on attention projections.
+  - Implemented F16 Flash Attention 2 kernel (2x bandwidth savings on K/V/Q loads)
+  - Fixed threadgroup barrier deadlock in all FA2 kernels
+  - Enabled F16 prefill in BlockRuntime when using F16 KV cache
+- [x] Kernel fusion: RMSNorm + MatMul on attention projections. (Started: 2025-12-13 01:00, Completed: 2025-12-13 01:45)
+  - Implemented `MatMulQ4_0_FusedRMSNorm` kernel for Metal (fuses RMSNorm into Q4_0 matvec)
+  - Applied to Attention (Q, K, V) and FFN (Gate, Up) projections during decode
+  - Reduces activation memory bandwidth by avoiding intermediate normalized state write/read
 - [x] Harness correctness check: compare Vexel vs. llama.cpp outputs (logprob/sequence diff) and report. (Completed: 2025-12-12 23:27)
 
 **Target Final Performance:**

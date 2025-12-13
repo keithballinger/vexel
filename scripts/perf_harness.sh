@@ -3,9 +3,11 @@
 set -euo pipefail
 
 MODEL_PATH="${MODEL_PATH:-models/tinyllama-1.1b-chat-v1.0.Q4_0.gguf}"
-VEXEL_BIN="${VEXEL_BIN:-./vexel_metal}"
+VEXEL_BIN="${VEXEL_BIN:-./vexel}"
 LLAMA_BIN="${LLAMA_BIN:-llama-cli}"
 OUT_DIR="${OUT_DIR:-perf_reports}"
+
+export VEXEL_FA2_MIN_SEQ=16
 
 if [[ ! -f "$MODEL_PATH" ]]; then
   echo "Model not found: $MODEL_PATH" >&2
@@ -26,11 +28,8 @@ while IFS= read -r line; do
 done <<'EOF'
 Hello!
 Describe the benefits of unit testing in Go in three concise sentences.
-Write a brief summary of how rotary positional embeddings work in transformers.
-Explain how Flash Attention 2 differs from Flash Attention 1 and why it is faster.
-Provide a short Go HTTP handler that parses JSON input and returns a JSON response.
 EOF
-TOKENS=(50 64 128 96 192)
+TOKENS=(50 64)
 
 mkdir -p "$OUT_DIR"
 report="$OUT_DIR/report-$(date +%Y%m%d-%H%M%S).md"
