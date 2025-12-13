@@ -18,5 +18,6 @@ Environment overrides:
 - `VEXEL_BIN` – path to Vexel binary
 - `LLAMA_BIN` – path to llama.cpp binary
 - `OUT_DIR` – output directory (default `perf_reports`)
+- `VEXEL_FA2_MIN_SEQ` – override Flash Attention 2 minimum seq length (default 32)
 
 The harness writes a Markdown report with throughput numbers and raw logs to `perf_reports/report-<timestamp>.md`. Copy the latest results into `plan.md` next to the completed task and append to `.conductor/status.md` per the workflow.

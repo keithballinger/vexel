@@ -10,6 +10,9 @@ package metal
 import "C"
 import (
 	"fmt"
+	"os"
+	"strconv"
+	"sync"
 	"unsafe"
 
 	"vexel/inference/backend"
@@ -97,6 +100,23 @@ type Backend struct {
 	batchedOuterProductPipeline unsafe.Pointer
 	sgdUpdatePipeline           unsafe.Pointer
 	zeroPipeline                unsafe.Pointer
+}
+
+var (
+	fa2MinSeqLen     int
+	fa2MinSeqLenOnce sync.Once
+)
+
+func flashAttentionMinSeqLen() int {
+	fa2MinSeqLenOnce.Do(func() {
+		fa2MinSeqLen = 32 // default threshold
+		if v := os.Getenv("VEXEL_FA2_MIN_SEQ"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				fa2MinSeqLen = n
+			}
+		}
+	})
+	return fa2MinSeqLen
 }
 
 // NewBackend creates a new Metal backend.
@@ -544,7 +564,7 @@ func (b *Backend) SDPAPrefill(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, 
 	// Use Flash Attention 2 for sequences >= 32 tokens
 	// FA2 uses two-pass tiling (find max, then accumulate) to reduce register pressure
 	// and caches Q in registers while streaming K/V tiles from shared memory
-	if b.flashAttention2Pipeline != nil && seqLen >= 32 {
+	if b.flashAttention2Pipeline != nil && seqLen >= flashAttentionMinSeqLen() {
 		C.metal_flash_attention_2_f32(b.queue, b.flashAttention2Pipeline,
 			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 			unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
