@@ -688,11 +688,22 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			// Convert FP32 K/V to FP16 before storing in cache
 			b.fp16Ops.ConvertF32ToF16(kPtr, kF16Ptr, kvSize)
 			b.fp16Ops.ConvertF32ToF16(vPtr, vF16Ptr, kvSize)
+			// CRITICAL: Must sync before CopyBuffer because conversions are in the current batch
+			// but CopyBuffer creates its own command buffer. Without sync, copy runs before conversion.
+			if useBatching {
+				b.batcher.EndBatch()
+				b.batcher.BeginBatch()
+			}
 			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kF16Ptr, vF16Ptr, seqLen)
 		} else if useQ8KVCache {
 			// Quantize FP32 K/V to Q8_0 before storing in cache
 			b.q8Ops.QuantizeF32ToQ8_0(kPtr, kQ8Ptr, kvSize)
 			b.q8Ops.QuantizeF32ToQ8_0(vPtr, vQ8Ptr, kvSize)
+			// CRITICAL: Same sync requirement for Q8 path
+			if useBatching {
+				b.batcher.EndBatch()
+				b.batcher.BeginBatch()
+			}
 			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kQ8Ptr, vQ8Ptr, seqLen)
 		} else {
 			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kPtr, vPtr, seqLen)

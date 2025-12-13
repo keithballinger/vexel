@@ -1,19 +1,19 @@
 # Project Status
 
-**Last Updated:** 2025-12-13 06:35
+**Last Updated:** 2025-12-13 07:45
 **Status:** 🟢 On Track
 
 ## Current Phase
 Phase 9: Performance Optimization (Target: Match llama.cpp)
 
 ## Current Task
-Investigate remaining performance gap (prefill 6.2x, decode 1.7x vs llama.cpp).
+Continue performance optimization - FP16 KV cache fix complete.
 
 ## Latest Performance Metrics
 | Metric | Vexel | llama.cpp | Gap |
 |--------|-------|-----------|-----|
-| Prefill | **~115 tok/s** | ~710 tok/s | **6.2x** |
-| Decode | **~147 tok/s** | ~257 tok/s | **1.7x** |
+| Prefill | **~104 tok/s** | ~748 tok/s | **7.2x** |
+| Decode | **~160 tok/s** | ~258 tok/s | **1.6x** |
 
 **Model:** TinyLlama 1.1B Q4_0
 **Hardware:** M4 Pro
@@ -38,13 +38,17 @@ Investigate remaining performance gap (prefill 6.2x, decode 1.7x vs llama.cpp).
 
 **Flash Attention 2 kernel-only synthetic throughput:** ~119,885 tok/s (seqLen=512, heads=32, headDim=64, avg over 10 iters).
 
-### Latest Harness Run (2025-12-13 06:32, after duplicate loop fix)
+### Latest Harness Run (2025-12-13 07:37, with FP16 KV cache)
 | Prompt | Max Tokens | Vexel Prefill | Vexel Decode | llama.cpp Prompt Eval | llama.cpp Decode | Similarity |
 |--------|------------|---------------|--------------|-----------------------|------------------|------------|
-| "Hello!" | 50 | 114.9 tok/s | 147.4 tok/s | 710.33 tok/s | 256.88 tok/s | 0.015 |
-Report: perf_reports/report-20251213-063242.md
+| "Hello!" | 50 | 104.3 tok/s | 160.2 tok/s | 748.24 tok/s | 257.74 tok/s | 0.015 |
+Report: perf_reports/report-20251213-073746.md
 
 ## Recent Progress
+- [x] **Fixed FP16 KV cache race condition (2025-12-13)**
+  - Root cause: F32→F16 conversions added to batched command buffer, but CopyBuffer created separate immediate command buffer
+  - Fix: Added EndBatch/BeginBatch sync after conversions before AppendKV (block.go:691-696)
+  - Result: Decode improved 147 → 160 tok/s (+9%), gap reduced from 1.7x to 1.6x
 - [x] **Fixed duplicate decode loop bug (2025-12-13)**
   - Root cause of physics-violating 950 tok/s metrics
   - Scheduler was processing each token twice due to copy-paste error
@@ -84,24 +88,21 @@ Report: perf_reports/report-20251213-063242.md
 
 ## Next Actions (Priority Order)
 
-### High Priority - Correctness Bug
-1. **Fix FP16 KV Cache Bug** - Causes garbled output ("WHERE ofegaegaqlqlql...")
-   - Location: `block.go` ExecuteWithGPUKV FP16 SDPA path
-   - Impact: When fixed, expect +17% prefill, +12% decode improvement
-
 ### High Priority - Performance
-2. **Eliminate forced sync in layer loop** (block.go:679-682)
+1. **Eliminate forced sync in layer loop** (block.go:691-696)
    - Currently forces EndBatch/BeginBatch at KV cache point every layer
    - Root cause: CopyBuffer creates separate command buffer
    - Fix: Integrate CopyBuffer into command batching, or use async copy
 
-3. **Match llama.cpp KV cache strategy**
-   - llama.cpp uses FP16 KV cache by default (we use FP32)
-   - llama.cpp uses deferred sync (graph-level), we sync per-layer
+2. **Investigate prefill regression**
+   - Previous: ~115 tok/s, now: ~104 tok/s with FP16
+   - FP16 should improve prefill, not regress it
+   - May be measurement variance or sync overhead
 
 ### Medium Priority
-4. Profile and benchmark Q4_K model performance
-5. Additional kernel fusions where applicable
+3. Profile and benchmark Q4_K model performance
+4. Additional kernel fusions where applicable
+5. Investigate certain prompts producing empty output (pre-existing bug)
 
 ## Profiling Analysis
 **Prefill (M=512):**

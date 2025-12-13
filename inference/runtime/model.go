@@ -103,13 +103,10 @@ func (m *ModelRuntime) CreateGPUKVCache(maxSeqLen int) *GPUKVCache {
 	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
 
 	// Auto-enable FP16 if backend supports it (2x memory bandwidth savings)
-	// NOTE: FP16 path has a correctness bug causing garbled output - disabled until fixed
-	// When enabled, shows ~17% prefill improvement, ~12% decode improvement
-	// Bug investigation needed in: block.go ExecuteWithGPUKV FP16 SDPA path
 	useFP16 := false
-	// if _, ok := m.backend.(backend.FP16Ops); ok {
-	// 	useFP16 = true
-	// }
+	if _, ok := m.backend.(backend.FP16Ops); ok {
+		useFP16 = true
+	}
 
 	cache := NewGPUKVCacheWithPrecision(
 		m.backend,
