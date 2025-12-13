@@ -103,6 +103,14 @@ type Q8_0Ops interface {
 	SDPAQ8_0(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32)
 }
 
+// ArgmaxOps is an optional interface for backends that support GPU-side argmax.
+// This avoids transferring large logits arrays to CPU for greedy sampling.
+type ArgmaxOps interface {
+	// Argmax returns the index of the maximum value in the input tensor.
+	// input: [n] in FP32, returns index of maximum element
+	Argmax(input tensor.DevicePtr, n int) int
+}
+
 // TrainingOps is an optional interface for backends that support neural network training.
 // These operations enable GPU-accelerated gradient computation and weight updates.
 type TrainingOps interface {

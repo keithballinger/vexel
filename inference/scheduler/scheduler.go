@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 	"unsafe"
+	"vexel/inference/backend"
 	"vexel/inference/pkg/sampler"
 	"vexel/inference/pkg/tokenizer"
 	"vexel/inference/runtime"
@@ -329,30 +330,16 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 
 	if !alreadySampled {
 		// Sample and Decode
-		// Copy logits from GPU to CPU if needed
 		vocabSize := s.runtime.Config().VocabSize
-		logitsData := s.getLogitsOnCPU(logits, len(decodeSeqs)*vocabSize)
 
-		for i, seq := range decodeSeqs {
+		// Single-sequence greedy: use GPU argmax to avoid 128KB transfer
+		if len(decodeSeqs) == 1 && s.config.SamplerConfig.Temperature == 0 {
+			seq := decodeSeqs[0]
 			seq.AdvancePosition()
-
 			if seq.State() == StatePending {
 				seq.SetState(StateDecoding)
 			}
-
-			// Extract logits for this sequence
-			start := i * vocabSize
-			end := start + vocabSize
-
-			if logitsData == nil || end > len(logitsData) {
-				seq.PushToken("?")
-				continue
-			}
-
-			seqLogits := logitsData[start:end]
-
-			// Sample
-			tokenID := s.sampler.Sample(seqLogits)
+			tokenID := s.sampleToken(logits, vocabSize)
 			seq.AddGeneratedToken(tokenID)
 
 			// Check for EOS
@@ -363,25 +350,72 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 			if tokenID == eosToken {
 				seq.SetState(StateFinished)
 				seq.Close()
-				continue
-			}
-
-			// Check max tokens
-			if s.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= s.config.MaxTokens {
+			} else if s.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= s.config.MaxTokens {
 				seq.SetState(StateFinished)
 				seq.Close()
-				continue
-			}
-
-			// Decode token to text
-			var text string
-			if s.tokenizer != nil {
-				text, _ = s.tokenizer.Decode([]int{tokenID})
 			} else {
-				text = fmt.Sprintf(" %d", tokenID)
+				var text string
+				if s.tokenizer != nil {
+					text, _ = s.tokenizer.Decode([]int{tokenID})
+				} else {
+					text = fmt.Sprintf(" %d", tokenID)
+				}
+				seq.PushToken(text)
 			}
+		} else {
+			// Multi-sequence or non-greedy: copy logits to CPU
+			logitsData := s.getLogitsOnCPU(logits, len(decodeSeqs)*vocabSize)
 
-			seq.PushToken(text)
+			for i, seq := range decodeSeqs {
+				seq.AdvancePosition()
+
+				if seq.State() == StatePending {
+					seq.SetState(StateDecoding)
+				}
+
+				// Extract logits for this sequence
+				start := i * vocabSize
+				end := start + vocabSize
+
+				if logitsData == nil || end > len(logitsData) {
+					seq.PushToken("?")
+					continue
+				}
+
+				seqLogits := logitsData[start:end]
+
+				// Sample
+				tokenID := s.sampler.Sample(seqLogits)
+				seq.AddGeneratedToken(tokenID)
+
+				// Check for EOS
+				eosToken := 2
+				if s.tokenizer != nil {
+					eosToken = s.tokenizer.EOS()
+				}
+				if tokenID == eosToken {
+					seq.SetState(StateFinished)
+					seq.Close()
+					continue
+				}
+
+				// Check max tokens
+				if s.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= s.config.MaxTokens {
+					seq.SetState(StateFinished)
+					seq.Close()
+					continue
+				}
+
+				// Decode token to text
+				var text string
+				if s.tokenizer != nil {
+					text, _ = s.tokenizer.Decode([]int{tokenID})
+				} else {
+					text = fmt.Sprintf(" %d", tokenID)
+				}
+
+				seq.PushToken(text)
+			}
 		}
 	}
 
@@ -623,6 +657,39 @@ func (s *Scheduler) getLogitsOnCPU(logits tensor.Tensor, numElements int) []floa
 	backend.ToHost(hostData, ptr)
 
 	return result
+}
+
+// sampleToken samples a token from logits, using GPU argmax for greedy (temp=0)
+// or falling back to CPU sampling for other temperatures.
+// logits: the logits tensor on GPU
+// vocabSize: number of vocabulary entries
+// Returns the sampled token ID.
+func (s *Scheduler) sampleToken(logits tensor.Tensor, vocabSize int) int {
+	// For greedy sampling (temp=0), try GPU argmax to avoid 128KB transfer
+	if s.config.SamplerConfig.Temperature == 0 {
+		if argmax, ok := s.runtime.Backend().(backend.ArgmaxOps); ok {
+			ptr := logits.DevicePtr()
+			if !ptr.IsNil() && ptr.Location() != tensor.CPU {
+				// Get offset to last vocab-size elements (for multi-token prefill)
+				numElements := logits.NumElements()
+				if numElements >= vocabSize {
+					// Create a DevicePtr that points to the last vocabSize elements
+					offset := uintptr((numElements - vocabSize) * 4) // 4 bytes per float32
+					lastRowPtr := tensor.DevicePtrOffset(ptr, offset)
+					return argmax.Argmax(lastRowPtr, vocabSize)
+				}
+			}
+		}
+	}
+
+	// Fall back to CPU sampling
+	numElements := logits.NumElements()
+	logitsData := s.getLogitsOnCPU(logits, numElements)
+	if logitsData == nil || len(logitsData) < vocabSize {
+		return 0
+	}
+	seqLogits := logitsData[len(logitsData)-vocabSize:]
+	return s.sampler.Sample(seqLogits)
 }
 
 // float32FromBits converts uint32 bits to float32.

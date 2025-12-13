@@ -151,6 +151,10 @@ void metal_add_f32(void* queue, void* pipeline,
 void metal_mul_f32(void* queue, void* pipeline,
                    void* a, void* b, void* out, int n);
 
+// Argmax: find index of maximum value (for GPU-side greedy sampling)
+void metal_argmax_f32(void* queue, void* pipeline,
+                       void* input, void* result, int N);
+
 // =============================================================================
 // Training Operations for Medusa Heads
 // =============================================================================

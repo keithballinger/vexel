@@ -69,6 +69,7 @@ type Backend struct {
 	siluMulPipeline             unsafe.Pointer
 	addPipeline                 unsafe.Pointer
 	mulPipeline                 unsafe.Pointer
+	argmaxPipeline              unsafe.Pointer
 	sdpaDecodePipeline          unsafe.Pointer
 	sdpaFlashDecodePipeline     unsafe.Pointer
 	sdpaPrefillPipeline         unsafe.Pointer
@@ -170,6 +171,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.siluMulPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_mul_f32"))
 	b.addPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_f32"))
 	b.mulPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("mul_f32"))
+	b.argmaxPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("argmax_f32"))
 	b.sdpaDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_gqa_f32"))
 	b.sdpaFlashDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f32"))
 	b.sdpaPrefillPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_prefill_f32"))
@@ -555,6 +557,25 @@ func (b *Backend) Add(a, bIn, out tensor.DevicePtr, n int) {
 func (b *Backend) Mul(a, bIn, out tensor.DevicePtr, n int) {
 	C.metal_mul_f32(b.queue, b.mulPipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bIn.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
+}
+
+// Argmax returns the index of the maximum value in the input tensor.
+// This runs entirely on GPU, avoiding the 128KB logits transfer for greedy sampling.
+func (b *Backend) Argmax(input tensor.DevicePtr, n int) int {
+	// Allocate a small buffer for the result (4 bytes for int32)
+	resultBuf := C.metal_alloc_buffer(b.device, 4)
+	defer C.metal_release(resultBuf)
+
+	// Run argmax kernel
+	C.metal_argmax_f32(b.queue, b.argmaxPipeline,
+		unsafe.Pointer(input.Addr()), resultBuf, C.int(n))
+
+	// Sync and read result
+	C.metal_sync(b.queue)
+	var result int32
+	C.metal_copy_from_buffer(unsafe.Pointer(&result), resultBuf, 4)
+
+	return int(result)
 }
 
 // =============================================================================

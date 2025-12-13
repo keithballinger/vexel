@@ -3100,6 +3100,54 @@ kernel void flash_attention_2_f16(
         if (d1 < headDim) out[outOffset + d1] = half(acc1 * invSum);
     }
 }
+
+// =============================================================================
+// Argmax kernel: find index of maximum value
+// =============================================================================
+// Single threadgroup reduction for vocab-sized arrays (32K elements)
+// Returns the index of the maximum value in the input array
+kernel void argmax_f32(
+    device const float* input [[buffer(0)]],
+    device int* result [[buffer(1)]],
+    constant int& N [[buffer(2)]],
+    threadgroup float* shared_vals [[threadgroup(0)]],
+    threadgroup int* shared_idxs [[threadgroup(1)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint tg_size [[threads_per_threadgroup]]
+) {
+    // Each thread finds its local max across strided elements
+    float localMax = -INFINITY;
+    int localIdx = 0;
+
+    for (int i = tid; i < N; i += tg_size) {
+        float val = input[i];
+        if (val > localMax) {
+            localMax = val;
+            localIdx = i;
+        }
+    }
+
+    // Store to shared memory
+    shared_vals[tid] = localMax;
+    shared_idxs[tid] = localIdx;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Parallel reduction in shared memory
+    for (uint stride = tg_size / 2; stride > 0; stride /= 2) {
+        if (tid < stride) {
+            if (shared_vals[tid + stride] > shared_vals[tid]) {
+                shared_vals[tid] = shared_vals[tid + stride];
+                shared_idxs[tid] = shared_idxs[tid + stride];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Thread 0 writes result
+    if (tid == 0) {
+        result[0] = shared_idxs[0];
+    }
+}
 )";
 
 // Device and queue management
@@ -4001,6 +4049,35 @@ void metal_mul_f32(void* queuePtr, void* pipelinePtr,
     ];
 
     dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+// Argmax: find index of maximum value (GPU-side greedy sampling)
+void metal_argmax_f32(void* queuePtr, void* pipelinePtr,
+                       void* input, void* result, int N) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)input offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)result offset:0 atIndex:1];
+    [encoder setBytes:&N length:sizeof(N) atIndex:2];
+
+    // Use 256 threads for reduction
+    int numThreads = 256;
+    // Shared memory: 256 floats + 256 ints
+    int sharedMem = numThreads * (sizeof(float) + sizeof(int));
+    [encoder setThreadgroupMemoryLength:numThreads * sizeof(float) atIndex:0];
+    [encoder setThreadgroupMemoryLength:numThreads * sizeof(int) atIndex:1];
+
+    MTLSize threadgroups = MTLSizeMake(1, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(numThreads, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
 // =============================================================================
