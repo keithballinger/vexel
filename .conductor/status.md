@@ -82,11 +82,26 @@ Report: perf_reports/report-20251213-063242.md
   - Lowered FA2 threshold from 256 to 32 tokens
   - Results: 355-390 tok/s prefill (was ~150 tok/s)
 
-## Next Actions
-1. Half-precision activations to halve A-vector bandwidth (Partially done: FA2 prefill)
-2. Additional kernel fusions (RMSNorm+MatMul for attention projections)
-3. Profile and benchmark Q4_K model performance
-4. Investigate remaining prefill gap (2.7-3x vs llama.cpp)
+## Next Actions (Priority Order)
+
+### High Priority - Correctness Bug
+1. **Fix FP16 KV Cache Bug** - Causes garbled output ("WHERE ofegaegaqlqlql...")
+   - Location: `block.go` ExecuteWithGPUKV FP16 SDPA path
+   - Impact: When fixed, expect +17% prefill, +12% decode improvement
+
+### High Priority - Performance
+2. **Eliminate forced sync in layer loop** (block.go:679-682)
+   - Currently forces EndBatch/BeginBatch at KV cache point every layer
+   - Root cause: CopyBuffer creates separate command buffer
+   - Fix: Integrate CopyBuffer into command batching, or use async copy
+
+3. **Match llama.cpp KV cache strategy**
+   - llama.cpp uses FP16 KV cache by default (we use FP32)
+   - llama.cpp uses deferred sync (graph-level), we sync per-layer
+
+### Medium Priority
+4. Profile and benchmark Q4_K model performance
+5. Additional kernel fusions where applicable
 
 ## Profiling Analysis
 **Prefill (M=512):**
