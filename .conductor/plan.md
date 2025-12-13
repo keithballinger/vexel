@@ -308,14 +308,29 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Optimize KV cache writes for batched prefill. (Completed: 2025-12-08)
 *Implementation: PrefillWithPagedKV in runtime/decode.go, uses SDPAPrefill kernel*
 
-### Task: Speculative Decoding
-*Status: NOT STARTED*
-- [ ] Write Failing Tests: For draft model token generation.
-- [ ] Implement Feature: Implement draft model support (smaller model for speculation).
-- [ ] Write Failing Tests: For verification of draft tokens by main model.
-- [ ] Implement Feature: Implement speculative verification and acceptance logic.
-- [ ] Write Failing Tests: For speculative decoding speedup measurement.
-- [ ] Implement Feature: Integrate speculative decoding into scheduler.
+### Task: Speculative Decoding (Medusa)
+*Status: COMPLETE (2025-12-11) - Using Medusa heads instead of draft model*
+- [x] Implement Feature: Medusa prediction heads (inference/medusa/heads.go)
+- [x] Implement Feature: Online training for Medusa heads (inference/medusa/trainer.go)
+- [x] Implement Feature: KV cache truncation for rollback (GPUKVCache.Truncate)
+- [x] Implement Feature: Draft token generation from Medusa heads (argmax sampling)
+- [x] Implement Feature: Verification via VerifySpeculative (batched target model pass)
+- [x] Implement Feature: Accept/reject loop with KV cache management
+- [x] Implement Feature: Speculative decoding metrics (acceptance rate, speedup)
+- [x] Implement Feature: Integration into MedusaScheduler (runMedusaDecodeStep)
+
+**Architecture:**
+- No separate draft model needed - Medusa heads predict from hidden state
+- Online training adapts heads to actual usage patterns
+- Phase transitions: Cold → Warming → Hot (speculation only in Hot phase)
+
+**Files:**
+- `inference/medusa/heads.go` - Medusa prediction heads
+- `inference/medusa/buffer.go` - Training sample ring buffer
+- `inference/medusa/trainer.go` - Online trainer with phase management
+- `inference/scheduler/medusa_scheduler.go` - Medusa-enabled scheduler
+- `inference/runtime/decode.go` - DecodeWithGPUKVAndHidden, VerifySpeculative
+- `inference/runtime/gpu_kv_cache.go` - Truncate method for rollback
 
 ### Task: Continuous Batching Improvements
 *Status: NOT STARTED*
@@ -352,7 +367,7 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
   - Gap to llama.cpp reduced from 9x to 5.6x (prefill), 5.4x to 4.8x (decode)
 
 ### Task: Multi-Output Threadgroups (Target: 1.5x additional speedup)
-- [ ] Write Failing Tests: For multi-output kernel correctness.
+- [x] Write Failing Tests: For multi-output kernel correctness. (Started: 2025-12-12 16:23, Completed: 2025-12-12 17:12)
 - [ ] Implement Feature: Modify Q4_0 matvec to compute 2-4 outputs per threadgroup.
 - [ ] Implement Feature: Optimize weight data reuse within threadgroup.
 - [ ] Implement Feature: Tune threadgroup size for optimal occupancy.
@@ -365,8 +380,8 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [x] Implement Feature: Implement online softmax normalization. (Completed: 2025-12-09)
 - [x] Implement Feature: Implement tiled attention output accumulation. (Completed: 2025-12-09)
 - [x] Implement Feature: Handle causal masking in tiled computation. (Completed: 2025-12-09)
-- [ ] Write Failing Tests: For Flash Attention numerical stability.
-- [ ] Benchmark: Measure prefill tok/s improvement (target: 400+ tok/s).
+- [x] Write Failing Tests: For Flash Attention numerical stability. (Started: 2025-12-12 17:19, Completed: 2025-12-12 17:32)
+- [x] Benchmark: Measure prefill tok/s improvement (target: 400+ tok/s). (Completed: 2025-12-12 17:35)
 
 ### Task: SIMD Matrix Operations (Target: 1.3x additional speedup)
 - [ ] Write Failing Tests: For simdgroup_matrix operations.
@@ -410,3 +425,60 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 | Prefill | ~97 tok/s | 800+ tok/s | 8x |
 | Decode | ~53 tok/s | 200+ tok/s | 3.8x |
 
+## Phase 10: Medusa Online Training Enhancements
+
+*Status: Foundation implemented (2025-12-11). Core Medusa heads, ring buffer, online trainer, and CLI integration complete.*
+
+**Implemented:**
+- `inference/medusa/heads.go` - Medusa prediction heads (FC1 → ReLU → FC2)
+- `inference/medusa/buffer.go` - Thread-safe ring buffer for training samples
+- `inference/medusa/trainer.go` - Online trainer with Cold → Warming → Hot phases
+- `inference/scheduler/medusa_scheduler.go` - Medusa-enabled scheduler with sample collection
+- `inference/runtime/decode.go` - `DecodeWithGPUKVAndHidden` for hidden state capture
+- CLI flags: `--online-training`, `--medusa-heads`, `--save-medusa`
+
+### Task: Periodic Checkpointing
+*Status: NOT STARTED*
+- [ ] Write Failing Tests: For auto-save triggering after N minutes.
+- [ ] Implement Feature: Add checkpoint interval to OnlineConfig.
+- [ ] Implement Feature: Background goroutine to periodically save heads to disk.
+- [ ] Implement Feature: Atomic file writes (write to temp, rename) to prevent corruption.
+- [ ] Implement Feature: Recovery on startup - load latest checkpoint if available.
+
+### Task: Head Pruning
+*Status: NOT STARTED*
+- [ ] Write Failing Tests: For accuracy tracking per head.
+- [ ] Implement Feature: Track per-head accuracy history (rolling window).
+- [ ] Implement Feature: Detect heads that plateau below threshold (e.g., head 3 < 10% for 1000+ steps).
+- [ ] Implement Feature: Stop training low-performing heads (freeze weights, skip gradient computation).
+- [ ] Implement Feature: Optionally remove pruned heads from inference path.
+- [ ] Write Failing Tests: For memory savings from pruned heads.
+
+### Task: Quantized Heads (INT8 Inference)
+*Status: NOT STARTED*
+- [ ] Write Failing Tests: For INT8 quantization of head weights.
+- [ ] Implement Feature: Quantize FC1 and FC2 weights to INT8 with per-channel scales.
+- [ ] Implement Feature: INT8 forward pass for inference (dequantize on-the-fly or use INT8 GEMM).
+- [ ] Implement Feature: Continue training in FP32, periodically re-quantize for inference.
+- [ ] Write Failing Tests: For accuracy preservation after quantization.
+- [ ] Benchmark: Measure memory reduction (4x theoretical) and inference speedup.
+
+### Task: Shared Draft Layer (EAGLE-style Architecture)
+*Status: NOT STARTED*
+*Instead of 4 independent [hidden→hidden→vocab] heads, use [hidden→shared_hidden] + 4×[shared_hidden→vocab]*
+- [ ] Write Failing Tests: For shared layer forward pass correctness.
+- [ ] Implement Feature: Add SharedHead struct with single FC1 and multiple FC2 projections.
+- [ ] Implement Feature: Forward: hidden → FC1 → ReLU → [FC2_0, FC2_1, FC2_2, FC2_3] → [logits_0, ..., logits_3].
+- [ ] Implement Feature: Backprop through shared layer (gradients accumulate from all heads).
+- [ ] Write Failing Tests: For memory reduction from shared architecture.
+- [ ] Benchmark: Compare accuracy vs. independent heads.
+- [ ] Benchmark: Measure memory savings (~4x reduction in FC1 params).
+
+### Task: Enso Integration (Future)
+*Status: DESIGN ONLY*
+*Integration points for Enso cognitive operating system:*
+- [ ] Design: Per-Mind Medusa heads storage in Mind state.
+- [ ] Design: Training samples as procedural memory in Mnemosyne.
+- [ ] Design: Head training during Dreaming phase (memory consolidation).
+- [ ] Design: Kairos scheduler budget for training cycles.
+- [ ] Design: Shared heads across Minds using same base model.

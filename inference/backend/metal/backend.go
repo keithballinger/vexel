@@ -47,36 +47,42 @@ type Backend struct {
 	pool *bufferPool
 
 	// Cached pipeline states
-	matmulPipeline               unsafe.Pointer // For matmul_transposed_f32 (C = A @ B^T)
-	matmulNonTransposedPipeline  unsafe.Pointer // For matmul_f32 (C = A @ B)
-	matvecPipeline               unsafe.Pointer
-	matvecQ4Pipeline             unsafe.Pointer
-	matvecQ4MultiOutputPipeline  unsafe.Pointer
-	softmaxPipeline          unsafe.Pointer
-	rmsnormPipeline          unsafe.Pointer
-	ropePipeline             unsafe.Pointer
-	ropeGQAPipeline          unsafe.Pointer
-	siluPipeline             unsafe.Pointer
-	siluMulPipeline          unsafe.Pointer
-	addPipeline              unsafe.Pointer
-	mulPipeline              unsafe.Pointer
-	sdpaDecodePipeline        unsafe.Pointer
-	sdpaFlashDecodePipeline   unsafe.Pointer
-	sdpaPrefillPipeline       unsafe.Pointer
-	flashAttention2Pipeline   unsafe.Pointer
-	matmulQ4BatchedPipeline   unsafe.Pointer
-	matmulQ4SimdgroupPipeline unsafe.Pointer
-	matvecQ6KPipeline         unsafe.Pointer
-	matvecQ4KPipeline         unsafe.Pointer
+	matmulPipeline              unsafe.Pointer // For matmul_transposed_f32 (C = A @ B^T)
+	matmulNonTransposedPipeline unsafe.Pointer // For matmul_f32 (C = A @ B)
+	matvecPipeline              unsafe.Pointer
+	matvecQ4Pipeline            unsafe.Pointer
+	matvecQ4MultiOutputPipeline unsafe.Pointer
+	matvecQ4NR2Pipeline         unsafe.Pointer
+	matvecQ4NR4Pipeline         unsafe.Pointer
+	matvecQ4CollabPipeline      unsafe.Pointer
+	matvecQ4OptimizedPipeline   unsafe.Pointer
+	softmaxPipeline             unsafe.Pointer
+	rmsnormPipeline             unsafe.Pointer
+	addRMSNormPipeline          unsafe.Pointer
+	ropePipeline                unsafe.Pointer
+	ropeGQAPipeline             unsafe.Pointer
+	siluPipeline                unsafe.Pointer
+	siluMulPipeline             unsafe.Pointer
+	addPipeline                 unsafe.Pointer
+	mulPipeline                 unsafe.Pointer
+	sdpaDecodePipeline          unsafe.Pointer
+	sdpaFlashDecodePipeline     unsafe.Pointer
+	sdpaPrefillPipeline         unsafe.Pointer
+	flashAttention2Pipeline     unsafe.Pointer
+	matmulQ4BatchedPipeline     unsafe.Pointer
+	matmulQ4SimdgroupPipeline   unsafe.Pointer
+	matvecQ6KPipeline           unsafe.Pointer
+	matvecQ4KPipeline           unsafe.Pointer
+	matmulQ4KBatchedPipeline    unsafe.Pointer
 
 	// FP16 (Half-Precision) pipelines
-	addF16Pipeline         unsafe.Pointer
-	mulF16Pipeline         unsafe.Pointer
-	siluF16Pipeline        unsafe.Pointer
-	siluMulF16Pipeline     unsafe.Pointer
-	rmsnormF16Pipeline     unsafe.Pointer
-	matvecQ4F16Pipeline    unsafe.Pointer
-	sdpaDecodeF16Pipeline  unsafe.Pointer
+	addF16Pipeline          unsafe.Pointer
+	mulF16Pipeline          unsafe.Pointer
+	siluF16Pipeline         unsafe.Pointer
+	siluMulF16Pipeline      unsafe.Pointer
+	rmsnormF16Pipeline      unsafe.Pointer
+	matvecQ4F16Pipeline     unsafe.Pointer
+	sdpaDecodeF16Pipeline   unsafe.Pointer
 	convertF32ToF16Pipeline unsafe.Pointer
 	convertF16ToF32Pipeline unsafe.Pointer
 
@@ -86,11 +92,11 @@ type Backend struct {
 	sdpaDecodeQ8_0Pipeline      unsafe.Pointer
 
 	// Training pipelines (for Medusa heads)
-	reluInplacePipeline        unsafe.Pointer
-	reluBackwardPipeline       unsafe.Pointer
+	reluInplacePipeline         unsafe.Pointer
+	reluBackwardPipeline        unsafe.Pointer
 	batchedOuterProductPipeline unsafe.Pointer
-	sgdUpdatePipeline          unsafe.Pointer
-	zeroPipeline               unsafe.Pointer
+	sgdUpdatePipeline           unsafe.Pointer
+	zeroPipeline                unsafe.Pointer
 }
 
 // NewBackend creates a new Metal backend.
@@ -123,8 +129,13 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matvecPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_transposed_f32"))
 	b.matvecQ4Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_transposed_f32"))
 	b.matvecQ4MultiOutputPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_multi_output_f32"))
+	b.matvecQ4NR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_nr2_f32"))
+	b.matvecQ4NR4Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_nr4_f32"))
+	b.matvecQ4CollabPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_collab_f32"))
+	b.matvecQ4OptimizedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_optimized_f32"))
 	b.softmaxPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("softmax_f32"))
 	b.rmsnormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_f32"))
+	b.addRMSNormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_rmsnorm_f32"))
 	b.ropePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_f32"))
 	b.ropeGQAPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_gqa_f32"))
 	b.siluPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_f32"))
@@ -139,6 +150,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matmulQ4SimdgroupPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_simdgroup_f32"))
 	b.matvecQ6KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q6k_multi_output_f32"))
 	b.matvecQ4KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_multi_output_f32"))
+	b.matmulQ4KBatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4k_batched_f32"))
 
 	// FP16 pipelines
 	b.addF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_f16"))
@@ -310,13 +322,20 @@ func (b *Backend) MatMulTransposed(a, bMat, out tensor.DevicePtr, m, n, k int) {
 // MatMulQ4_0 performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q4_0 format.
 // B contains raw Q4_0 data (18 bytes per 32 elements).
 func (b *Backend) MatMulQ4_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
-	if b.matvecQ4MultiOutputPipeline == nil {
-		panic("MatMulQ4_0 called but no matvecQ4MultiOutputPipeline available")
+	if b.matvecQ4NR2Pipeline == nil {
+		panic("MatMulQ4_0 called but no matvecQ4NR2Pipeline available")
 	}
 	if m == 1 {
-		// Single row - use multi-output matvec for better thread utilization
-		// Each threadgroup computes 8 outputs, each simdgroup handles one output
-		C.metal_matvec_q4_0_multi_output_f32(b.queue, b.matvecQ4MultiOutputPipeline,
+		// For partial blocks (K not multiple of 32), fall back to the scalar-safe single-output kernel.
+		if k%32 != 0 && b.matvecQ4Pipeline != nil {
+			C.metal_matvec_q4_0_transposed_f32(b.queue, b.matvecQ4Pipeline,
+				unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+				C.int(n), C.int(k))
+			return
+		}
+		// Single row (decode) - use NR2 matvec (2 outputs per simdgroup)
+		// Better activation reuse: load activations once, compute 2 outputs
+		C.metal_matvec_q4_0_nr2_f32(b.queue, b.matvecQ4NR2Pipeline,
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(n), C.int(k))
 	} else if m >= 8 && b.matmulQ4SimdgroupPipeline != nil {
@@ -330,6 +349,29 @@ func (b *Backend) MatMulQ4_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 		C.metal_matmul_q4_0_batched_f32(b.queue, b.matmulQ4BatchedPipeline,
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(m), C.int(n), C.int(k))
+	}
+}
+
+// MatVecQ4_0MultiOutput executes the 8-output-per-threadgroup kernel explicitly.
+// Primarily used for validation/testing of the multi-output implementation.
+func (b *Backend) MatVecQ4_0MultiOutput(a, bMat, out tensor.DevicePtr, n, k int) {
+	switch {
+	case b.matvecQ4MultiOutputPipeline != nil:
+		C.metal_matvec_q4_0_multi_output_f32(b.queue, b.matvecQ4MultiOutputPipeline,
+			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+			C.int(n), C.int(k))
+	case b.matvecQ4NR2Pipeline != nil:
+		// Fallback to NR2 path if multi-output pipeline is unavailable.
+		C.metal_matvec_q4_0_nr2_f32(b.queue, b.matvecQ4NR2Pipeline,
+			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+			C.int(n), C.int(k))
+	case b.matvecQ4Pipeline != nil:
+		// Last resort: single-output matvec.
+		C.metal_matvec_q4_0_transposed_f32(b.queue, b.matvecQ4Pipeline,
+			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+			C.int(n), C.int(k))
+	default:
+		panic("MatVecQ4_0MultiOutput called but no Q4 matvec pipeline available")
 	}
 }
 
@@ -350,23 +392,40 @@ func (b *Backend) MatMulQ6_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 
 // MatMulQ4_K performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q4_K format.
 // B contains raw Q4_K data (144 bytes per 256 elements).
-// Only supports M=1 (matvec) for now.
 func (b *Backend) MatMulQ4_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
-	if b.matvecQ4KPipeline == nil {
-		panic("MatMulQ4_K called but no matvecQ4KPipeline available")
+	if m == 1 {
+		// Decode: use optimized matvec kernel
+		if b.matvecQ4KPipeline == nil {
+			panic("MatMulQ4_K called but no matvecQ4KPipeline available")
+		}
+		C.metal_matvec_q4k_multi_output_f32(b.queue, b.matvecQ4KPipeline,
+			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+			C.int(n), C.int(k))
+	} else {
+		// Prefill: use batched kernel
+		if b.matmulQ4KBatchedPipeline == nil {
+			panic("MatMulQ4_K called with M>1 but no matmulQ4KBatchedPipeline available")
+		}
+		C.metal_matmul_q4k_batched_f32(b.queue, b.matmulQ4KBatchedPipeline,
+			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+			C.int(m), C.int(n), C.int(k))
 	}
-	if m != 1 {
-		panic("MatMulQ4_K only supports M=1 (matvec) for now")
-	}
-	C.metal_matvec_q4k_multi_output_f32(b.queue, b.matvecQ4KPipeline,
-		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
-		C.int(n), C.int(k))
 }
 
 // RMSNorm performs RMS normalization.
 func (b *Backend) RMSNorm(x, weight, out tensor.DevicePtr, rows, cols int, eps float32) {
 	C.metal_rmsnorm_f32(b.queue, b.rmsnormPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(weight.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(rows), C.int(cols), C.float(eps))
+}
+
+// AddRMSNorm performs fused residual addition + RMSNorm.
+// x = x + residual (in-place), then out = RMSNorm(x, weight)
+// This saves one memory round-trip compared to separate Add + RMSNorm.
+func (b *Backend) AddRMSNorm(x, residual, weight, out tensor.DevicePtr, rows, cols int, eps float32) {
+	C.metal_add_rmsnorm_f32(b.queue, b.addRMSNormPipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(residual.Addr()),
+		unsafe.Pointer(weight.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(rows), C.int(cols), C.float(eps))
 }
 
@@ -482,9 +541,10 @@ func (b *Backend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHea
 // SDPAPrefill performs SDPA for prefill with causal masking.
 // Uses Flash Attention 2 for longer sequences where K/V tiling provides benefit.
 func (b *Backend) SDPAPrefill(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
-	// Use Flash Attention 2 for longer sequences (>=256 tokens) where tiling helps
-	// FA2 tiles K/V in shared memory and exploits GQA to share loads across Q heads
-	if b.flashAttention2Pipeline != nil && seqLen >= 256 {
+	// Use Flash Attention 2 for sequences >= 32 tokens
+	// FA2 uses two-pass tiling (find max, then accumulate) to reduce register pressure
+	// and caches Q in registers while streaming K/V tiles from shared memory
+	if b.flashAttention2Pipeline != nil && seqLen >= 32 {
 		C.metal_flash_attention_2_f32(b.queue, b.flashAttention2Pipeline,
 			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 			unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
@@ -492,6 +552,16 @@ func (b *Backend) SDPAPrefill(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, 
 			C.float(scale))
 		return
 	}
+	C.metal_sdpa_prefill_f32(b.queue, b.sdpaPrefillPipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale))
+}
+
+// SDPAPrefillStandard calls the standard SDPA kernel directly, bypassing FA2 threshold.
+// Used for benchmarking to compare FA2 vs standard at same sequence lengths.
+func (b *Backend) SDPAPrefillStandard(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
 	C.metal_sdpa_prefill_f32(b.queue, b.sdpaPrefillPipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),

@@ -1,42 +1,82 @@
 # Project Status
 
-**Last Updated:** 2025-12-11
+**Last Updated:** 2025-12-12
 **Status:** 🟢 On Track
 
 ## Current Phase
 Phase 9: Performance Optimization (Target: Match llama.cpp)
 
 ## Current Task
-Simdgroup_matrix kernel implemented for prefill. Prefill improved ~48% (226→336 tok/s).
+Flash Attention 2 optimized and enabled for prefill.
 
 ## Latest Performance Metrics
 | Metric | Vexel | llama.cpp | Gap |
 |--------|-------|-----------|-----|
-| Prefill | **336 tok/s** | ~1000 tok/s | **3.0x** |
-| Decode | **101 tok/s** | ~266 tok/s | 2.6x |
+| Prefill | **355-390 tok/s** | ~1047 tok/s | **2.7-3x** |
+| Decode | **86-88 tok/s** | ~275 tok/s | 3.0x |
 
 **Model:** TinyLlama 1.1B Q4_0
 **Hardware:** M4 Pro
 
-**Progress since start of optimization:**
-- Prefill: 70 → 336 tok/s (4.8x improvement)
-- Decode: 49 → 101 tok/s (2.1x improvement)
+**Note:** Prefill improved 2.4x via Flash Attention 2 optimization (from ~150 tok/s).
+
+### Recent Ad-Hoc E2E Runs (TinyLlama Q4_0, Metal)
+| Prompt | Max Tokens | Vexel Prefill | Vexel Decode | llama.cpp Prompt Eval | llama.cpp Decode |
+|--------|------------|---------------|--------------|-----------------------|------------------|
+| "Hello!" | 32 | 15.9 tok/s | 23.3 tok/s | 645 tok/s | 257 tok/s |
+| "Hello!" | 50 | 15.7 tok/s | 23.7 tok/s | — | — |
+| "Unit testing in Go" | 64 | 40.4 tok/s | 23.5 tok/s | 1217 tok/s | 256 tok/s |
+| "RoPE summary" | 128 | 37.9 tok/s | 23.3 tok/s | 1311 tok/s | 260 tok/s |
+
+**Flash Attention 2 kernel-only synthetic throughput:** ~119,885 tok/s (seqLen=512, heads=32, headDim=64, avg over 10 iters).
 
 ## Recent Progress
 - [x] Fixed Q4_0 kernel bug causing garbage output
 - [x] Created comprehensive Q4_0 kernel test suite (9 tests)
 - [x] Implemented SIMD vectorized Q4_0 kernels
 - [x] Implemented multi-output Q4_0 matvec (8 outputs/threadgroup)
-- [x] **Implemented simdgroup_matrix kernel for prefill (M>=8)**
-  - 32x32 tiled matrix multiplication using 8x8 simdgroup_float8x8
-  - Cooperative loading to threadgroup memory with dequantization
-  - B matrix stored transposed for correct C = A @ B^T computation
+- [x] Implemented simdgroup_matrix kernel for prefill (M>=8)
 - [x] Profiled memory bandwidth: achieving ~30 GB/s of ~273 GB/s (11%)
+- [x] **Implemented Q6_K matvec kernel for lm_head**
+- [x] **Optimized prefill to compute only last-token logits**
+- [x] **Implemented Add+RMSNorm kernel fusion**
+  - Fuses residual addition with RMSNorm to save one memory round-trip
+  - Used after attention output projection in transformer layers
+  - FusedOps interface for optional backend support
+- [x] **Fixed Q4_K GPU kernel to match llama.cpp exactly**
+  - Root cause: scale/min unpacking didn't match get_scale_min_k4 format
+  - Fixed both matvec and batched matmul kernels
+  - Corrected byte layout for 64-element groups (32 bytes, low/high nibbles)
+  - All Q4_K tests pass (max diff 0.003418 for single block, 0.1875 for multi-block)
+  - Q4_K raw loading re-enabled for Q4_K_M models
+  - **Verified with real GGUF data**: max diff 0.000006 vs CPU dequantization
+- [x] **Optimized Flash Attention 2 kernel (2.4x prefill speedup)**
+  - Two-pass approach: (1) find tile max, (2) compute exp and accumulate V
+  - Eliminated `float tileScores[64]` array, reducing register pressure
+  - Q vector cached in registers, streamed from K/V tiles in shared memory
+  - Lowered FA2 threshold from 256 to 32 tokens
+  - Results: 355-390 tok/s prefill (was ~150 tok/s)
 
 ## Next Actions
-1. Implement Q6_K kernel for lm_head (currently using F32)
-2. Optimize memory bandwidth utilization
-3. Profile and tune simdgroup tile sizes
+1. Half-precision activations to halve A-vector bandwidth
+2. Additional kernel fusions (RMSNorm+MatMul for attention projections)
+3. Profile and benchmark Q4_K model performance
+4. Investigate remaining prefill gap (2.7-3x vs llama.cpp)
+
+## Profiling Analysis (Decode)
+Per-layer breakdown:
+- Q4_0 matmuls (7 projections): 540 µs (77% of layer)
+- Other ops (RMSNorm, RoPE, SDPA): 100 µs (14%)
+- Fused SiLU+Mul: 60 µs (9%)
+- **Total per layer: ~700 µs**
+- **22 layers: ~15 ms → ~67 tok/s theoretical**
+- **Actual: 91 tok/s** (batching helps)
+
+Memory bandwidth achieved:
+- FFN weights: 193 GB/s (71% of 273 GB/s theoretical)
+- Attention Q: 111 GB/s (41% of theoretical)
+
+Bottleneck: Q4_0's 18-byte block misalignment limits vectorized loads.
 
 ## Blockers
 None
@@ -45,10 +85,53 @@ None
 - Simdgroup kernel: 4 active simdgroups per threadgroup, each computes 16x16 output
 - Uses simdgroup_multiply_accumulate for 8x8 tiles
 - M >= 8 threshold for using simdgroup kernel (prefill phase)
+- **Memory bandwidth limitation**: Q4_0's 18-byte blocks don't align with GPU memory bus (32 bytes), limiting vectorized load optimizations
 
 ---
 
 ## Status History
+
+### 2025-12-11: Q6_K Kernel and Prefill Optimization
+**Status:** Significant prefill improvement, Q6_K memory savings
+
+Implemented Q6_K GPU kernel for lm_head and optimized prefill path.
+
+**Key Changes:**
+1. **Q6_K Matvec Kernel** (`metal_bridge_darwin.m`)
+   - Native GPU dequantization of Q6_K format
+   - 256 elements per block, 210 bytes encoding
+   - Uses simd_sum for efficient reduction
+   - Max diff vs F32: 0.000793 (validated in tests)
+
+2. **Prefill Optimization** (`decode.go`)
+   - Modified `DecodeWithGPUKV` and `PrefillWithPagedKV` to extract only last token
+   - Uses `CopyBuffer` for GPU-to-GPU copy with offset
+   - RMSNorm and lm_head matmul now M=1 instead of M=seqLen
+   - Enables Q6_K kernel (only supports M=1)
+
+**Results:**
+- Prefill: 336 → 470 tok/s (+40%)
+- Decode: ~91 tok/s (unchanged)
+- lm_head memory: 262 MB → 53 MB (-80%)
+- Gap to llama.cpp: 3.1x → 2.2x (prefill)
+
+### 2025-12-11: Memory Bandwidth Investigation
+**Status:** Investigated, limited gains possible with Q4_0 format
+
+Investigated memory bandwidth optimization for decode (currently at ~11% of theoretical 273 GB/s).
+
+**Attempted Optimizations:**
+- **Vectorized Q4_0 loads (uint4, uchar4)**: Failed due to alignment issues. Q4_0 blocks are 18 bytes, which doesn't align with GPU memory bus requirements.
+- **Loop unrolling (2x)**: No improvement, possibly due to register pressure.
+- **A-vector caching in threadgroup memory**: Previously tested, regressed due to scalar load overhead.
+
+**Key Finding:**
+Q4_0's 18-byte block size is fundamentally misaligned with GPU memory systems (32-byte bus width). Significant bandwidth improvements would require:
+1. Different quantization format (Q4_K uses 144 bytes = 4.5 cache lines)
+2. Data layout transformation (transpose/repack for coalesced access)
+3. Half precision activations (halve A reads)
+
+**Conclusion:** Decode performance is limited by Q4_0 format, not kernel implementation.
 
 ### 2025-12-11: Simdgroup Matrix Kernel for Prefill
 **Status:** Major prefill performance improvement

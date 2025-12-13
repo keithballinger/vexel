@@ -10,8 +10,8 @@ import (
 
 // Q4_0 format constants
 const (
-	Q4BlockSize     = 32  // Elements per Q4_0 block
-	Q4BytesPerBlock = 18  // 2 (f16 scale) + 16 (32 nibbles)
+	Q4BlockSize     = 32 // Elements per Q4_0 block
+	Q4BytesPerBlock = 18 // 2 (f16 scale) + 16 (32 nibbles)
 )
 
 // createQ4_0Block creates a single Q4_0 block with the given scale and values.
@@ -143,18 +143,19 @@ func float16ToFloat32CPU(h uint16) float32 {
 // cpuMatMulQ4_0 is a CPU reference implementation of Q4_0 matmul.
 // Computes C = A @ B^T where A is [M,K] F32, B is [N,K] Q4_0, C is [M,N].
 func cpuMatMulQ4_0(a []float32, bQ4 []byte, m, n, k int) []float32 {
-	// Dequantize B
-	bF32 := dequantizeQ4_0(bQ4, n*k)
+	numBlocksPerRow := (k + Q4BlockSize - 1) / Q4BlockSize
+	bytesPerRow := numBlocksPerRow * Q4BytesPerBlock
 
-	// Compute C = A @ B^T
 	c := make([]float32, m*n)
-	for i := 0; i < m; i++ {
-		for j := 0; j < n; j++ {
+	for row := 0; row < n; row++ {
+		rowData := bQ4[row*bytesPerRow : (row+1)*bytesPerRow]
+		rowF32 := dequantizeQ4_0(rowData, k)
+		for col := 0; col < m; col++ {
 			var sum float32
 			for l := 0; l < k; l++ {
-				sum += a[i*k+l] * bF32[j*k+l]
+				sum += a[col*k+l] * rowF32[l]
 			}
-			c[i*n+j] = sum
+			c[col*n+row] = sum
 		}
 	}
 	return c
@@ -452,8 +453,8 @@ func TestQ4_0Batched_Simple(t *testing.T) {
 	// A = [[1,1,...], [2,2,...]]
 	a := make([]float32, M*K)
 	for i := 0; i < K; i++ {
-		a[i] = 1.0     // Row 0
-		a[K+i] = 2.0   // Row 1
+		a[i] = 1.0   // Row 0
+		a[K+i] = 2.0 // Row 1
 	}
 
 	// B = all ones
