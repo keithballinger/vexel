@@ -20,7 +20,10 @@ if ! command -v "$LLAMA_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
-readarray -t PROMPTS <<'EOF'
+PROMPTS=()
+while IFS= read -r line; do
+  PROMPTS+=("$line")
+done <<'EOF'
 Hello!
 Describe the benefits of unit testing in Go in three concise sentences.
 Write a brief summary of how rotary positional embeddings work in transformers.
@@ -47,8 +50,12 @@ run_case() {
   "$VEXEL_BIN" -model "$MODEL_PATH" -gpu -completion -max-tokens "$tokens" <<<"$prompt" >"$v_log"
   local prefill decode
   prefill="N/A"; decode="N/A"
-  if sed -n 's/.*prefill: \([0-9.]*\) tok\/s | decode: \([0-9.]*\) tok\/s.*/\1 \2/p' "$v_log" | read -r p d; then
-    prefill="$p"; decode="$d"
+  local parsed
+  parsed=$(sed -n 's/.*prefill: \([0-9.]*\) tok\/s | decode: \([0-9.]*\) tok\/s.*/\1 \2/p' "$v_log" || true)
+  if [[ -n "$parsed" ]]; then
+    read -r p d <<<"$parsed"
+    prefill="$p"
+    decode="$d"
   fi
 
   # llama.cpp

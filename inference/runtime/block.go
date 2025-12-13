@@ -279,7 +279,7 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 		// Decode: use SDPA kernel (for single token, K/V are the current token only)
 		b.backend.SDPA(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
 	} else {
-		// Prefill: use SDPAPrefill kernel with causal masking
+		// Prefill: use SDPAPrefill kernel with causal masking (FA2 threshold handled in backend)
 		b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
 	}
 
@@ -473,7 +473,7 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 		// SDPA expects kvLen as the KV sequence length
 		b.backend.SDPA(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale)
 	} else {
-		// Prefill: use causal SDPAPrefill
+		// Prefill: use causal SDPAPrefill (FA2 threshold handled in backend)
 		b.backend.SDPAPrefill(qPtr, fullKPtr, fullVPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
 	}
 	// No sync - SDPA must complete before Wo can read attnOut (serialized in queue)
@@ -604,7 +604,7 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	var kQ8Ptr, vQ8Ptr tensor.DevicePtr
 	if useFP16KVCache && scratchPtr.Location() != tensor.CPU {
 		// Allocate FP16 buffers for K, V (for cache storage)
-		kF16Ptr = b.backend.Alloc(kvSize * 2)  // FP16 = 2 bytes per element
+		kF16Ptr = b.backend.Alloc(kvSize * 2) // FP16 = 2 bytes per element
 		vF16Ptr = b.backend.Alloc(kvSize * 2)
 		// For decode, also need FP16 Q and attention output
 		if seqLen == 1 {
@@ -662,7 +662,7 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	// (RMSNorm, Q/K/V projections, RoPE) haven't been committed yet.
 	// Without this sync, CopyBuffer reads uninitialized data.
 	if useBatching {
-		b.batcher.EndBatch() // Commit and execute the batch
+		b.batcher.EndBatch()   // Commit and execute the batch
 		b.batcher.BeginBatch() // Start a new batch for remaining ops
 	}
 

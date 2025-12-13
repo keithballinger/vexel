@@ -30,6 +30,14 @@ Flash Attention 2 optimized and enabled for prefill.
 
 **Flash Attention 2 kernel-only synthetic throughput:** ~119,885 tok/s (seqLen=512, heads=32, headDim=64, avg over 10 iters).
 
+### Latest Harness Run (VEXEL_FA2_MIN_SEQ=16, TinyLlama Q4_0, Metal)
+| Prompt | Max Tokens | Vexel Prefill | Vexel Decode | llama.cpp Prompt Eval | llama.cpp Decode |
+|--------|------------|---------------|--------------|-----------------------|------------------|
+| "Hello!" | 50 | 14.8 tok/s | 17.7 tok/s | N/A | N/A |
+| "Unit testing in Go" | 64 | 40.3 tok/s | 18.7 tok/s | N/A | N/A |
+| "RoPE summary" | 128 | 39.0 tok/s | 16.4 tok/s | N/A | N/A |
+Note: llama.cpp parsing failed in this harness run due to log format; Vexel numbers captured.
+
 ## Recent Progress
 - [x] Fixed Q4_0 kernel bug causing garbage output
 - [x] Created comprehensive Q4_0 kernel test suite (9 tests)
