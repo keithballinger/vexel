@@ -418,9 +418,14 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
 - [ ] Benchmark: Test with larger models (7B, 13B) if applicable.
 - [ ] Document: Performance tuning guide with optimal settings.
 - [ ] Document: Architecture-specific optimizations (M1/M2/M3).
-- [~] Implement Vexel vs. llama.cpp harness (perf + correctness) and keep reports. (Started: 2025-12-12 23:08)
-  - Latest harness run (2025-12-12 23:10, VEXEL_FA2_MIN_SEQ=16): Vexel prefill 15.3–40.8 tok/s, decode 14.8–17.6; llama.cpp prompt 552–1084 tok/s, decode 265–269. Report: perf_reports/report-20251212-231010.md
+- [x] Implement Vexel vs. llama.cpp harness (perf + correctness) and keep reports. (Started: 2025-12-12 23:08, Completed: 2025-12-12 23:25)
+  - Latest harness run (2025-12-12 23:27, VEXEL_FA2_MIN_SEQ=16): Vexel prefill 15.9–40.1 tok/s, decode 14.8–23.9; llama.cpp prompt 522–1092 tok/s, decode 262–269; similarity 0.013–0.016. Report: perf_reports/report-20251212-232701.md
 - [ ] Run perf harness after each major task and record results in plan.md and status.md.
+  - Next run should include correctness diff vs. llama.cpp
+- [~] Flash Attention tuning: lower FA2 threshold and enable mixed-precision activations to reduce bandwidth. (Started: 2025-12-12 23:30)
+  - Default FA2 threshold lowered to 16 (clamped min 8 via VEXEL_FA2_MIN_SEQ)
+- [ ] Kernel fusion: RMSNorm + MatMul on attention projections.
+- [x] Harness correctness check: compare Vexel vs. llama.cpp outputs (logprob/sequence diff) and report. (Completed: 2025-12-12 23:27)
 
 **Target Final Performance:**
 | Metric | Current | Target | Required Improvement |

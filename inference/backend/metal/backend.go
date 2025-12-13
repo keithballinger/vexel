@@ -109,9 +109,14 @@ var (
 
 func flashAttentionMinSeqLen() int {
 	fa2MinSeqLenOnce.Do(func() {
-		fa2MinSeqLen = 32 // default threshold
+		// Default threshold: 16 to engage FA2 earlier (benefits long tiles on M-series GPUs)
+		fa2MinSeqLen = 16
 		if v := os.Getenv("VEXEL_FA2_MIN_SEQ"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				// Clamp to a practical minimum of 8 to avoid tiny-sequence overhead
+				if n < 8 {
+					n = 8
+				}
 				fa2MinSeqLen = n
 			}
 		}

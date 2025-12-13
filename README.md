@@ -13,11 +13,12 @@ Use the provided harness to compare Vexel (Metal) against llama.cpp on a fixed p
 ```bash
 bash scripts/perf_harness.sh
 ```
+The harness uses deterministic sampling (`temp=0`, `top-k=1`, `top-p=0`, `seed=1` for llama.cpp) to make correctness comparisons meaningful and adds a similarity score column.
 Environment overrides:
 - `MODEL_PATH` – GGUF model path
 - `VEXEL_BIN` – path to Vexel binary
 - `LLAMA_BIN` – path to llama.cpp binary
 - `OUT_DIR` – output directory (default `perf_reports`)
-- `VEXEL_FA2_MIN_SEQ` – override Flash Attention 2 minimum seq length (default 32)
+- `VEXEL_FA2_MIN_SEQ` – override Flash Attention 2 minimum seq length (default 16, clamped to minimum 8)
 
 The harness writes a Markdown report with throughput numbers and raw logs to `perf_reports/report-<timestamp>.md`. Copy the latest results into `plan.md` next to the completed task and append to `.conductor/status.md` per the workflow.

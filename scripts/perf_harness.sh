@@ -37,8 +37,8 @@ report="$OUT_DIR/report-$(date +%Y%m%d-%H%M%S).md"
 
 echo "# Vexel vs llama.cpp (TinyLlama Q4_0)" >"$report"
 echo "" >>"$report"
-echo "| Prompt | Max Tokens | Vexel Prefill | Vexel Decode | llama.cpp Prompt Eval | llama.cpp Decode |" >>"$report"
-echo "|---|---|---|---|---|---|" >>"$report"
+echo "| Prompt | Max Tokens | Vexel Prefill | Vexel Decode | llama.cpp Prompt Eval | llama.cpp Decode | Similarity |" >>"$report"
+echo "|---|---|---|---|---|---|---|" >>"$report"
 
 run_case() {
   local prompt="$1"
@@ -54,7 +54,7 @@ run_case() {
   l_log=$(mktemp)
 
   # Vexel
-  "$VEXEL_BIN" -model "$MODEL_PATH" -gpu -completion -max-tokens "$tokens" <<<"$prompt" >"$v_log"
+  "$VEXEL_BIN" -model "$MODEL_PATH" -gpu -completion -max-tokens "$tokens" -temp 0 -top-k 1 -top-p 0 <<<"$prompt" >"$v_log"
   local prefill decode
   prefill="N/A"; decode="N/A"
   local parsed
@@ -66,7 +66,7 @@ run_case() {
   fi
 
   # llama.cpp
-  LLAMA_LOG_COLORS=0 "$LLAMA_BIN" -m "$MODEL_PATH" -p "$prompt" -n "$tokens" --no-warmup >"$l_log" 2>&1
+  LLAMA_LOG_COLORS=0 "$LLAMA_BIN" -m "$MODEL_PATH" -p "$prompt" -n "$tokens" --no-warmup --temp 0 --top-k 1 --top-p 0 --seed 1 >"$l_log" 2>&1
   local llama_prompt llama_decode
   local tokps
   tokps=$(parse_tokps_pair "$l_log")
@@ -75,7 +75,23 @@ run_case() {
   [[ -z "$llama_prompt" ]] && llama_prompt="N/A"
   [[ -z "$llama_decode" ]] && llama_decode="N/A"
 
-  echo "| ${prompt//|/\\|} | $tokens | $prefill tok/s | $decode tok/s | $llama_prompt tok/s | $llama_decode tok/s |" >>"$report"
+  # Correctness: compare generated text similarity
+  local v_text l_text similarity
+  v_text=$(grep '^>>' "$v_log" | head -n1 | sed 's/^>> //')
+  l_text=$(perl -0777 -ne 'if(/<\|assistant\|>(.*)/s){$t=$1;$t=~s/> EOF by user.*//s; $t=~s/^\s+//; $t=~s/\s+$//; print $t}' "$l_log")
+  similarity=$(V_TEXT="$v_text" L_TEXT="$l_text" python - <<'PY'
+import difflib, os
+v = os.environ.get("V_TEXT","")
+l = os.environ.get("L_TEXT","")
+if not v or not l:
+    print("N/A")
+else:
+    ratio = difflib.SequenceMatcher(None, v[:400], l[:400]).ratio()
+    print(f"{ratio:.3f}")
+PY
+  )
+
+  echo "| ${prompt//|/\\|} | $tokens | $prefill tok/s | $decode tok/s | $llama_prompt tok/s | $llama_decode tok/s | $similarity |" >>"$report"
 
   echo "---- Vexel log ----" >>"$report"
   cat "$v_log" >>"$report"

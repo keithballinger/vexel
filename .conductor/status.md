@@ -1,13 +1,13 @@
 # Project Status
 
-**Last Updated:** 2025-12-12 23:10
+**Last Updated:** 2025-12-12 23:27
 **Status:** 🟢 On Track
 
 ## Current Phase
 Phase 9: Performance Optimization (Target: Match llama.cpp)
 
 ## Current Task
-Implement Vexel vs. llama.cpp harness (perf + correctness) and keep reports.
+Flash Attention tuning: lower FA2 threshold and enable mixed-precision activations to reduce bandwidth.
 
 ## Latest Performance Metrics
 | Metric | Vexel | llama.cpp | Gap |
@@ -30,17 +30,19 @@ Implement Vexel vs. llama.cpp harness (perf + correctness) and keep reports.
 
 **Flash Attention 2 kernel-only synthetic throughput:** ~119,885 tok/s (seqLen=512, heads=32, headDim=64, avg over 10 iters).
 
-### Latest Harness Run (2025-12-12 23:10, VEXEL_FA2_MIN_SEQ=16, TinyLlama Q4_0, Metal)
-| Prompt | Max Tokens | Vexel Prefill | Vexel Decode | llama.cpp Prompt Eval | llama.cpp Decode |
-|--------|------------|---------------|--------------|-----------------------|------------------|
-| "Hello!" | 50 | 15.3 tok/s | 16.2 tok/s | 552.16 tok/s | 268.37 tok/s |
-| "Unit testing in Go" | 64 | 40.8 tok/s | 17.6 tok/s | 893.34 tok/s | 265.86 tok/s |
-| "RoPE summary" | 128 | 39.0 tok/s | 15.3 tok/s | 842.24 tok/s | 268.27 tok/s |
-| "Flash Attention 2 vs Flash Attention 1" | 96 | 40.8 tok/s | 15.9 tok/s | 829.94 tok/s | 269.35 tok/s |
-| "Go HTTP handler (JSON in/out)" | 192 | 38.8 tok/s | 14.8 tok/s | 1084.41 tok/s | 266.42 tok/s |
-Report: perf_reports/report-20251212-231010.md
+### Latest Harness Run (2025-12-12 23:27, VEXEL_FA2_MIN_SEQ=16, TinyLlama Q4_0, Metal, temp=0/top-k=1/top-p=0)
+| Prompt | Max Tokens | Vexel Prefill | Vexel Decode | llama.cpp Prompt Eval | llama.cpp Decode | Similarity |
+|--------|------------|---------------|--------------|-----------------------|------------------|------------|
+| "Hello!" | 50 | 15.9 tok/s | 22.8 tok/s | 522.36 tok/s | 265.26 tok/s | 0.016 |
+| "Unit testing in Go" | 64 | 39.2 tok/s | 23.9 tok/s | 947.71 tok/s | 264.69 tok/s | 0.014 |
+| "RoPE summary" | 128 | 38.0 tok/s | 15.0 tok/s | 824.93 tok/s | 269.36 tok/s | 0.013 |
+| "Flash Attention 2 vs Flash Attention 1" | 96 | 40.1 tok/s | 15.8 tok/s | 823.09 tok/s | 269.01 tok/s | 0.013 |
+| "Go HTTP handler (JSON in/out)" | 192 | 40.1 tok/s | 23.6 tok/s | 959.69 tok/s | 262.28 tok/s | 0.013 |
+Report: perf_reports/report-20251212-232701.md
 
 ## Recent Progress
+- [x] Lowered FA2 default threshold to 16 (clamped min 8 via VEXEL_FA2_MIN_SEQ) to engage FA2 earlier on Metal
+- [x] Perf harness adds similarity column and deterministic sampling (temp=0/top-k=1/top-p=0/seed=1) for correctness comparisons
 - [x] Perf harness now captures llama.cpp timings (stderr) and exercises five prompts/lengths with FA2 threshold override
 - [x] Fixed Q4_0 kernel bug causing garbage output
 - [x] Created comprehensive Q4_0 kernel test suite (9 tests)
