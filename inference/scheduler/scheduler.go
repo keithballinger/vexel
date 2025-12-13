@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 	"vexel/inference/pkg/sampler"
 	"vexel/inference/pkg/tokenizer"
@@ -48,6 +49,7 @@ func (m SchedulerMetrics) PrefillTokensPerSecond() float64 {
 
 // Scheduler manages the execution of sequences.
 type Scheduler struct {
+	mu        sync.RWMutex
 	runtime   *runtime.ModelRuntime
 	tokenizer *tokenizer.Tokenizer
 	sampler   *sampler.Sampler
@@ -99,7 +101,9 @@ func (s *Scheduler) step(ctx context.Context) error {
 	ready := s.collectReady()
 
 	// Update Active Sequences metric
+	s.mu.Lock()
 	s.metrics.ActiveSequences = len(s.sequences)
+	s.mu.Unlock()
 
 	// 2. Form batch
 	batch := s.formBatches(ready)
@@ -207,47 +211,6 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 		if len(decodeSeqs) == 1 {
 			logits, err = s.runtime.DecodeWithGPUKV(tokens, positions[0])
 		} else {
-			// Process one at a time for multi-sequence
-			for i, seq := range decodeSeqs {
-				singleLogits, singleErr := s.runtime.DecodeWithGPUKV([]int{tokens[i]}, positions[i])
-				if singleErr != nil {
-					err = singleErr
-					break
-				}
-				if i == 0 {
-					logits = singleLogits
-				}
-				// Sample immediately for this sequence
-				vocabSize := s.runtime.Config().VocabSize
-				singleLogitsData := s.getLogitsOnCPU(singleLogits, vocabSize)
-				if singleLogitsData != nil {
-					seq.AdvancePosition()
-					if seq.State() == StatePending {
-						seq.SetState(StateDecoding)
-					}
-					tokenID := s.sampler.Sample(singleLogitsData)
-					seq.AddGeneratedToken(tokenID)
-					eosToken := 2
-					if s.tokenizer != nil {
-						eosToken = s.tokenizer.EOS()
-					}
-					if tokenID == eosToken {
-						seq.SetState(StateFinished)
-						seq.Close()
-					} else if s.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= s.config.MaxTokens {
-						seq.SetState(StateFinished)
-						seq.Close()
-					} else {
-						var text string
-						if s.tokenizer != nil {
-							text, _ = s.tokenizer.Decode([]int{tokenID})
-						} else {
-							text = fmt.Sprintf(" %d", tokenID)
-						}
-						seq.PushToken(text)
-					}
-				}
-			}
 			// Process one at a time for multi-sequence
 			for i, seq := range decodeSeqs {
 				singleLogits, singleErr := s.runtime.DecodeWithGPUKV([]int{tokens[i]}, positions[i])
@@ -422,9 +385,11 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 	}
 
 	// Update metrics at the very end
+	s.mu.Lock()
 	s.metrics.TotalTokens += len(decodeSeqs)
 	s.metrics.DecodeTokens += len(decodeSeqs)
 	s.metrics.DecodeTime += time.Since(startTime)
+	s.mu.Unlock()
 
 	return nil
 }
@@ -470,9 +435,11 @@ func (s *Scheduler) runBatchedPrefill(seq *Sequence) error {
 
 	// Update metrics (including sampling/sync time)
 	prefillTime := time.Since(startTime)
+	s.mu.Lock()
 	s.metrics.TotalTokens += len(promptTokens)
 	s.metrics.PrefillTokens += len(promptTokens)
 	s.metrics.PrefillTime += prefillTime
+	s.mu.Unlock()
 
 	// Check for EOS
 	eosToken := 2
@@ -542,9 +509,11 @@ func (s *Scheduler) runGPUPrefill(seq *Sequence) error {
 
 	// Update metrics (including sampling/sync time)
 	prefillTime := time.Since(startTime)
+	s.mu.Lock()
 	s.metrics.TotalTokens += len(promptTokens)
 	s.metrics.PrefillTokens += len(promptTokens)
 	s.metrics.PrefillTime += prefillTime
+	s.mu.Unlock()
 
 	// Check for EOS
 	eosToken := 2
@@ -607,7 +576,9 @@ func (s *Scheduler) RemoveSequence(id SequenceID) {
 	}
 
 	delete(s.sequences, id)
+	s.mu.Lock()
 	s.metrics.CompletedSequences++
+	s.mu.Unlock()
 }
 
 // SequenceCount returns the number of active sequences.
@@ -617,6 +588,8 @@ func (s *Scheduler) SequenceCount() int {
 
 // Metrics returns the current performance metrics.
 func (s *Scheduler) Metrics() SchedulerMetrics {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.metrics
 }
 
