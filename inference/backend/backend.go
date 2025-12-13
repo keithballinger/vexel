@@ -58,6 +58,10 @@ type FP16Ops interface {
 	// K/V: [kvLen, numKVHeads, headDim] in FP16
 	// out: [numQHeads, headDim] in FP16
 	SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32)
+
+	// SDPAPrefillF16 performs prefill SDPA with FP16 activations (Flash Attention 2).
+	// Q, K, V, out: [seqLen, numHeads, headDim] in FP16
+	SDPAPrefillF16(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32)
 }
 
 // FusedOps is an optional interface for backends that support fused kernel operations.

@@ -55,6 +55,9 @@ func (s *SpyBackend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, 
 func (s *SpyBackend) SiLU(x, out tensor.DevicePtr, n int) {
 	s.SiLUCalls++
 }
+func (s *SpyBackend) SiLUMul(gate, up, out tensor.DevicePtr, n int) {
+	s.SiLUCalls++
+}
 func (s *SpyBackend) Softmax(x, out tensor.DevicePtr, rows, cols int) {
 	s.SoftmaxCalls++
 }

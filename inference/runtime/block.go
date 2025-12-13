@@ -606,11 +606,9 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		// Allocate FP16 buffers for K, V (for cache storage)
 		kF16Ptr = b.backend.Alloc(kvSize * 2) // FP16 = 2 bytes per element
 		vF16Ptr = b.backend.Alloc(kvSize * 2)
-		// For decode, also need FP16 Q and attention output
-		if seqLen == 1 {
-			qF16Ptr = b.backend.Alloc(qSize * 2)
-			attnOutF16Ptr = b.backend.Alloc(qSize * 2)
-		}
+		// For decode AND prefill, we need FP16 Q and attention output if using F16 path
+		qF16Ptr = b.backend.Alloc(qSize * 2)
+		attnOutF16Ptr = b.backend.Alloc(qSize * 2)
 	}
 	if useQ8KVCache && scratchPtr.Location() != tensor.CPU {
 		// Allocate Q8_0 buffers for K, V (for cache storage)
@@ -714,8 +712,17 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				b.backend.SDPA(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale)
 			}
 		} else {
-			// Prefill: use causal SDPAPrefill with just current K/V (FP32 only for now)
-			b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+			// Prefill: use causal SDPAPrefill
+			if useFP16KVCache {
+				// FP16 path: convert Q to FP16, use FA2 F16, convert output back to FP32
+				// Note: kF16Ptr and vF16Ptr already contain the F16 converted K/V from step 4
+				b.fp16Ops.ConvertF32ToF16(qPtr, qF16Ptr, qSize)
+				b.fp16Ops.SDPAPrefillF16(qF16Ptr, kF16Ptr, vF16Ptr, attnOutF16Ptr, seqLen, numHeads, numKVHeads, headDim, scale)
+				b.fp16Ops.ConvertF16ToF32(attnOutF16Ptr, attnOutPtr, qSize)
+			} else {
+				// FP32 path
+				b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+			}
 		}
 	})
 

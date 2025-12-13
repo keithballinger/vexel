@@ -72,6 +72,7 @@ type Backend struct {
 	sdpaFlashDecodePipeline     unsafe.Pointer
 	sdpaPrefillPipeline         unsafe.Pointer
 	flashAttention2Pipeline     unsafe.Pointer
+	flashAttention2F16Pipeline  unsafe.Pointer
 	matmulQ4BatchedPipeline     unsafe.Pointer
 	matmulQ4SimdgroupPipeline   unsafe.Pointer
 	matvecQ6KPipeline           unsafe.Pointer
@@ -171,6 +172,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.sdpaFlashDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f32"))
 	b.sdpaPrefillPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_prefill_f32"))
 	b.flashAttention2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("flash_attention_2_f32"))
+	b.flashAttention2F16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("flash_attention_2_f16"))
 	b.matmulQ4BatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_batched_f32"))
 	b.matmulQ4SimdgroupPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_simdgroup_f32"))
 	b.matvecQ6KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q6k_multi_output_f32"))
@@ -598,6 +600,17 @@ func (b *Backend) SDPAPrefillStandard(q, k, v, out tensor.DevicePtr, seqLen, num
 // Uses larger tiles (64 K positions) and exploits GQA to share K/V loads.
 func (b *Backend) FlashAttention2(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
 	C.metal_flash_attention_2_f32(b.queue, b.flashAttention2Pipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale))
+}
+
+// SDPAPrefillF16 performs prefill SDPA with FP16 inputs/outputs (Flash Attention 2).
+// Q, K, V, and out are expected to be in FP16 format.
+// Provides 2x memory bandwidth savings for activation loading.
+func (b *Backend) SDPAPrefillF16(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	C.metal_flash_attention_2_f16(b.queue, b.flashAttention2F16Pipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),

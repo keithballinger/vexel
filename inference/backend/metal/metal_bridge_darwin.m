@@ -2713,7 +2713,7 @@ kernel void flash_attention_2_f32(
 
     // This simdgroup handles one Q head
     int qHeadLocal = simd_group;  // 0-7 for 8 Q heads per KV head
-    if (qHeadLocal >= headsPerKV) return;
+    bool active = (qHeadLocal < headsPerKV);
     int qHead = qHeadBase + qHeadLocal;
 
     // Shared memory layout:
@@ -2728,8 +2728,12 @@ kernel void flash_attention_2_f32(
     // Load Q vector elements this thread handles (cache in registers)
     int d0 = simd_lane * 2;
     int d1 = simd_lane * 2 + 1;
-    float q0 = (d0 < headDim) ? Q[qOffset + d0] : 0.0f;
-    float q1 = (d1 < headDim) ? Q[qOffset + d1] : 0.0f;
+    float q0 = 0.0f;
+    float q1 = 0.0f;
+    if (active) {
+        q0 = (d0 < headDim) ? Q[qOffset + d0] : 0.0f;
+        q1 = (d1 < headDim) ? Q[qOffset + d1] : 0.0f;
+    }
 
     // Causal attention: only attend to positions <= qPos
     int maxKLen = qPos + 1;
@@ -2812,8 +2816,124 @@ kernel void flash_attention_2_f32(
     int outOffset = qPos * numQHeads * headDim + qHead * headDim;
     float invSum = 1.0f / runningSum;
 
-    if (d0 < headDim) out[outOffset + d0] = acc0 * invSum;
-    if (d1 < headDim) out[outOffset + d1] = acc1 * invSum;
+    if (active) {
+        if (d0 < headDim) out[outOffset + d0] = acc0 * invSum;
+        if (d1 < headDim) out[outOffset + d1] = acc1 * invSum;
+    }
+}
+
+// Flash Attention 2 with FP16 activations
+// Q, K, V, out are all FP16
+// Shared memory K/V tiles are also FP16 (halves memory usage)
+kernel void flash_attention_2_f16(
+    device const half* Q [[buffer(0)]],
+    device const half* K [[buffer(1)]],
+    device const half* V [[buffer(2)]],
+    device half* out [[buffer(3)]],
+    constant int& seqLen [[buffer(4)]],
+    constant int& numQHeads [[buffer(5)]],
+    constant int& numKVHeads [[buffer(6)]],
+    constant int& headDim [[buffer(7)]],
+    constant float& scale [[buffer(8)]],
+    threadgroup half* shared [[threadgroup(0)]],
+    uint2 gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int qPos = gid.x;
+    int kvHead = gid.y;
+
+    if (qPos >= seqLen || kvHead >= numKVHeads) return;
+
+    int headsPerKV = numQHeads / numKVHeads;
+    int qHeadBase = kvHead * headsPerKV;
+
+    int qHeadLocal = simd_group;
+    bool active = (qHeadLocal < headsPerKV);
+    int qHead = qHeadBase + qHeadLocal;
+
+    // Shared memory in half precision
+    threadgroup half* Ktile = shared;
+    threadgroup half* Vtile = shared + FA2_TILE_KV * headDim;
+
+    int qOffset = qPos * numQHeads * headDim + qHead * headDim;
+
+    int d0 = simd_lane * 2;
+    int d1 = simd_lane * 2 + 1;
+    
+    half q0 = 0.0h;
+    half q1 = 0.0h;
+    if (active) {
+        q0 = (d0 < headDim) ? Q[qOffset + d0] : 0.0h;
+        q1 = (d1 < headDim) ? Q[qOffset + d1] : 0.0h;
+    }
+
+    int maxKLen = qPos + 1;
+
+    float runningMax = -INFINITY;
+    float runningSum = 0.0f;
+    float acc0 = 0.0f, acc1 = 0.0f;
+
+    for (int tileStart = 0; tileStart < maxKLen; tileStart += FA2_TILE_KV) {
+        int tileEnd = min(tileStart + FA2_TILE_KV, maxKLen);
+        int tileSize = tileEnd - tileStart;
+
+        int loadCount = (FA2_TILE_KV * headDim + FA2_THREADS - 1) / FA2_THREADS;
+        for (int i = 0; i < loadCount; i++) {
+            int idx = tid + i * FA2_THREADS;
+            if (idx < FA2_TILE_KV * headDim) {
+                int kPos = tileStart + idx / headDim;
+                int d = idx % headDim;
+                if (kPos < tileEnd) {
+                    int kOffset = kPos * numKVHeads * headDim + kvHead * headDim + d;
+                    Ktile[idx] = K[kOffset];
+                    Vtile[idx] = V[kOffset];
+                } else {
+                    Ktile[idx] = 0.0h;
+                    Vtile[idx] = 0.0h;
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float tileMax = -INFINITY;
+        for (int k = 0; k < tileSize; k++) {
+            float dot = float(q0) * float(Ktile[k * headDim + d0]) + float(q1) * float(Ktile[k * headDim + d1]);
+            dot = simd_sum(dot);
+            float score = dot * scale;
+            tileMax = max(tileMax, score);
+        }
+
+        float newMax = max(runningMax, tileMax);
+        float rescale = exp(runningMax - newMax);
+        acc0 *= rescale;
+        acc1 *= rescale;
+        runningSum *= rescale;
+
+        float tileSum = 0.0f;
+        for (int k = 0; k < tileSize; k++) {
+            float dot = float(q0) * float(Ktile[k * headDim + d0]) + float(q1) * float(Ktile[k * headDim + d1]);
+            dot = simd_sum(dot);
+            float score = dot * scale;
+            float expScore = exp(score - newMax);
+            tileSum += expScore;
+            acc0 += expScore * float(Vtile[k * headDim + d0]);
+            acc1 += expScore * float(Vtile[k * headDim + d1]);
+        }
+
+        runningSum += tileSum;
+        runningMax = newMax;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    int outOffset = qPos * numQHeads * headDim + qHead * headDim;
+    float invSum = 1.0f / runningSum;
+
+    if (active) {
+        if (d0 < headDim) out[outOffset + d0] = half(acc0 * invSum);
+        if (d1 < headDim) out[outOffset + d1] = half(acc1 * invSum);
+    }
 }
 )";
 
@@ -3977,6 +4097,45 @@ void metal_sdpa_decode_f16(void* queuePtr, void* pipelinePtr,
 
     // One threadgroup per Q head
     MTLSize threadgroups = MTLSizeMake(numQHeads, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_flash_attention_2_f16(void* queuePtr, void* pipelinePtr,
+                                  void* Q, void* K, void* V, void* out,
+                                  int seqLen, int numQHeads, int numKVHeads, int headDim,
+                                  float scale) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBytes:&seqLen length:sizeof(seqLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+
+    // Shared memory: K tile + V tile (both half precision)
+    // FA2_TILE_KV = 64
+    int FA2_TILE_KV = 64;
+    int sharedMemSize = FA2_TILE_KV * headDim * 2 * sizeof(short); // half = 2 bytes
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    // 256 threads (FA2_THREADS)
+    int threadgroupSize = 256;
+
+    // Grid: (seqLen, numKVHeads)
+    MTLSize threadgroups = MTLSizeMake(seqLen, numKVHeads, 1);
     MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
