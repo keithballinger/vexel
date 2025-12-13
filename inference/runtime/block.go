@@ -26,8 +26,8 @@ func (b *BlockRuntime) debugBlockTensor(name string, ptr tensor.DevicePtr, numEl
 	if !ok {
 		return
 	}
+	toHost.Sync() // Wait for GPU before reading
 	toHost.ToHost(data, ptr)
-	toHost.Sync()
 
 	values := make([]float32, numElements)
 	for i := range values {
@@ -529,7 +529,7 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 
 	// Use command buffer batching if available (and not profiling - profiling needs sync points)
 	// Note: Batching measured to have minimal impact, disabled for now
-	useBatching := false // b.batcher != nil && !profiler.enabled
+	useBatching := b.batcher != nil && !profiler.enabled
 	if useBatching {
 		b.batcher.BeginBatch()
 		defer b.batcher.EndBatch()

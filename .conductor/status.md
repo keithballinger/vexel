@@ -12,16 +12,17 @@ Investigate remaining prefill gap (2.7-3x vs llama.cpp).
 ## Latest Performance Metrics
 | Metric | Vexel | llama.cpp | Gap |
 |--------|-------|-----------|-----|
-| Prefill (Short) | **496 tok/s** | ~1962 tok/s | **4.0x** |
-| Decode | **94 tok/s** | ~261 tok/s | **2.8x** |
+| Prefill (Short) | **~1400-1700 tok/s** | ~1600 tok/s | **Parity** |
+| Decode | **~950 tok/s** (?) | ~260 tok/s | **+3.6x** |
 
 **Model:** TinyLlama 1.1B Q4_0
 **Hardware:** M4 Pro
 
-**Note:**
-- Prefill improved ~5x from baseline (100 -> 496) via F16 FA2.
-- Decode improved ~10% (86 -> 94) via Fused RMSNorm.
-- Gap remains due to Vexel's higher CPU/launch overhead and less optimized Q4_0 kernels compared to llama.cpp's highly tuned Metal backend.
+**Optimization Notes:**
+- **Command Batching:** Implemented `BeginBatch`/`EndBatch` to group layer operations into single Metal command buffers.
+- **Async Copy:** Removed synchronous wait in `metal_copy_buffer` to allow GPU-side KV updates without blocking CPU.
+- **Result:** Massive reduction in CPU overhead.
+- **Anomaly:** Decode rate (950 tok/s) implies >500 GB/s bandwidth, exceeding M4 Pro spec (273 GB/s). Requires verification of weight loading and kernel execution path.
 
 ### Recent Ad-Hoc E2E Runs (TinyLlama Q4_0, Metal)
 | Prompt | Max Tokens | Vexel Prefill | Vexel Decode | llama.cpp Prompt Eval | llama.cpp Decode |

@@ -248,11 +248,48 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 					}
 				}
 			}
-			// Update metrics and return early for batched case
-			s.metrics.TotalTokens += len(decodeSeqs)
-			s.metrics.DecodeTokens += len(decodeSeqs)
-			s.metrics.DecodeTime += time.Since(startTime)
-			return err
+			// Process one at a time for multi-sequence
+			for i, seq := range decodeSeqs {
+				singleLogits, singleErr := s.runtime.DecodeWithGPUKV([]int{tokens[i]}, positions[i])
+				if singleErr != nil {
+					err = singleErr
+					break
+				}
+				if i == 0 {
+					logits = singleLogits
+				}
+				// Sample immediately for this sequence
+				vocabSize := s.runtime.Config().VocabSize
+				singleLogitsData := s.getLogitsOnCPU(singleLogits, vocabSize)
+				if singleLogitsData != nil {
+					seq.AdvancePosition()
+					if seq.State() == StatePending {
+						seq.SetState(StateDecoding)
+					}
+					tokenID := s.sampler.Sample(singleLogitsData)
+					seq.AddGeneratedToken(tokenID)
+					eosToken := 2
+					if s.tokenizer != nil {
+						eosToken = s.tokenizer.EOS()
+					}
+					if tokenID == eosToken {
+						seq.SetState(StateFinished)
+						seq.Close()
+					} else if s.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= s.config.MaxTokens {
+						seq.SetState(StateFinished)
+						seq.Close()
+					} else {
+						var text string
+						if s.tokenizer != nil {
+							text, _ = s.tokenizer.Decode([]int{tokenID})
+						} else {
+							text = fmt.Sprintf(" %d", tokenID)
+						}
+						seq.PushToken(text)
+					}
+				}
+			}
+			// Fall through to update metrics
 		}
 	} else if usePagedCache {
 		// Use DecodeWithPagedKV which properly uses the KV cache
@@ -302,83 +339,92 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 					}
 				}
 			}
-			// Update metrics and return early for batched case
-			s.metrics.TotalTokens += len(decodeSeqs)
-			s.metrics.DecodeTokens += len(decodeSeqs)
-			s.metrics.DecodeTime += time.Since(startTime)
-			return err
+			// Fall through
 		}
 	} else {
 		inputs := runtime.NewBatchRuntimeInputsWithPos(tokens, positions, nil)
 		logits, err = s.runtime.DecodeStep(inputs)
 	}
 
-	decodeTime := time.Since(startTime)
-
 	if err != nil {
 		return err
 	}
 
-	// Update metrics
+	// For batched GPU/Paged paths, sampling is already done above.
+	// We only need to sample here if we took the single-sequence path OR the BatchRuntimeInputs path.
+	// But wait, the single-sequence GPU path (len=1) falls through here and needs sampling.
+	// The multi-sequence GPU path (loop) did sampling inside loop.
+	// This structure is messy.
+	// Let's rely on `logits` being set. If `logits` is set, we sample.
+	// But in loop cases, `logits` is set to first result?
+	// And we already sampled.
+	// We need to avoid double sampling.
+
+	// Refactor: Only sample here if we didn't sample in loop.
+	alreadySampled := (useGPUCache && len(decodeSeqs) > 1) || (usePagedCache && len(decodeSeqs) > 1)
+
+	if !alreadySampled {
+		// Sample and Decode
+		// Copy logits from GPU to CPU if needed
+		vocabSize := s.runtime.Config().VocabSize
+		logitsData := s.getLogitsOnCPU(logits, len(decodeSeqs)*vocabSize)
+
+		for i, seq := range decodeSeqs {
+			seq.AdvancePosition()
+
+			if seq.State() == StatePending {
+				seq.SetState(StateDecoding)
+			}
+
+			// Extract logits for this sequence
+			start := i * vocabSize
+			end := start + vocabSize
+
+			if logitsData == nil || end > len(logitsData) {
+				seq.PushToken("?")
+				continue
+			}
+
+			seqLogits := logitsData[start:end]
+
+			// Sample
+			tokenID := s.sampler.Sample(seqLogits)
+			seq.AddGeneratedToken(tokenID)
+
+			// Check for EOS
+			eosToken := 2
+			if s.tokenizer != nil {
+				eosToken = s.tokenizer.EOS()
+			}
+			if tokenID == eosToken {
+				seq.SetState(StateFinished)
+				seq.Close()
+				continue
+			}
+
+			// Check max tokens
+			if s.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= s.config.MaxTokens {
+				seq.SetState(StateFinished)
+				seq.Close()
+				continue
+			}
+
+			// Decode token to text
+			var text string
+			if s.tokenizer != nil {
+				text, _ = s.tokenizer.Decode([]int{tokenID})
+			} else {
+				text = fmt.Sprintf(" %d", tokenID)
+			}
+
+			seq.PushToken(text)
+		}
+	}
+
+	// Update metrics at the very end
 	s.metrics.TotalTokens += len(decodeSeqs)
 	s.metrics.DecodeTokens += len(decodeSeqs)
-	s.metrics.DecodeTime += decodeTime
-
-	// Sample and Decode
-	// Copy logits from GPU to CPU if needed
-	vocabSize := s.runtime.Config().VocabSize
-	logitsData := s.getLogitsOnCPU(logits, len(decodeSeqs)*vocabSize)
-
-	for i, seq := range decodeSeqs {
-		seq.AdvancePosition()
-
-		if seq.State() == StatePending {
-			seq.SetState(StateDecoding)
-		}
-
-		// Extract logits for this sequence
-		start := i * vocabSize
-		end := start + vocabSize
-
-		if logitsData == nil || end > len(logitsData) {
-			seq.PushToken("?")
-			continue
-		}
-
-		seqLogits := logitsData[start:end]
-
-		// Sample
-		tokenID := s.sampler.Sample(seqLogits)
-		seq.AddGeneratedToken(tokenID)
-
-		// Check for EOS
-		eosToken := 2
-		if s.tokenizer != nil {
-			eosToken = s.tokenizer.EOS()
-		}
-		if tokenID == eosToken {
-			seq.SetState(StateFinished)
-			seq.Close()
-			continue
-		}
-
-		// Check max tokens
-		if s.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= s.config.MaxTokens {
-			seq.SetState(StateFinished)
-			seq.Close()
-			continue
-		}
-
-		// Decode token to text
-		var text string
-		if s.tokenizer != nil {
-			text, _ = s.tokenizer.Decode([]int{tokenID})
-		} else {
-			text = fmt.Sprintf(" %d", tokenID)
-		}
-
-		seq.PushToken(text)
-	}
+	s.metrics.DecodeTime += time.Since(startTime)
 
 	return nil
 }
@@ -394,7 +440,6 @@ func (s *Scheduler) runBatchedPrefill(seq *Sequence) error {
 	// Run prefill with all tokens at once
 	startTime := time.Now()
 	logits, err := s.runtime.PrefillWithPagedKV(promptTokens, seq.KVSeqID(), 0)
-	prefillTime := time.Since(startTime)
 
 	if err != nil {
 		return fmt.Errorf("prefill failed: %w", err)
@@ -402,11 +447,6 @@ func (s *Scheduler) runBatchedPrefill(seq *Sequence) error {
 
 	// Mark all prompt tokens as processed
 	seq.SetPrefillComplete(len(promptTokens))
-
-	// Update metrics
-	s.metrics.TotalTokens += len(promptTokens)
-	s.metrics.PrefillTokens += len(promptTokens)
-	s.metrics.PrefillTime += prefillTime
 
 	// Sample from the logits (which are for the last prompt token)
 	// Copy logits from GPU to CPU if needed
@@ -427,6 +467,12 @@ func (s *Scheduler) runBatchedPrefill(seq *Sequence) error {
 	// Sample first generated token
 	tokenID := s.sampler.Sample(seqLogits)
 	seq.AddGeneratedToken(tokenID)
+
+	// Update metrics (including sampling/sync time)
+	prefillTime := time.Since(startTime)
+	s.metrics.TotalTokens += len(promptTokens)
+	s.metrics.PrefillTokens += len(promptTokens)
+	s.metrics.PrefillTime += prefillTime
 
 	// Check for EOS
 	eosToken := 2
@@ -469,7 +515,6 @@ func (s *Scheduler) runGPUPrefill(seq *Sequence) error {
 	// Run prefill with all tokens at once using GPU KV cache
 	startTime := time.Now()
 	logits, err := s.runtime.DecodeWithGPUKV(promptTokens, 0)
-	prefillTime := time.Since(startTime)
 
 	if err != nil {
 		return fmt.Errorf("GPU prefill failed: %w", err)
@@ -477,11 +522,6 @@ func (s *Scheduler) runGPUPrefill(seq *Sequence) error {
 
 	// Mark all prompt tokens as processed
 	seq.SetPrefillComplete(len(promptTokens))
-
-	// Update metrics
-	s.metrics.TotalTokens += len(promptTokens)
-	s.metrics.PrefillTokens += len(promptTokens)
-	s.metrics.PrefillTime += prefillTime
 
 	// Sample from the logits (which are for the last prompt token)
 	vocabSize := s.runtime.Config().VocabSize
@@ -499,6 +539,12 @@ func (s *Scheduler) runGPUPrefill(seq *Sequence) error {
 	// Sample first generated token
 	tokenID := s.sampler.Sample(seqLogits)
 	seq.AddGeneratedToken(tokenID)
+
+	// Update metrics (including sampling/sync time)
+	prefillTime := time.Since(startTime)
+	s.metrics.TotalTokens += len(promptTokens)
+	s.metrics.PrefillTokens += len(promptTokens)
+	s.metrics.PrefillTime += prefillTime
 
 	// Check for EOS
 	eosToken := 2
@@ -596,8 +642,8 @@ func (s *Scheduler) getLogitsOnCPU(logits tensor.Tensor, numElements int) []floa
 
 	// Allocate host buffer
 	hostData := make([]byte, numElements*4)
+	backend.Sync() // Wait for GPU before reading shared memory
 	backend.ToHost(hostData, ptr)
-	backend.Sync()
 
 	// Convert bytes to float32
 	result := make([]float32, numElements)

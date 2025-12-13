@@ -3160,7 +3160,7 @@ void metal_copy_buffer(void* queue, void* srcBuffer, size_t srcOffset,
     [blit endEncoding];
 
     [commandBuffer commit];
-    [commandBuffer waitUntilCompleted];
+    // [commandBuffer waitUntilCompleted]; // Make async to avoid CPU blocking
 }
 
 // Shader compilation

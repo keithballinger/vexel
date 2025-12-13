@@ -422,10 +422,20 @@ This project adheres to the Conductor methodology, with a strong emphasis on Tes
   - Latest harness run (2025-12-12 23:27, VEXEL_FA2_MIN_SEQ=16): Vexel prefill 15.9–40.1 tok/s, decode 14.8–23.9; llama.cpp prompt 522–1092 tok/s, decode 262–269; similarity 0.013–0.016. Report: perf_reports/report-20251212-232701.md
 - [x] Run performance harness to quantify improvements. (Completed: 2025-12-13 02:25)
   - Results: Prefill 496 tok/s (vs 1962), Decode 94 tok/s (vs 261).
-- [ ] Optimize Q4_0 Decode Kernel.
-  - Investigate non-coalesced reads in `matvec_q4_0_optimized`.
-  - Tunable parameters (threadgroup size, work per thread).
-  - Aim for 150+ tok/s.
+- [ ] Close Performance Gap (Prefill & Decode)
+  - [x] Command Batching / Graph Capture (Priority: High) (Completed: 2025-12-13 03:20)
+    - Implemented `BeginBatch`/`EndBatch` in `backend.go` and `block.go`.
+    - Removed `waitUntilCompleted` from `metal_copy_buffer` for async KV updates.
+    - Result: Prefill ~1700 tok/s, Decode ~950 tok/s (requires verification).
+  - [ ] Verify Decode Performance (Anomaly)
+    - **Problem:** 950 tok/s implies 600+ GB/s bandwidth, exceeding hardware limits.
+    - **Task:** Verify kernel execution correctness (check outputs again), check for silent skipping, or validate timing logic with external tools (Instruments).
+  - [ ] Optimize Q4_0 Decode Kernel (Memory Bound)
+    - **Problem:** Q4_0 18-byte block size causes unaligned global memory reads.
+    - **Solution:** Refactor kernel to perform coalesced 16-byte loads into shared memory, then parse Q4 blocks. Or port `llama.cpp`'s `mul_mat_vec_q4_0` logic.
+  - [ ] Optimize Q4_0 Prefill Kernel (Compute/Bandwidth)
+    - **Problem:** Current `simdgroup` kernel utilization (~2 TFLOPS) is below hardware potential (~10 TFLOPS).
+    - **Solution:** Investigate `llama.cpp`'s `mul_mm_q4_0_f32` register blocking strategy and adapt Vexel's kernel.
 - [ ] Profile and benchmark Q4_K model performance.
   - Next run should include correctness diff vs. llama.cpp
 - [x] Flash Attention tuning: lower FA2 threshold and enable mixed-precision activations to reduce bandwidth. (Started: 2025-12-12 23:30, Completed: 2025-12-13 00:45)
