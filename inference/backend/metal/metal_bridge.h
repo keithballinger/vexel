@@ -101,6 +101,11 @@ void metal_matvec_q6k_multi_output_f32(void* queue, void* pipeline,
                                         void* A, void* B, void* C,
                                         int N, int K);
 
+// Q6_K NR2 matvec: 2 outputs per simdgroup (llama.cpp style optimization)
+void metal_matvec_q6k_nr2_f32(void* queue, void* pipeline,
+                               void* A, void* B, void* C,
+                               int N, int K);
+
 // Q4_K multi-output matvec: for attention projections using Q4_K quantization
 void metal_matvec_q4k_multi_output_f32(void* queue, void* pipeline,
                                         void* A, void* B, void* C,
@@ -125,12 +130,25 @@ void metal_matvec_q4_0_fused_rmsnorm_f32(void* queue, void* pipeline,
                                          void* x, void* normWeight, void* wMat, void* out,
                                          int n, int k, float eps);
 
+// Fused RMSNorm + Q4_0 MatVec with FP16 OUTPUT
+// Eliminates FP32->FP16 conversion after QKV projections
+void metal_matvec_q4_0_fused_rmsnorm_f16_out(void* queue, void* pipeline,
+                                              void* x, void* normWeight, void* wMat, void* out,
+                                              int n, int k, float eps);
+
 void metal_rope_f32(void* queue, void* pipeline,
                     void* q, void* k,
                     int batchSize, int seqLen, int numHeads, int headDim,
                     int startPos, float theta);
 
 void metal_rope_gqa_f32(void* queue, void* pipeline,
+                        void* q, void* k,
+                        int seqLen, int numQHeads, int numKVHeads, int headDim,
+                        int startPos, float theta);
+
+// RoPE for GQA with FP16 inputs/outputs
+// Computation in FP32 for numerical stability, I/O in FP16
+void metal_rope_gqa_f16(void* queue, void* pipeline,
                         void* q, void* k,
                         int seqLen, int numQHeads, int numKVHeads, int headDim,
                         int startPos, float theta);
@@ -154,6 +172,11 @@ void metal_mul_f32(void* queue, void* pipeline,
 // Argmax: find index of maximum value (for GPU-side greedy sampling)
 void metal_argmax_f32(void* queue, void* pipeline,
                        void* input, void* result, int N);
+
+// Compute-based memory copy (avoids blit encoder transition issues)
+void metal_copy_buffer_compute(void* queue, void* pipeline,
+                                void* srcBuffer, size_t srcOffset,
+                                void* dstBuffer, size_t dstOffset, size_t size);
 
 // =============================================================================
 // Training Operations for Medusa Heads
@@ -255,6 +278,12 @@ void metal_convert_f32_to_f16(void* queue, void* pipeline,
 void metal_convert_f16_to_f32(void* queue, void* pipeline,
                                void* in, void* out, int n);
 
+// KV Cache scatter: transpose from [newTokens, numKVHeads, headDim] to [numKVHeads, maxSeqLen, headDim]
+// Used for efficient GPU-side KV cache layout transformation
+void metal_scatter_kv_f16(void* queue, void* pipeline,
+                           void* src, void* dst,
+                           int newTokens, int numKVHeads, int headDim, int maxSeqLen, int seqPos);
+
 // =============================================================================
 // Q8_0 Quantization for KV Cache
 // Q8_0 format: 34 bytes per 32 elements (2-byte f16 scale + 32 int8 values)
@@ -282,12 +311,26 @@ void metal_matvec_q4_0_f16(void* queue, void* pipeline,
                             int N, int K);
 
 // FP16 SDPA for decode - 2x KV cache bandwidth savings
-// Q: [numQHeads, headDim], K/V: [kvLen, numKVHeads, headDim], out: [numQHeads, headDim]
+// Q: [numQHeads, headDim], K/V: [numKVHeads, kvLen, headDim] (head-major layout), out: [numQHeads, headDim]
 // All tensors in FP16
+// kvHeadStride: stride between KV heads in elements (maxSeqLen * headDim)
 void metal_sdpa_decode_f16(void* queue, void* pipeline,
                             void* Q, void* K, void* V, void* out,
                             int kvLen, int numQHeads, int numKVHeads, int headDim,
-                            float scale);
+                            float scale, int kvHeadStride);
+
+// Specialized SDPA for headDim=64 with half4 vectorization and online softmax
+// Single-thread per head version - each thread processes all KV positions
+void metal_sdpa_decode_f16_hd64(void* queue, void* pipeline,
+                                 void* Q, void* K, void* V, void* out,
+                                 int kvLen, int numQHeads, int numKVHeads,
+                                 float scale, int kvHeadStride);
+
+// SIMD version: 32 threads cooperate via simd_sum, each thread owns 2 dimensions
+void metal_sdpa_decode_f16_hd64_simd(void* queue, void* pipeline,
+                                      void* Q, void* K, void* V, void* out,
+                                      int kvLen, int numQHeads, int numKVHeads,
+                                      float scale, int kvHeadStride);
 
 #ifdef __cplusplus
 }

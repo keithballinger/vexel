@@ -58,13 +58,23 @@ type FP16Ops interface {
 
 	// SDPAF16 performs SDPA with FP16 KV cache.
 	// Q: [numQHeads, headDim] in FP16
-	// K/V: [kvLen, numKVHeads, headDim] in FP16
+	// K/V: [numKVHeads, kvLen, headDim] in FP16 (head-major layout)
 	// out: [numQHeads, headDim] in FP16
-	SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32)
+	// kvHeadStride: stride between KV heads in elements (maxSeqLen * headDim)
+	SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int)
 
 	// SDPAPrefillF16 performs prefill SDPA with FP16 activations (Flash Attention 2).
 	// Q, K, V, out: [seqLen, numHeads, headDim] in FP16
 	SDPAPrefillF16(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32)
+
+	// RoPEF16 applies Rotary Position Embeddings in-place to FP16 Q and K.
+	// Computation done in FP32 for numerical stability, I/O in FP16.
+	// q: [seqLen, numHeads, headDim] in FP16, k: [seqLen, numKVHeads, headDim] in FP16
+	RoPEF16(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos int, theta float32)
+
+	// ScatterKVF16 transposes KV data from [newTokens, numKVHeads, headDim] to [numKVHeads, maxSeqLen, headDim].
+	// This efficiently populates the head-major KV cache layout in a single kernel dispatch.
+	ScatterKVF16(src, dst tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int)
 }
 
 // FusedOps is an optional interface for backends that support fused kernel operations.
@@ -80,6 +90,11 @@ type FusedOps interface {
 	// wMat: [N, K] Q4_0, out: [1, N]
 	// Computes: out = (RMSNorm(x, normWeight)) @ wMat^T
 	MatMulQ4_0_FusedRMSNorm(x, normWeight, wMat, out tensor.DevicePtr, m, n, k int, eps float32)
+
+	// MatMulQ4_0_FusedRMSNormF16 performs RMSNorm on x, then Q4_0 MatVec with FP16 output.
+	// This eliminates FP32->FP16 conversion for QKV projections when using FP16 KV cache.
+	// x: [1, K] in FP32, normWeight: [K], wMat: [N, K] Q4_0, out: [1, N] in FP16
+	MatMulQ4_0_FusedRMSNormF16(x, normWeight, wMat, out tensor.DevicePtr, m, n, k int, eps float32)
 }
 
 // Q8_0Ops is an optional interface for backends that support Q8_0 quantized KV cache.

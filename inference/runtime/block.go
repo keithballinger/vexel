@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"os"
 	"time"
 	"unsafe"
 
@@ -11,6 +12,11 @@ import (
 	"vexel/inference/kv"
 	"vexel/inference/tensor"
 )
+
+// skipMidLayerSync controls whether to skip the mid-layer sync.
+// Set VEXEL_SKIP_MID_SYNC=1 to test without the sync.
+var skipMidLayerSync = os.Getenv("VEXEL_SKIP_MID_SYNC") == "1"
+
 
 // debugBlockTensor prints stats about a tensor for block debugging
 func (b *BlockRuntime) debugBlockTensor(name string, ptr tensor.DevicePtr, numElements int) {
@@ -626,7 +632,21 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		b.Wk.QuantProfile() == tensor.Q4_0 &&
 		b.Wv.QuantProfile() == tensor.Q4_0
 
-	if canFuseAttn {
+	// FP16 end-to-end path: output Q, K, V directly as FP16 to eliminate conversions
+	// This saves 3 FP32→FP16 conversions per layer (K, V for cache, Q for SDPA)
+	useFP16Path := canFuseAttn && useFP16KVCache
+
+	if useFP16Path {
+		// FP16 path: output directly to FP16 buffers, no conversion needed
+		profileOp("FusedRMSNorm+QKV_F16", func() {
+			// Q -> qF16Ptr (FP16)
+			b.fusedOps.MatMulQ4_0_FusedRMSNormF16(xPtr, b.AttnNorm.DevicePtr(), b.Wq.DevicePtr(), qF16Ptr, 1, qSize, hiddenSize, float32(b.RMSNormEPS))
+			// K -> kF16Ptr (FP16)
+			b.fusedOps.MatMulQ4_0_FusedRMSNormF16(xPtr, b.AttnNorm.DevicePtr(), b.Wk.DevicePtr(), kF16Ptr, 1, kvSize, hiddenSize, float32(b.RMSNormEPS))
+			// V -> vF16Ptr (FP16)
+			b.fusedOps.MatMulQ4_0_FusedRMSNormF16(xPtr, b.AttnNorm.DevicePtr(), b.Wv.DevicePtr(), vF16Ptr, 1, kvSize, hiddenSize, float32(b.RMSNormEPS))
+		})
+	} else if canFuseAttn {
 		profileOp("FusedRMSNorm+QKV", func() {
 			// Q
 			b.fusedOps.MatMulQ4_0_FusedRMSNorm(xPtr, b.AttnNorm.DevicePtr(), b.Wq.DevicePtr(), qPtr, 1, qSize, hiddenSize, float32(b.RMSNormEPS))
@@ -667,7 +687,12 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 
 	// 3. RoPE - Apply to Q and K
 	profileOp("RoPE", func() {
-		b.backend.RoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, startPos, float32(b.RoPETheta))
+		if useFP16Path {
+			// FP16 path: apply RoPE directly to FP16 Q and K
+			b.fp16Ops.RoPEF16(qF16Ptr, kF16Ptr, headDim, numHeads, numKVHeads, seqLen, startPos, float32(b.RoPETheta))
+		} else {
+			b.backend.RoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, startPos, float32(b.RoPETheta))
+		}
 	})
 
 	// 4. Append K/V to GPU cache and get pointers for SDPA
@@ -675,7 +700,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	// NOTE: Mid-layer sync is required for correct output. Without it, the encoder
 	// ordering causes incorrect results. The sync commits the current batch and
 	// starts a new one. Investigation ongoing - see docs/llama_cpp_kernel_analysis.md
-	if useBatching {
+	// Set VEXEL_SKIP_MID_SYNC=1 to test without the sync.
+	if useBatching && !skipMidLayerSync {
 		b.batcher.EndBatch()
 		b.batcher.BeginBatch()
 	}
@@ -683,7 +709,11 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	var fullKPtr, fullVPtr tensor.DevicePtr
 	var fullSeqLen int
 	profileOp("KVCache", func() {
-		if useFP16KVCache {
+		if useFP16Path {
+			// FP16 path: K and V already in FP16 (from fused kernel), no conversion needed
+			// AppendKV uses CopyBufferBatched which integrates with command batching
+			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kF16Ptr, vF16Ptr, seqLen)
+		} else if useFP16KVCache {
 			// Convert FP32 K/V to FP16 before storing in cache
 			b.fp16Ops.ConvertF32ToF16(kPtr, kF16Ptr, kvSize)
 			b.fp16Ops.ConvertF32ToF16(vPtr, vF16Ptr, kvSize)
@@ -719,10 +749,14 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	profileOp("SDPA", func() {
 		if seqLen == 1 {
 			// Decode: single query against full KV sequence
-			if useFP16KVCache {
-				// FP16 path: convert Q to FP16, use FP16 SDPA, convert output back to FP32
+			if useFP16Path {
+				// FP16 path: Q already in FP16 (from fused kernel), no Q conversion needed
+				b.fp16Ops.SDPAF16(qF16Ptr, fullKPtr, fullVPtr, attnOutF16Ptr, fullSeqLen, numHeads, numKVHeads, headDim, scale, gpuCache.KVHeadStride())
+				b.fp16Ops.ConvertF16ToF32(attnOutF16Ptr, attnOutPtr, qSize)
+			} else if useFP16KVCache {
+				// FP16 KV cache but Q is FP32: convert Q to FP16
 				b.fp16Ops.ConvertF32ToF16(qPtr, qF16Ptr, qSize)
-				b.fp16Ops.SDPAF16(qF16Ptr, fullKPtr, fullVPtr, attnOutF16Ptr, fullSeqLen, numHeads, numKVHeads, headDim, scale)
+				b.fp16Ops.SDPAF16(qF16Ptr, fullKPtr, fullVPtr, attnOutF16Ptr, fullSeqLen, numHeads, numKVHeads, headDim, scale, gpuCache.KVHeadStride())
 				b.fp16Ops.ConvertF16ToF32(attnOutF16Ptr, attnOutPtr, qSize)
 			} else if useQ8KVCache {
 				// Q8_0 path: use Q8_0 SDPA with FP32 Q and Q8_0 K/V

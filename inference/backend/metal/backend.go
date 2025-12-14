@@ -59,12 +59,14 @@ type Backend struct {
 	matvecQ4NR4Pipeline         unsafe.Pointer
 	matvecQ4CollabPipeline      unsafe.Pointer
 	matvecQ4OptimizedPipeline   unsafe.Pointer
-	matvecQ4FusedRMSNormPipeline unsafe.Pointer
-	softmaxPipeline             unsafe.Pointer
-	rmsnormPipeline             unsafe.Pointer
-	addRMSNormPipeline          unsafe.Pointer
-	ropePipeline                unsafe.Pointer
-	ropeGQAPipeline             unsafe.Pointer
+	matvecQ4FusedRMSNormPipeline    unsafe.Pointer
+	matvecQ4FusedRMSNormF16Pipeline unsafe.Pointer // FP16 output version
+	softmaxPipeline                 unsafe.Pointer
+	rmsnormPipeline                 unsafe.Pointer
+	addRMSNormPipeline              unsafe.Pointer
+	ropePipeline                    unsafe.Pointer
+	ropeGQAPipeline                 unsafe.Pointer
+	ropeGQAF16Pipeline              unsafe.Pointer // FP16 version
 	siluPipeline                unsafe.Pointer
 	siluMulPipeline             unsafe.Pointer
 	addPipeline                 unsafe.Pointer
@@ -78,6 +80,7 @@ type Backend struct {
 	matmulQ4BatchedPipeline     unsafe.Pointer
 	matmulQ4SimdgroupPipeline   unsafe.Pointer
 	matvecQ6KPipeline           unsafe.Pointer
+	matvecQ6KNR2Pipeline        unsafe.Pointer  // Optimized Q6_K with nr0=2
 	matvecQ4KPipeline           unsafe.Pointer
 	matmulQ4KBatchedPipeline    unsafe.Pointer
 
@@ -87,10 +90,14 @@ type Backend struct {
 	siluF16Pipeline         unsafe.Pointer
 	siluMulF16Pipeline      unsafe.Pointer
 	rmsnormF16Pipeline      unsafe.Pointer
-	matvecQ4F16Pipeline     unsafe.Pointer
-	sdpaDecodeF16Pipeline   unsafe.Pointer
-	convertF32ToF16Pipeline unsafe.Pointer
-	convertF16ToF32Pipeline unsafe.Pointer
+	matvecQ4F16Pipeline         unsafe.Pointer
+	sdpaDecodeF16Pipeline       unsafe.Pointer
+	sdpaDecodeF16VecPipeline    unsafe.Pointer // Vectorized version
+	sdpaDecodeF16HD64Pipeline   unsafe.Pointer // Specialized for headDim=64
+	sdpaDecodeF16HD64SimdPipeline unsafe.Pointer // SIMD version
+	convertF32ToF16Pipeline     unsafe.Pointer
+	convertF16ToF32Pipeline     unsafe.Pointer
+	scatterKVF16Pipeline        unsafe.Pointer
 
 	// Q8_0 Quantization pipelines (for KV cache)
 	quantizeF32ToQ8_0Pipeline   unsafe.Pointer
@@ -103,6 +110,9 @@ type Backend struct {
 	batchedOuterProductPipeline unsafe.Pointer
 	sgdUpdatePipeline           unsafe.Pointer
 	zeroPipeline                unsafe.Pointer
+
+	// Utility pipelines
+	memcpyComputePipeline unsafe.Pointer // Compute-based memory copy (avoids blit encoder)
 }
 
 var (
@@ -162,11 +172,13 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matvecQ4CollabPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_collab_f32"))
 	b.matvecQ4OptimizedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_optimized_f32"))
 	b.matvecQ4FusedRMSNormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_fused_rmsnorm_f32"))
+	b.matvecQ4FusedRMSNormF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_fused_rmsnorm_f16_out"))
 	b.softmaxPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("softmax_f32"))
 	b.rmsnormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_f32"))
 	b.addRMSNormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_rmsnorm_f32"))
 	b.ropePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_f32"))
 	b.ropeGQAPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_gqa_f32"))
+	b.ropeGQAF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_gqa_f16"))
 	b.siluPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_f32"))
 	b.siluMulPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_mul_f32"))
 	b.addPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_f32"))
@@ -180,6 +192,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matmulQ4BatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_batched_f32"))
 	b.matmulQ4SimdgroupPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_simdgroup_f32"))
 	b.matvecQ6KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q6k_multi_output_f32"))
+	b.matvecQ6KNR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q6k_nr2_f32"))
 	b.matvecQ4KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_multi_output_f32"))
 	b.matmulQ4KBatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4k_batched_f32"))
 
@@ -191,8 +204,12 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.rmsnormF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_f16"))
 	b.matvecQ4F16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_f16"))
 	b.sdpaDecodeF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_f16"))
+	b.sdpaDecodeF16VecPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_f16_vec"))
+	b.sdpaDecodeF16HD64Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_f16_hd64"))
+	b.sdpaDecodeF16HD64SimdPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_f16_hd64_simd"))
 	b.convertF32ToF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("convert_f32_to_f16"))
 	b.convertF16ToF32Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("convert_f16_to_f32"))
+	b.scatterKVF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("scatter_kv_f16"))
 
 	// Q8_0 quantization pipelines
 	b.quantizeF32ToQ8_0Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("quantize_f32_to_q8_0"))
@@ -205,6 +222,9 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.batchedOuterProductPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("batched_outer_product_f32"))
 	b.sgdUpdatePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sgd_update_f32"))
 	b.zeroPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("zero_f32"))
+
+	// Utility pipelines
+	b.memcpyComputePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("memcpy_compute"))
 
 	return b, nil
 }
@@ -325,10 +345,18 @@ func (b *Backend) CopyBuffer(src tensor.DevicePtr, srcOffset int, dst tensor.Dev
 }
 
 // CopyBufferBatched copies data integrating with command batching.
-// When batching is active, this avoids creating a separate command buffer.
+// VEXEL_USE_COMPUTE_COPY=1 uses compute-based copy (experimental).
+// Default is blit-based copy which requires mid-layer sync for correct output.
 func (b *Backend) CopyBufferBatched(src tensor.DevicePtr, srcOffset int, dst tensor.DevicePtr, dstOffset int, size int) {
-	C.metal_copy_buffer_batched(b.queue, unsafe.Pointer(src.Addr()), C.size_t(srcOffset),
-		unsafe.Pointer(dst.Addr()), C.size_t(dstOffset), C.size_t(size))
+	useComputeCopy := os.Getenv("VEXEL_USE_COMPUTE_COPY") == "1"
+	if useComputeCopy {
+		C.metal_copy_buffer_compute(b.queue, b.memcpyComputePipeline,
+			unsafe.Pointer(src.Addr()), C.size_t(srcOffset),
+			unsafe.Pointer(dst.Addr()), C.size_t(dstOffset), C.size_t(size))
+	} else {
+		C.metal_copy_buffer_batched(b.queue, unsafe.Pointer(src.Addr()), C.size_t(srcOffset),
+			unsafe.Pointer(dst.Addr()), C.size_t(dstOffset), C.size_t(size))
+	}
 }
 
 // GPUProfileStats holds GPU profiling statistics.
@@ -453,12 +481,25 @@ func (b *Backend) MatVecQ4_0MultiOutput(a, bMat, out tensor.DevicePtr, n, k int)
 // MatMulQ6_K performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q6_K format.
 // B contains raw Q6_K data (210 bytes per 256 elements).
 // Only supports M=1 (matvec) for now - used for lm_head during decode.
+var q6kNR2DebugOnce sync.Once
+
 func (b *Backend) MatMulQ6_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
-	if b.matvecQ6KPipeline == nil {
-		panic("MatMulQ6_K called but no matvecQ6KPipeline available")
-	}
 	if m != 1 {
 		panic("MatMulQ6_K only supports M=1 (matvec) for now")
+	}
+	// Use optimized NR2 kernel (2 outputs per simdgroup) if available
+	if b.matvecQ6KNR2Pipeline != nil {
+		q6kNR2DebugOnce.Do(func() {
+			fmt.Println("[DEBUG] Using Q6_K NR2 kernel for LM head")
+		})
+		C.metal_matvec_q6k_nr2_f32(b.queue, b.matvecQ6KNR2Pipeline,
+			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+			C.int(n), C.int(k))
+		return
+	}
+	// Fall back to original kernel
+	if b.matvecQ6KPipeline == nil {
+		panic("MatMulQ6_K called but no Q6_K pipeline available")
 	}
 	C.metal_matvec_q6k_multi_output_f32(b.queue, b.matvecQ6KPipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
@@ -502,6 +543,21 @@ func (b *Backend) MatMulQ4_0_FusedRMSNorm(x, normWeight, wMat, out tensor.Device
 		C.int(n), C.int(k), C.float(eps))
 }
 
+// MatMulQ4_0_FusedRMSNormF16 performs fused RMSNorm + Q4_0 matmul with FP16 output.
+// Eliminates FP32->FP16 conversion after QKV projections.
+func (b *Backend) MatMulQ4_0_FusedRMSNormF16(x, normWeight, wMat, out tensor.DevicePtr, m, n, k int, eps float32) {
+	if m != 1 {
+		panic("MatMulQ4_0_FusedRMSNormF16 only supports M=1")
+	}
+	if b.matvecQ4FusedRMSNormF16Pipeline == nil {
+		panic("MatMulQ4_0_FusedRMSNormF16 called but pipeline unavailable")
+	}
+	C.metal_matvec_q4_0_fused_rmsnorm_f16_out(b.queue, b.matvecQ4FusedRMSNormF16Pipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(normWeight.Addr()),
+		unsafe.Pointer(wMat.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(n), C.int(k), C.float(eps))
+}
+
 // RMSNorm performs RMS normalization.
 func (b *Backend) RMSNorm(x, weight, out tensor.DevicePtr, rows, cols int, eps float32) {
 	C.metal_rmsnorm_f32(b.queue, b.rmsnormPipeline,
@@ -523,6 +579,18 @@ func (b *Backend) AddRMSNorm(x, residual, weight, out tensor.DevicePtr, rows, co
 func (b *Backend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos int, theta float32) {
 	// Use GQA-aware RoPE kernel which handles Q and K head counts separately
 	C.metal_rope_gqa_f32(b.queue, b.ropeGQAPipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+		C.int(seqLen), C.int(numHeads), C.int(numKVHeads), C.int(headDim),
+		C.int(startPos), C.float(theta))
+}
+
+// RoPEF16 applies rotary position encoding with FP16 inputs/outputs.
+// Computation done in FP32 for numerical stability, I/O in FP16.
+func (b *Backend) RoPEF16(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos int, theta float32) {
+	if b.ropeGQAF16Pipeline == nil {
+		panic("RoPEF16 called but pipeline unavailable")
+	}
+	C.metal_rope_gqa_f16(b.queue, b.ropeGQAF16Pipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		C.int(seqLen), C.int(numHeads), C.int(numKVHeads), C.int(headDim),
 		C.int(startPos), C.float(theta))
@@ -746,14 +814,16 @@ func (b *Backend) MatMulQ4_0_F16(a, bMat, out tensor.DevicePtr, n, k int) {
 }
 
 // SDPAF16 performs scaled dot-product attention with FP16 KV cache.
-// Q: [numQHeads, headDim], K/V: [kvLen, numKVHeads, headDim], out: [numQHeads, headDim]
+// Q: [numQHeads, headDim], K/V: [numKVHeads, kvLen, headDim] (head-major), out: [numQHeads, headDim]
 // All tensors in FP16. Provides 2x KV cache bandwidth savings.
-func (b *Backend) SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32) {
+// kvHeadStride: stride between KV heads in elements (maxSeqLen * headDim).
+func (b *Backend) SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
+	// Use original kernel - vectorized attempts didn't show improvement
 	C.metal_sdpa_decode_f16(b.queue, b.sdpaDecodeF16Pipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
-		C.float(scale))
+		C.float(scale), C.int(kvHeadStride))
 }
 
 // ConvertF32ToF16 converts FP32 data to FP16.
@@ -768,6 +838,14 @@ func (b *Backend) ConvertF32ToF16(in, out tensor.DevicePtr, n int) {
 func (b *Backend) ConvertF16ToF32(in, out tensor.DevicePtr, n int) {
 	C.metal_convert_f16_to_f32(b.queue, b.convertF16ToF32Pipeline,
 		unsafe.Pointer(in.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
+}
+
+// ScatterKVF16 transposes KV data from [newTokens, numKVHeads, headDim] to [numKVHeads, maxSeqLen, headDim].
+// This is used to efficiently populate the head-major KV cache layout in a single kernel dispatch.
+func (b *Backend) ScatterKVF16(src, dst tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int) {
+	C.metal_scatter_kv_f16(b.queue, b.scatterKVF16Pipeline,
+		unsafe.Pointer(src.Addr()), unsafe.Pointer(dst.Addr()),
+		C.int(newTokens), C.int(numKVHeads), C.int(headDim), C.int(maxSeqLen), C.int(seqPos))
 }
 
 // =============================================================================

@@ -35,7 +35,8 @@ type GPUKVCache struct {
 	useFP16    bool        // Deprecated: use precision instead
 	precision  KVPrecision // Storage precision
 
-	// Per-layer K and V buffers: [maxSeqLen, numKVHeads, headDim]
+	// Per-layer K and V buffers: [numKVHeads, maxSeqLen, headDim]
+	// This layout makes decode SDPA reads contiguous when iterating over sequence positions.
 	kBuffers []tensor.DevicePtr
 	vBuffers []tensor.DevicePtr
 
@@ -137,28 +138,70 @@ func (c *GPUKVCache) Precision() KVPrecision {
 	return c.precision
 }
 
+// KVHeadStride returns the stride between KV heads in elements (maxSeqLen * headDim).
+// This is needed for the head-major [numKVHeads, maxSeqLen, headDim] layout.
+func (c *GPUKVCache) KVHeadStride() int {
+	return c.maxSeqLen * c.headDim
+}
+
 // AppendKV appends new K/V data to the cache for a specific layer.
-// kPtr, vPtr should contain [newTokens, numKVHeads, headDim] data.
+// kPtr, vPtr should contain [newTokens, numKVHeads, headDim] data (input layout).
+// Cache stores data as [numKVHeads, maxSeqLen, headDim] for decode-friendly access.
 // For FP32 cache: expects FP32 input. For FP16 cache: expects FP16 input.
 // Returns the GPU pointers to the full K/V cache for this layer.
 func (c *GPUKVCache) AppendKV(layerIdx int, kPtr, vPtr tensor.DevicePtr, newTokens int) (fullK, fullV tensor.DevicePtr, fullSeqLen int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Calculate byte offset for current position
+	// Input layout: [newTokens, numKVHeads, headDim]
+	// Cache layout: [numKVHeads, maxSeqLen, headDim]
+
+	// Try FP16 scatter kernel first (single dispatch, most efficient)
+	if c.useFP16 {
+		if fp16Ops, ok := c.backend.(backend.FP16Ops); ok {
+			// Use GPU scatter kernel - single dispatch for K and V
+			fp16Ops.ScatterKVF16(kPtr, c.kBuffers[layerIdx], newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
+			fp16Ops.ScatterKVF16(vPtr, c.vBuffers[layerIdx], newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
+
+			fullSeqLen = c.seqLen + newTokens
+			if layerIdx == c.numLayers-1 {
+				c.seqLen += newTokens
+			}
+			return c.kBuffers[layerIdx], c.vBuffers[layerIdx], fullSeqLen
+		}
+	}
+
+	// Fall back to blit copies (less efficient but works for all cases)
 	bytesPerElement := 4 // float32
 	if c.useFP16 {
 		bytesPerElement = 2 // float16
 	}
-	tokenSize := c.numKVHeads * c.headDim * bytesPerElement
-	offset := c.seqLen * tokenSize
-	copySize := newTokens * tokenSize
 
-	// Copy new K/V into cache at the right position using GPU-to-GPU copy
-	// Use batched version to integrate with command batching (avoids sync overhead)
-	if copier, ok := c.backend.(backend.BufferCopier); ok {
-		copier.CopyBufferBatched(kPtr, 0, c.kBuffers[layerIdx], offset, copySize)
-		copier.CopyBufferBatched(vPtr, 0, c.vBuffers[layerIdx], offset, copySize)
+	copier, hasCopier := c.backend.(backend.BufferCopier)
+	if !hasCopier {
+		// No copier available, can't append
+		return c.kBuffers[layerIdx], c.vBuffers[layerIdx], c.seqLen
+	}
+
+	// For each token t and head h:
+	//   src offset: t * numKVHeads * headDim + h * headDim
+	//   dst offset: h * maxSeqLen * headDim + (seqLen + t) * headDim
+
+	headSize := c.headDim * bytesPerElement           // bytes per head per position
+	srcHeadStride := c.numKVHeads * c.headDim         // elements between same head in different tokens
+	dstHeadStride := c.maxSeqLen * c.headDim          // elements between heads in cache (in elements)
+	dstHeadStrideBytes := dstHeadStride * bytesPerElement
+
+	for t := 0; t < newTokens; t++ {
+		for h := 0; h < c.numKVHeads; h++ {
+			// Source: token t, head h
+			srcOffset := (t*srcHeadStride + h*c.headDim) * bytesPerElement
+			// Dest: head h, position (seqLen + t)
+			dstOffset := h*dstHeadStrideBytes + (c.seqLen+t)*headSize
+
+			copier.CopyBufferBatched(kPtr, srcOffset, c.kBuffers[layerIdx], dstOffset, headSize)
+			copier.CopyBufferBatched(vPtr, srcOffset, c.vBuffers[layerIdx], dstOffset, headSize)
+		}
 	}
 
 	// Calculate the sequence length including the new tokens BEFORE updating
