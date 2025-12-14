@@ -1,6 +1,9 @@
 package runtime
 
 import (
+	"fmt"
+	"os"
+	"sync"
 	"unsafe"
 
 	"vexel/inference/backend"
@@ -19,6 +22,7 @@ type ModelRuntime struct {
 	gpuCache   *GPUKVCache      // GPU-resident KV cache for Metal/CUDA
 	config     ModelConfig
 	layers     []*BlockRuntime
+	plan       *ExecutionPlan // Model-aware execution plan
 
 	// Global weights (stored as DevicePtr for GPU execution)
 	Embedding  tensor.Tensor
@@ -56,6 +60,56 @@ func NewModelRuntime(b backend.Backend, ctx *memory.InferenceContext, cache *kv.
 // Config returns the model configuration.
 func (m *ModelRuntime) Config() ModelConfig {
 	return m.config
+}
+
+// Plan returns the execution plan for this model.
+func (m *ModelRuntime) Plan() *ExecutionPlan {
+	return m.plan
+}
+
+// BuildPlan creates and stores an execution plan based on model config.
+// This should be called after loading the model and before inference.
+func (m *ModelRuntime) BuildPlan(deviceMeta DeviceMeta, config *PlanConfig) {
+	modelMeta := m.ModelMeta()
+	m.plan = BuildExecutionPlan(modelMeta, deviceMeta, config)
+
+	// Propagate plan to all blocks so they can use plan-based kernel selection
+	for _, layer := range m.layers {
+		layer.SetPlan(m.plan)
+	}
+}
+
+// ModelMeta extracts model metadata from the runtime config.
+func (m *ModelRuntime) ModelMeta() ModelMeta {
+	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+
+	// Build quant format stats from loaded tensors
+	quantFormats := make(map[string]int)
+	for _, layer := range m.layers {
+		if layer.Wq.IsQuantized() {
+			quantFormats[string(layer.Wq.QuantProfile())]++
+		}
+	}
+
+	// Infer model name from architecture
+	name := "unknown"
+	if m.ggufLoader != nil {
+		// Try to get architecture from GGUF metadata
+		name = fmt.Sprintf("%dL-%dH-%dKV", m.config.NumHiddenLayers, m.config.NumAttentionHeads, m.config.NumKeyValueHeads)
+	}
+
+	return ModelMeta{
+		Name:             name,
+		HiddenSize:       m.config.HiddenSize,
+		IntermediateSize: m.config.IntermediateSize,
+		NumLayers:        m.config.NumHiddenLayers,
+		NumHeads:         m.config.NumAttentionHeads,
+		NumKVHeads:       m.config.NumKeyValueHeads,
+		HeadDim:          headDim,
+		VocabSize:        m.config.VocabSize,
+		MaxSeqLen:        m.config.MaxSeqLen,
+		QuantFormats:     quantFormats,
+	}
 }
 
 // Backend returns the underlying compute backend.
@@ -99,6 +153,7 @@ func (m *ModelRuntime) CreatePagedKVCache(maxBlocks int) *kv.PagedKVCache {
 // CreateGPUKVCache creates a GPU-resident KV cache for faster inference.
 // This avoids CPU roundtrips for KV data during decode.
 // Automatically uses FP16 storage if the backend supports it (2x memory savings).
+// Set VEXEL_KV_FP32=1 to force FP32 KV cache for testing.
 func (m *ModelRuntime) CreateGPUKVCache(maxSeqLen int) *GPUKVCache {
 	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
 
@@ -106,6 +161,10 @@ func (m *ModelRuntime) CreateGPUKVCache(maxSeqLen int) *GPUKVCache {
 	useFP16 := false
 	if _, ok := m.backend.(backend.FP16Ops); ok {
 		useFP16 = true
+	}
+	// Allow forcing FP32 for testing (VEXEL_KV_FP32=1)
+	if os.Getenv("VEXEL_KV_FP32") == "1" {
+		useFP16 = false
 	}
 
 	cache := NewGPUKVCacheWithPrecision(
@@ -125,6 +184,8 @@ func (m *ModelRuntime) GPUKVCache() *GPUKVCache {
 	return m.gpuCache
 }
 
+var outputHeadDebugOnce sync.Once
+
 // outputHeadMatMul performs logits = state @ OutputHead^T, using quantized kernel if available.
 func (m *ModelRuntime) outputHeadMatMul(statePtr, logitsPtr tensor.DevicePtr, batchSize, vocabSize, hiddenSize int) {
 	if m.OutputHead.DevicePtr().IsNil() {
@@ -136,6 +197,10 @@ func (m *ModelRuntime) outputHeadMatMul(statePtr, logitsPtr tensor.DevicePtr, ba
 	if m.OutputHead.IsQuantized() {
 		if quantBackend, ok := m.backend.(backend.QuantizedMatMul); ok {
 			profile := m.OutputHead.QuantProfile()
+			outputHeadDebugOnce.Do(func() {
+				fmt.Printf("[DEBUG] OutputHead: IsQuantized=%v, Profile=%v, Backend implements QuantizedMatMul=%v\n",
+					m.OutputHead.IsQuantized(), profile, ok)
+			})
 
 			// For batch operations, process one position at a time
 			if batchSize > 1 && (profile == tensor.Q6_K || profile == tensor.Q4_0 || profile == tensor.Q4_K) {

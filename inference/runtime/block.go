@@ -105,6 +105,14 @@ type BlockRuntime struct {
 
 	// Cached interface for fused operations
 	fusedOps backend.FusedOps
+
+	// Execution plan (set by ModelRuntime.BuildPlan)
+	plan *ExecutionPlan
+}
+
+// SetPlan sets the execution plan for this block.
+func (b *BlockRuntime) SetPlan(plan *ExecutionPlan) {
+	b.plan = plan
 }
 
 // NewBlockRuntime creates a new block runtime with config.

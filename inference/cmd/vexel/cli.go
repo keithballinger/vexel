@@ -138,7 +138,7 @@ func main() {
 
 	// Create KV cache - GPU resident for GPU backend, paged for CPU
 	if *useGPU && gpuAvailable() {
-		maxSeqLen := 512 // Max sequence length for GPU KV cache
+		maxSeqLen := 2560 // Max sequence length for GPU KV cache (supports 2k prefill)
 		gpuCache := rt.CreateGPUKVCache(maxSeqLen)
 		if gpuCache.UseFP16() {
 			fmt.Printf("GPU KV cache: max seq len %d (FP16 - 2x memory savings)\n", maxSeqLen)
@@ -165,6 +165,17 @@ func main() {
 		}
 	}
 	fmt.Println("Model loaded successfully.")
+
+	// Build and log execution plan
+	deviceMeta := runtime.DeviceMeta{
+		Name:           "Apple Silicon",
+		Generation:     1, // TODO: detect actual generation
+		BandwidthClass: 1, // TODO: detect based on chip
+	}
+	rt.BuildPlan(deviceMeta, nil)
+	if plan := rt.Plan(); plan != nil {
+		plan.LogPlan()
+	}
 
 	// Create scheduler
 	schedCfg := scheduler.Config{
