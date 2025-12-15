@@ -7,6 +7,129 @@ import (
 	"testing"
 )
 
+// TestFlashAttention2_F16_HeadDim128 tests FA2 F16 kernel with headDim=128.
+// This is a guardrail test - headDim > 64 previously had bugs with the F16 kernel.
+func TestFlashAttention2_F16_HeadDim128(t *testing.T) {
+	backend, err := NewBackend(0)
+	if err != nil {
+		t.Skipf("Metal backend not available: %v", err)
+	}
+	defer backend.Close()
+
+	// Parameters - use headDim=128 (common for larger models like Mistral-7B)
+	seqLen := 64 // > FA2 threshold (32)
+	numQHeads := 8
+	numKVHeads := 4 // GQA 2:1 ratio
+	headDim := 128  // Key difference: testing larger head dimension
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+
+	// Generate random data
+	q := make([]float32, seqLen*numQHeads*headDim)
+	k := make([]float32, seqLen*numKVHeads*headDim)
+	v := make([]float32, seqLen*numKVHeads*headDim)
+
+	for i := range q {
+		q[i] = float32(i%17-8) * 0.05 // smaller values to avoid overflow in F16
+	}
+	for i := range k {
+		k[i] = float32(i%13-6) * 0.05
+	}
+	for i := range v {
+		v[i] = float32(i%11-5) * 0.05
+	}
+
+	// Compute expected output on CPU (in FP32)
+	expected := make([]float32, seqLen*numQHeads*headDim)
+	headsPerKV := numQHeads / numKVHeads
+
+	for h := 0; h < numQHeads; h++ {
+		kvHead := h / headsPerKV
+
+		// Extract Q head
+		qHead := make([]float32, seqLen*headDim)
+		for tok := 0; tok < seqLen; tok++ {
+			copy(qHead[tok*headDim:(tok+1)*headDim], q[tok*numQHeads*headDim+h*headDim:])
+		}
+
+		// Extract K/V head
+		kHead := make([]float32, seqLen*headDim)
+		vHead := make([]float32, seqLen*headDim)
+		for tok := 0; tok < seqLen; tok++ {
+			copy(kHead[tok*headDim:(tok+1)*headDim], k[tok*numKVHeads*headDim+kvHead*headDim:])
+			copy(vHead[tok*headDim:(tok+1)*headDim], v[tok*numKVHeads*headDim+kvHead*headDim:])
+		}
+
+		// Compute attention for this head
+		outHead := cpuFlashAttention(qHead, kHead, vHead, seqLen, headDim, scale)
+
+		// Copy back to output
+		for tok := 0; tok < seqLen; tok++ {
+			copy(expected[tok*numQHeads*headDim+h*headDim:], outHead[tok*headDim:(tok+1)*headDim])
+		}
+	}
+
+	// Allocate and copy buffers to GPU (F32)
+	qBufF32 := backend.Alloc(len(q) * 4)
+	kBufF32 := backend.Alloc(len(k) * 4)
+	vBufF32 := backend.Alloc(len(v) * 4)
+	defer backend.Free(qBufF32)
+	defer backend.Free(kBufF32)
+	defer backend.Free(vBufF32)
+
+	backend.ToDevice(qBufF32, float32ToBytes(q))
+	backend.ToDevice(kBufF32, float32ToBytes(k))
+	backend.ToDevice(vBufF32, float32ToBytes(v))
+
+	// Convert to F16
+	qBufF16 := backend.Alloc(len(q) * 2)
+	kBufF16 := backend.Alloc(len(k) * 2)
+	vBufF16 := backend.Alloc(len(v) * 2)
+	outBufF16 := backend.Alloc(len(expected) * 2)
+	defer backend.Free(qBufF16)
+	defer backend.Free(kBufF16)
+	defer backend.Free(vBufF16)
+	defer backend.Free(outBufF16)
+
+	backend.ConvertF32ToF16(qBufF32, qBufF16, len(q))
+	backend.ConvertF32ToF16(kBufF32, kBufF16, len(k))
+	backend.ConvertF32ToF16(vBufF32, vBufF16, len(v))
+
+	// Run Flash Attention 2 F16
+	backend.SDPAPrefillF16(qBufF16, kBufF16, vBufF16, outBufF16, seqLen, numQHeads, numKVHeads, headDim, scale)
+	backend.Sync()
+
+	// Convert output back to F32
+	outBufF32 := backend.Alloc(len(expected) * 4)
+	defer backend.Free(outBufF32)
+	backend.ConvertF16ToF32(outBufF16, outBufF32, len(expected))
+	backend.Sync()
+
+	// Copy to host
+	outBytes := make([]byte, len(expected)*4)
+	backend.ToHost(outBytes, outBufF32)
+	out := bytesToFloat32(outBytes)
+
+	// Compare
+	maxDiff := 0.0
+	maxDiffIdx := 0
+	for i := range expected {
+		if math.IsNaN(float64(out[i])) || math.IsInf(float64(out[i]), 0) {
+			t.Fatalf("NaN/Inf at index %d", i)
+		}
+		diff := math.Abs(float64(out[i] - expected[i]))
+		if diff > maxDiff {
+			maxDiff = diff
+			maxDiffIdx = i
+		}
+	}
+
+	// F16 has lower precision, so tolerance is looser
+	t.Logf("HeadDim=128 test: Max difference: %f at index %d", maxDiff, maxDiffIdx)
+	if maxDiff > 1e-2 {
+		t.Fatalf("Mismatch too large: %f (expected[%d]=%f, got=%f)", maxDiff, maxDiffIdx, expected[maxDiffIdx], out[maxDiffIdx])
+	}
+}
+
 func TestFlashAttention2_F16_Correctness(t *testing.T) {
 	backend, err := NewBackend(0)
 	if err != nil {
