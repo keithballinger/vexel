@@ -32,6 +32,13 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 	// Keep loader open for potential future use
 	m.ggufLoader = loader
 
+	// Validate architecture compatibility
+	if supported, warning := loader.ValidateArchitecture(); !supported {
+		fmt.Printf("\n⚠️  WARNING: %s\n\n", warning)
+	} else {
+		fmt.Printf("Architecture: %s\n", loader.Architecture())
+	}
+
 	// Print stats
 	loader.PrintTensorStats()
 

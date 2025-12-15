@@ -29,6 +29,37 @@ func (l *TensorLoader) File() *File {
 	return l.file
 }
 
+// Architecture returns the model architecture (e.g., "llama", "phi", "falcon").
+func (l *TensorLoader) Architecture() string {
+	return l.file.Architecture
+}
+
+// SupportedArchitectures lists architectures that Vexel fully supports.
+var SupportedArchitectures = map[string]bool{
+	"llama":   true, // LLaMA 2/3, TinyLlama, Mistral, Codestral
+	"mistral": true, // Some Mistral models use this
+	"qwen2":   true, // Qwen 2 is LLaMA-compatible
+}
+
+// ValidateArchitecture checks if the architecture is supported and returns a warning if not.
+func (l *TensorLoader) ValidateArchitecture() (supported bool, warning string) {
+	arch := l.Architecture()
+	if arch == "" {
+		return true, "" // Unknown architecture, assume compatible
+	}
+
+	if SupportedArchitectures[arch] {
+		return true, ""
+	}
+
+	return false, fmt.Sprintf(
+		"Architecture '%s' may not be fully supported. "+
+			"Vexel is optimized for LLaMA-family models (llama, mistral, qwen2). "+
+			"Other architectures may produce incorrect results due to differences in "+
+			"normalization (LayerNorm vs RMSNorm), FFN structure, or position encoding.",
+		arch)
+}
+
 // LoadTensor loads and dequantizes a tensor by name.
 // GGUF stores dimensions in "ne" order where ne[0] is the innermost/fastest dimension.
 // This function converts to row-major (C) convention by reversing dimension order.
