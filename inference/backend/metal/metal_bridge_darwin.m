@@ -3905,6 +3905,9 @@ static inline uint64_t mach_to_ns(uint64_t mach_time_val) {
     return mach_time_val * g_timebaseInfo.numer / g_timebaseInfo.denom;
 }
 
+// Forward declaration for batch mode check
+static inline bool is_batch_mode(void);
+
 // GPU-to-GPU buffer copy that integrates with command batching.
 // If in batch mode, ends compute encoder, does blit on same command buffer,
 // then starts a new compute encoder - avoiding separate command buffer overhead.
@@ -3987,10 +3990,26 @@ void* metal_create_pipeline(void* device, void* library, const char* functionNam
 // Synchronization
 void metal_sync(void* commandQueue) {
     uint64_t start = mach_absolute_time();
-    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)commandQueue;
-    id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
-    [cmdBuffer commit];
-    [cmdBuffer waitUntilCompleted];
+
+    // If we're in batch mode, we need to flush the batch first
+    if (is_batch_mode()) {
+        // End the current batch (commit and wait)
+        [g_batchEncoder endEncoding];
+        [g_batchCmdBuffer commit];
+        [g_batchCmdBuffer waitUntilCompleted];
+        g_gpuBatchCount++;
+
+        // Start a new batch for subsequent operations
+        g_batchCmdBuffer = [g_batchQueue commandBuffer];
+        g_batchEncoder = [g_batchCmdBuffer computeCommandEncoder];
+    } else {
+        // Not in batch mode - original behavior
+        id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)commandQueue;
+        id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
+        [cmdBuffer commit];
+        [cmdBuffer waitUntilCompleted];
+    }
+
     g_gpuSyncTime += mach_to_ns(mach_absolute_time() - start);
 }
 
