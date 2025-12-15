@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"sync"
 	"time"
 	"unsafe"
@@ -13,6 +14,8 @@ import (
 	"vexel/inference/runtime"
 	"vexel/inference/tensor"
 )
+
+var debugDecode = os.Getenv("DEBUG_DECODE") == "1"
 
 // Config holds configuration for the scheduler.
 type Config struct {
@@ -494,6 +497,9 @@ func (s *Scheduler) runBatchedPrefill(seq *Sequence) error {
 	} else {
 		text = fmt.Sprintf(" %d", tokenID)
 	}
+	if debugDecode {
+		fmt.Printf("[SAMPLE-PREFILL] token %d -> %q\n", tokenID, text)
+	}
 	seq.PushToken(text)
 
 	// Transition to decode state
@@ -665,6 +671,9 @@ func (s *Scheduler) getLogitsOnCPU(logits tensor.Tensor, numElements int) []floa
 // vocabSize: number of vocabulary entries
 // Returns the sampled token ID.
 func (s *Scheduler) sampleToken(logits tensor.Tensor, vocabSize int) int {
+	// Sync GPU before sampling to ensure logits are ready
+	s.runtime.Backend().Sync()
+
 	// For greedy sampling (temp=0), try GPU argmax to avoid 128KB transfer
 	if s.config.SamplerConfig.Temperature == 0 {
 		if argmax, ok := s.runtime.Backend().(backend.ArgmaxOps); ok {
@@ -676,7 +685,15 @@ func (s *Scheduler) sampleToken(logits tensor.Tensor, vocabSize int) int {
 					// Create a DevicePtr that points to the last vocabSize elements
 					offset := uintptr((numElements - vocabSize) * 4) // 4 bytes per float32
 					lastRowPtr := tensor.DevicePtrOffset(ptr, offset)
-					return argmax.Argmax(lastRowPtr, vocabSize)
+					tokenID := argmax.Argmax(lastRowPtr, vocabSize)
+					if debugDecode {
+						text := ""
+						if s.tokenizer != nil {
+							text, _ = s.tokenizer.Decode([]int{tokenID})
+						}
+						fmt.Printf("[SAMPLE] GPU argmax -> %d (%q)\n", tokenID, text)
+					}
+					return tokenID
 				}
 			}
 		}

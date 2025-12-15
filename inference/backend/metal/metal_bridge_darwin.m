@@ -3510,6 +3510,8 @@ constant int FA2_TILE_KV = 64;      // K/V positions per tile
 constant int FA2_SIMDGROUPS = 8;    // Simdgroups per threadgroup (matches GQA ratio)
 constant int FA2_THREADS = FA2_SIMDGROUPS * 32;  // 256 threads total
 
+// Flash Attention 2 - FP32 version
+// FIXED: Now handles headDim > 64 by iterating over dimension blocks
 kernel void flash_attention_2_f32(
     device const float* Q [[buffer(0)]],
     device const float* K [[buffer(1)]],
@@ -3549,14 +3551,20 @@ kernel void flash_attention_2_f32(
     // Q offset for this (qPos, qHead)
     int qOffset = qPos * numQHeads * headDim + qHead * headDim;
 
-    // Load Q vector elements this thread handles (cache in registers)
-    int d0 = simd_lane * 2;
-    int d1 = simd_lane * 2 + 1;
-    float q0 = 0.0f;
-    float q1 = 0.0f;
+    // Each thread handles 2 dimensions per 64-dimension block
+    // For headDim=64: 1 iteration, for headDim=128: 2 iterations, etc.
+    // Maximum supported: 256 dimensions (4 blocks of 64)
+    int numDimBlocks = (headDim + 63) / 64;
+
+    // Load Q values for all dimension blocks this thread handles
+    float q_vals[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};  // Max 4 blocks * 2 dims
     if (active) {
-        q0 = (d0 < headDim) ? Q[qOffset + d0] : 0.0f;
-        q1 = (d1 < headDim) ? Q[qOffset + d1] : 0.0f;
+        for (int block = 0; block < numDimBlocks; block++) {
+            int d0 = block * 64 + simd_lane * 2;
+            int d1 = d0 + 1;
+            q_vals[block * 2] = (d0 < headDim) ? Q[qOffset + d0] : 0.0f;
+            q_vals[block * 2 + 1] = (d1 < headDim) ? Q[qOffset + d1] : 0.0f;
+        }
     }
 
     // Causal attention: only attend to positions <= qPos
@@ -3566,8 +3574,8 @@ kernel void flash_attention_2_f32(
     float runningMax = -INFINITY;
     float runningSum = 0.0f;
 
-    // Output accumulator - each thread handles 2 dims (headDim=64, 32 threads/simdgroup)
-    float acc0 = 0.0f, acc1 = 0.0f;
+    // Accumulators for output dimensions
+    float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
     // Process K/V in tiles
     for (int tileStart = 0; tileStart < maxKLen; tileStart += FA2_TILE_KV) {
@@ -3594,12 +3602,21 @@ kernel void flash_attention_2_f32(
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         // Pass 1: Compute Q·K scores and find tile max
-        // Don't store scores - we'll recompute in pass 2
         float tileMax = -INFINITY;
 
         for (int k = 0; k < tileSize; k++) {
-            // Compute Q·K dot product using cached Q values
-            float dot = q0 * Ktile[k * headDim + d0] + q1 * Ktile[k * headDim + d1];
+            // Compute Q·K dot product across all dimension blocks
+            float dot = 0.0f;
+            for (int block = 0; block < numDimBlocks; block++) {
+                int d0 = block * 64 + simd_lane * 2;
+                int d1 = d0 + 1;
+                if (d0 < headDim) {
+                    dot += q_vals[block * 2] * Ktile[k * headDim + d0];
+                }
+                if (d1 < headDim) {
+                    dot += q_vals[block * 2 + 1] * Ktile[k * headDim + d1];
+                }
+            }
             dot = simd_sum(dot);
             float score = dot * scale;
             tileMax = max(tileMax, score);
@@ -3610,24 +3627,43 @@ kernel void flash_attention_2_f32(
         float rescale = exp(runningMax - newMax);
 
         // Rescale existing accumulator
-        acc0 *= rescale;
-        acc1 *= rescale;
+        for (int i = 0; i < numDimBlocks * 2; i++) {
+            acc[i] *= rescale;
+        }
         runningSum *= rescale;
 
         // Pass 2: Recompute scores, compute exp, accumulate V
         float tileSum = 0.0f;
         for (int k = 0; k < tileSize; k++) {
             // Recompute Q·K dot product
-            float dot = q0 * Ktile[k * headDim + d0] + q1 * Ktile[k * headDim + d1];
+            float dot = 0.0f;
+            for (int block = 0; block < numDimBlocks; block++) {
+                int d0 = block * 64 + simd_lane * 2;
+                int d1 = d0 + 1;
+                if (d0 < headDim) {
+                    dot += q_vals[block * 2] * Ktile[k * headDim + d0];
+                }
+                if (d1 < headDim) {
+                    dot += q_vals[block * 2 + 1] * Ktile[k * headDim + d1];
+                }
+            }
             dot = simd_sum(dot);
             float score = dot * scale;
 
             float expScore = exp(score - newMax);
             tileSum += expScore;
 
-            // Accumulate weighted V
-            acc0 += expScore * Vtile[k * headDim + d0];
-            acc1 += expScore * Vtile[k * headDim + d1];
+            // Accumulate weighted V for all dimension blocks
+            for (int block = 0; block < numDimBlocks; block++) {
+                int d0 = block * 64 + simd_lane * 2;
+                int d1 = d0 + 1;
+                if (d0 < headDim) {
+                    acc[block * 2] += expScore * Vtile[k * headDim + d0];
+                }
+                if (d1 < headDim) {
+                    acc[block * 2 + 1] += expScore * Vtile[k * headDim + d1];
+                }
+            }
         }
 
         runningSum += tileSum;
@@ -3636,19 +3672,24 @@ kernel void flash_attention_2_f32(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    // Write output (each thread writes its 2 dimensions)
+    // Write output
     int outOffset = qPos * numQHeads * headDim + qHead * headDim;
     float invSum = 1.0f / runningSum;
 
     if (active) {
-        if (d0 < headDim) out[outOffset + d0] = acc0 * invSum;
-        if (d1 < headDim) out[outOffset + d1] = acc1 * invSum;
+        for (int block = 0; block < numDimBlocks; block++) {
+            int d0 = block * 64 + simd_lane * 2;
+            int d1 = d0 + 1;
+            if (d0 < headDim) out[outOffset + d0] = acc[block * 2] * invSum;
+            if (d1 < headDim) out[outOffset + d1] = acc[block * 2 + 1] * invSum;
+        }
     }
 }
 
 // Flash Attention 2 with FP16 activations
 // Q, K, V, out are all FP16
 // Shared memory K/V tiles are also FP16 (halves memory usage)
+// FIXED: Now handles headDim > 64 by iterating over dimension blocks
 kernel void flash_attention_2_f16(
     device const half* Q [[buffer(0)]],
     device const half* K [[buffer(1)]],
@@ -3683,21 +3724,29 @@ kernel void flash_attention_2_f16(
 
     int qOffset = qPos * numQHeads * headDim + qHead * headDim;
 
-    int d0 = simd_lane * 2;
-    int d1 = simd_lane * 2 + 1;
-    
-    half q0 = 0.0h;
-    half q1 = 0.0h;
+    // Each thread handles 2 dimensions per 64-dimension block
+    // For headDim=64: 1 iteration, for headDim=128: 2 iterations, etc.
+    // Maximum supported: 256 dimensions (4 blocks of 64)
+    int numDimBlocks = (headDim + 63) / 64;
+
+    // Load Q values for all dimension blocks this thread handles
+    // Each thread handles dims: lane*2, lane*2+1, 64+lane*2, 64+lane*2+1, ...
+    float q_vals[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};  // Max 4 blocks * 2 dims
     if (active) {
-        q0 = (d0 < headDim) ? Q[qOffset + d0] : 0.0h;
-        q1 = (d1 < headDim) ? Q[qOffset + d1] : 0.0h;
+        for (int block = 0; block < numDimBlocks; block++) {
+            int d0 = block * 64 + simd_lane * 2;
+            int d1 = d0 + 1;
+            q_vals[block * 2] = (d0 < headDim) ? float(Q[qOffset + d0]) : 0.0f;
+            q_vals[block * 2 + 1] = (d1 < headDim) ? float(Q[qOffset + d1]) : 0.0f;
+        }
     }
 
     int maxKLen = qPos + 1;
 
     float runningMax = -INFINITY;
     float runningSum = 0.0f;
-    float acc0 = 0.0f, acc1 = 0.0f;
+    // Accumulators for output dimensions
+    float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
     for (int tileStart = 0; tileStart < maxKLen; tileStart += FA2_TILE_KV) {
         int tileEnd = min(tileStart + FA2_TILE_KV, maxKLen);
@@ -3721,9 +3770,20 @@ kernel void flash_attention_2_f16(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
+        // Compute tile max - sum dot products across all dimension blocks
         float tileMax = -INFINITY;
         for (int k = 0; k < tileSize; k++) {
-            float dot = float(q0) * float(Ktile[k * headDim + d0]) + float(q1) * float(Ktile[k * headDim + d1]);
+            float dot = 0.0f;
+            for (int block = 0; block < numDimBlocks; block++) {
+                int d0 = block * 64 + simd_lane * 2;
+                int d1 = d0 + 1;
+                if (d0 < headDim) {
+                    dot += q_vals[block * 2] * float(Ktile[k * headDim + d0]);
+                }
+                if (d1 < headDim) {
+                    dot += q_vals[block * 2 + 1] * float(Ktile[k * headDim + d1]);
+                }
+            }
             dot = simd_sum(dot);
             float score = dot * scale;
             tileMax = max(tileMax, score);
@@ -3731,19 +3791,41 @@ kernel void flash_attention_2_f16(
 
         float newMax = max(runningMax, tileMax);
         float rescale = exp(runningMax - newMax);
-        acc0 *= rescale;
-        acc1 *= rescale;
+        for (int i = 0; i < numDimBlocks * 2; i++) {
+            acc[i] *= rescale;
+        }
         runningSum *= rescale;
 
+        // Compute softmax-weighted V accumulation
         float tileSum = 0.0f;
         for (int k = 0; k < tileSize; k++) {
-            float dot = float(q0) * float(Ktile[k * headDim + d0]) + float(q1) * float(Ktile[k * headDim + d1]);
+            float dot = 0.0f;
+            for (int block = 0; block < numDimBlocks; block++) {
+                int d0 = block * 64 + simd_lane * 2;
+                int d1 = d0 + 1;
+                if (d0 < headDim) {
+                    dot += q_vals[block * 2] * float(Ktile[k * headDim + d0]);
+                }
+                if (d1 < headDim) {
+                    dot += q_vals[block * 2 + 1] * float(Ktile[k * headDim + d1]);
+                }
+            }
             dot = simd_sum(dot);
             float score = dot * scale;
             float expScore = exp(score - newMax);
             tileSum += expScore;
-            acc0 += expScore * float(Vtile[k * headDim + d0]);
-            acc1 += expScore * float(Vtile[k * headDim + d1]);
+
+            // Accumulate weighted V for all dimension blocks
+            for (int block = 0; block < numDimBlocks; block++) {
+                int d0 = block * 64 + simd_lane * 2;
+                int d1 = d0 + 1;
+                if (d0 < headDim) {
+                    acc[block * 2] += expScore * float(Vtile[k * headDim + d0]);
+                }
+                if (d1 < headDim) {
+                    acc[block * 2 + 1] += expScore * float(Vtile[k * headDim + d1]);
+                }
+            }
         }
 
         runningSum += tileSum;
@@ -3755,8 +3837,12 @@ kernel void flash_attention_2_f16(
     float invSum = 1.0f / runningSum;
 
     if (active) {
-        if (d0 < headDim) out[outOffset + d0] = half(acc0 * invSum);
-        if (d1 < headDim) out[outOffset + d1] = half(acc1 * invSum);
+        for (int block = 0; block < numDimBlocks; block++) {
+            int d0 = block * 64 + simd_lane * 2;
+            int d1 = d0 + 1;
+            if (d0 < headDim) out[outOffset + d0] = half(acc[block * 2] * invSum);
+            if (d1 < headDim) out[outOffset + d1] = half(acc[block * 2 + 1] * invSum);
+        }
     }
 }
 

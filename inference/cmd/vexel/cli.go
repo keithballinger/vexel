@@ -26,6 +26,7 @@ import (
 
 func main() {
 	modelPath := flag.String("model", "", "Path to model file (.gguf or .safetensors) or directory")
+	tokenizerPath := flag.String("tokenizer", "", "Path to tokenizer.json (default: look in model directory)")
 	temperature := flag.Float64("temp", 0.7, "Sampling temperature (0 = greedy)")
 	topK := flag.Int("top-k", 40, "Top-K sampling (0 = disabled)")
 	topP := flag.Float64("top-p", 0.9, "Top-P nucleus sampling (0 = disabled)")
@@ -82,21 +83,29 @@ func main() {
 		}
 	}
 
-	// Load tokenizer (look for tokenizer.json in same directory as model)
-	modelDir := filepath.Dir(weightsPath)
-	tokPaths := []string{
-		filepath.Join(modelDir, "tokenizer.json"),
-		filepath.Join(modelDir, "tiny_tokenizer.json"),
-	}
-	for _, tokPath := range tokPaths {
-		tok, err = tokenizer.Load(tokPath)
-		if err == nil {
-			fmt.Printf("Tokenizer loaded from: %s\n", tokPath)
-			break
+	// Load tokenizer (explicit path or look in model directory)
+	if *tokenizerPath != "" {
+		tok, err = tokenizer.Load(*tokenizerPath)
+		if err != nil {
+			log.Fatalf("Failed to load tokenizer from %s: %v", *tokenizerPath, err)
 		}
-	}
-	if tok == nil {
-		log.Printf("Warning: No tokenizer found in %s", modelDir)
+		fmt.Printf("Tokenizer loaded from: %s\n", *tokenizerPath)
+	} else {
+		modelDir := filepath.Dir(weightsPath)
+		tokPaths := []string{
+			filepath.Join(modelDir, "tokenizer.json"),
+			filepath.Join(modelDir, "tiny_tokenizer.json"),
+		}
+		for _, tokPath := range tokPaths {
+			tok, err = tokenizer.Load(tokPath)
+			if err == nil {
+				fmt.Printf("Tokenizer loaded from: %s\n", tokPath)
+				break
+			}
+		}
+		if tok == nil {
+			log.Printf("Warning: No tokenizer found in %s", modelDir)
+		}
 	}
 
 	// Initialize backend and context

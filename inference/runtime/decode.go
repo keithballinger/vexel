@@ -462,8 +462,8 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 			debugTensor(fmt.Sprintf("[GPU] After Layer %d", i), m.backend, state.DevicePtr(), batchSize*hiddenSize)
 		}
 	}
+
 	if debugDecode {
-		m.backend.Sync()
 		debugTensor("[GPU] After All Layers", m.backend, state.DevicePtr(), batchSize*hiddenSize)
 	}
 

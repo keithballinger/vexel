@@ -444,12 +444,23 @@ func applyEnvOverrides(plan *ExecutionPlan) {
 			plan.Tuning.Nr0_Proj = n
 		}
 	}
+	if v := os.Getenv("VEXEL_TILE_SIZE_SDPA"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			plan.Tuning.TileSizeSDPA = n
+		}
+	}
 
 	// Fusion overrides
 	if v := os.Getenv("VEXEL_FUSE_W1W3"); v == "1" {
 		plan.Fusion.FuseW1W3 = true
 	} else if v == "0" {
 		plan.Fusion.FuseW1W3 = false
+	}
+	if v := os.Getenv("VEXEL_FUSE_RMSNORM_QKV"); v == "0" {
+		plan.Fusion.FuseRMSNormQKV = false
+	}
+	if v := os.Getenv("VEXEL_FUSE_RMSNORM_GATEUP"); v == "0" {
+		plan.Fusion.FuseRMSNormGateUp = false
 	}
 
 	// Precision overrides
