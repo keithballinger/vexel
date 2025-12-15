@@ -542,8 +542,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	}
 
 	// Use command buffer batching if available (and not profiling - profiling needs sync points)
-	// Note: Batching measured to have minimal impact, disabled for now
-	useBatching := b.batcher != nil && !profiler.enabled
+	// Note: Batching disabled - causes incorrect output due to Metal memory hazards
+	useBatching := false // b.batcher != nil && !profiler.enabled
 	if useBatching {
 		b.batcher.BeginBatch()
 		defer b.batcher.EndBatch()
@@ -665,11 +665,22 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		})
 	} else {
 		// Standard path
+		// Debug: check input before RMSNorm for prefill
+		if debugDecode && layerIdx <= 1 {
+			b.backend.Sync()
+			b.debugBlockTensor(fmt.Sprintf("L%d Input x (before RMSNorm)", layerIdx), xPtr, seqLen*hiddenSize)
+		}
 		profileOp("RMSNorm", func() {
 			if !b.AttnNorm.DevicePtr().IsNil() {
 				b.backend.RMSNorm(xPtr, b.AttnNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
 			}
 		})
+		// Debug: check RMSNorm output for prefill
+		if debugDecode && layerIdx <= 1 {
+			b.backend.Sync()
+			b.debugBlockTensor(fmt.Sprintf("L%d Standard RMSNorm out (prefill)", layerIdx), normOutPtr, seqLen*hiddenSize)
+			b.debugBlockTensor(fmt.Sprintf("L%d AttnNorm weights", layerIdx), b.AttnNorm.DevicePtr(), hiddenSize)
+		}
 
 		profileOp("Wq", func() {
 			if !b.Wq.DevicePtr().IsNil() {
@@ -743,7 +754,7 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	scale := float32(1.0 / sqrt(float64(headDim)))
 
 	// Debug: dump Q, K, V before SDPA
-	if debugDecode && layerIdx <= 1 {
+	if debugDecode && layerIdx <= 2 {
 		b.debugBlockTensor(fmt.Sprintf("L%d Q before SDPA", layerIdx), qPtr, qSize)
 		if seqLen == 1 {
 			b.debugBlockTensor(fmt.Sprintf("L%d fullK before SDPA", layerIdx), fullKPtr, fullSeqLen*numKVHeads*headDim)
