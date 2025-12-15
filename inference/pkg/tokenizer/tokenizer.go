@@ -358,6 +358,11 @@ func (t *Tokenizer) EOS() int {
 	return t.eos
 }
 
+// VocabSize returns the number of tokens in the vocabulary.
+func (t *Tokenizer) VocabSize() int {
+	return len(t.vocab)
+}
+
 // ChatTemplate defines how to format messages for chat models.
 type ChatTemplate struct {
 	SystemPrefix    string

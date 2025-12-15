@@ -84,27 +84,42 @@ func main() {
 	}
 
 	// Load tokenizer (explicit path or look in model directory)
+	var tokPath string
 	if *tokenizerPath != "" {
 		tok, err = tokenizer.Load(*tokenizerPath)
 		if err != nil {
 			log.Fatalf("Failed to load tokenizer from %s: %v", *tokenizerPath, err)
 		}
-		fmt.Printf("Tokenizer loaded from: %s\n", *tokenizerPath)
+		tokPath = *tokenizerPath
 	} else {
 		modelDir := filepath.Dir(weightsPath)
 		tokPaths := []string{
 			filepath.Join(modelDir, "tokenizer.json"),
 			filepath.Join(modelDir, "tiny_tokenizer.json"),
 		}
-		for _, tokPath := range tokPaths {
-			tok, err = tokenizer.Load(tokPath)
+		for _, tp := range tokPaths {
+			tok, err = tokenizer.Load(tp)
 			if err == nil {
-				fmt.Printf("Tokenizer loaded from: %s\n", tokPath)
+				tokPath = tp
 				break
 			}
 		}
 		if tok == nil {
 			log.Printf("Warning: No tokenizer found in %s", modelDir)
+		}
+	}
+
+	// Validate tokenizer vocab size matches model
+	if tok != nil {
+		tokVocabSize := tok.VocabSize()
+		fmt.Printf("Tokenizer: %s (vocab size: %d)\n", tokPath, tokVocabSize)
+
+		// Check for vocab size mismatch - this catches wrong tokenizer errors early
+		if tokVocabSize != cfg.VocabSize {
+			log.Fatalf("FATAL: Tokenizer vocab size (%d) does not match model vocab size (%d).\n"+
+				"This usually means you're using the wrong tokenizer for this model.\n"+
+				"Use -tokenizer flag to specify the correct tokenizer.json for your model.",
+				tokVocabSize, cfg.VocabSize)
 		}
 	}
 
