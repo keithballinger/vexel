@@ -1,10 +1,10 @@
 # Track Plan: Phi-2 Correctness Parity
 
-## Phase 1: Tokenizer Parity
+## Phase 1: Tokenizer Parity [checkpoint: f8152f6]
 - [x] Task: Write failing unit tests for Phi-2 tokenization using a prompt set verified against llama.cpp [43093b3]
 - [x] Task: Debug and fix ByteLevel BPE tokenizer implementation for Phi-2 [f409834]
 - [x] Task: Verify tokenizer parity and 80% Go code coverage [153e5b6]
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Tokenizer Parity' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Tokenizer Parity' (Protocol in workflow.md) [f8152f6]
 
 ## Phase 2: Math Path Correctness
 - [ ] Task: Write unit tests for Phi-2 specific math operations (LayerNorm, GELU, bias, parallel residual, RoPE-NeoX)
