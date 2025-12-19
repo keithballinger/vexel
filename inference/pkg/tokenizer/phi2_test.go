@@ -24,14 +24,19 @@ func TestPhi2TokenizerParity(t *testing.T) {
 		wantText string // Optional: check decoded text
 	}{
 		{
-			name:    "Unit Testing Mismatch",
-			input:   "unit testing",
-			wantLen: 14, // llama.cpp produces 14 tokens
+			name:    "Unit Testing Mismatch (Full Prompt)",
+			input:   "Describe the benefits of unit testing in Go in three concise sentences.",
+			wantLen: 14, // llama.cpp produces 14 tokens for this full prompt
 		},
 		{
 			name:    "Hello World",
 			input:   "Hello world",
 			wantLen: 2, // "Hello" (1) + " world" (1) = 2 usually
+		},
+		{
+			name:    "Special Chars",
+			input:   "<|endoftext|>",
+			wantLen: 1,
 		},
 	}
 
