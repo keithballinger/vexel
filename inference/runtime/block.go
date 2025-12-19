@@ -417,12 +417,9 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 	upBytes := seqLen * intermediateSize * 4
 
 	// Allocate intermediate buffers
-	// For GPU: allocate separate buffers (Metal doesn't support buffer+offset)
-	// For CPU: use scratch with offsets for better memory locality
 	var normOutPtr, qPtr, kPtr, vPtr, attnOutPtr, gatePtr, upPtr tensor.DevicePtr
 
 	if scratchPtr.Location() == tensor.CPU {
-		// CPU: use offset-based sub-allocation from scratch buffer
 		offset := uintptr(0)
 		normOutPtr = tensor.DevicePtrOffset(scratchPtr, offset)
 		offset += uintptr(normOutBytes)
@@ -437,10 +434,8 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 		gatePtr = tensor.DevicePtrOffset(scratchPtr, offset)
 		offset += uintptr(gateBytes)
 		upPtr = tensor.DevicePtrOffset(scratchPtr, offset)
-		_ = upBytes // Used for allocation
+		_ = upBytes
 	} else {
-		// GPU: allocate separate buffers for each intermediate
-		// Metal doesn't support buffer+offset addressing in kernels
 		normOutPtr = b.backend.Alloc(normOutBytes)
 		qPtr = b.backend.Alloc(qBytes)
 		kPtr = b.backend.Alloc(kvBytes)
@@ -450,50 +445,23 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 		upPtr = b.backend.Alloc(upBytes)
 	}
 
-	// Debug: print input to layer (only for layer 0)
-	if debugDecode && layerIdx == 0 {
-		b.debugBlockTensor("L0 Input (x)", xPtr, seqLen*hiddenSize)
-		b.debugBlockTensor("L0 AttnNorm weights", b.AttnNorm.DevicePtr(), hiddenSize)
-	}
-
-	// 1. RMSNorm (Attention)
+	// 1. Attention normalization (RMSNorm or LayerNorm)
 	if !b.AttnNorm.DevicePtr().IsNil() {
-		b.backend.RMSNorm(xPtr, b.AttnNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
-	}
-	b.backend.Sync()
-
-	// Debug: print norm output for layer 0
-	if debugDecode && layerIdx == 0 {
-		b.debugBlockTensor("L0 RMSNorm out", normOutPtr, seqLen*hiddenSize)
+		b.applyNorm(xPtr, b.AttnNorm.DevicePtr(), b.AttnNormBias.DevicePtr(), normOutPtr, seqLen, hiddenSize)
 	}
 
-	// 2. Q/K/V Projections (using quantized matmul if available)
-	// Wq: [numHeads*headDim, hiddenSize] -> Q: [seqLen, numHeads*headDim]
-	if debugDecode && layerIdx == 0 {
-		fmt.Printf("[BLOCK] L0 Wq: shape=%v quantized=%v profile=%v\n",
-			b.Wq.Shape().Dims(), b.Wq.IsQuantized(), b.Wq.QuantProfile())
-	}
+	// 2. Q/K/V Projections (with bias support)
 	if !b.Wq.DevicePtr().IsNil() {
 		qDim := b.Wq.Shape().Dims()[0]
-		b.matMulTransposed(normOutPtr, b.Wq, qPtr, seqLen, qDim, hiddenSize)
+		b.matMulTransposedWithBias(normOutPtr, b.Wq, b.WqBias, qPtr, seqLen, qDim, hiddenSize)
 	}
-	b.backend.Sync()
-
-	// Debug: print Q projection for layer 0
-	if debugDecode && layerIdx == 0 {
-		b.debugBlockTensor("L0 After Wq", qPtr, qSize)
-	}
-
-	// Wk: [numKVHeads*headDim, hiddenSize] -> K: [seqLen, numKVHeads*headDim]
 	if !b.Wk.DevicePtr().IsNil() {
 		kDim := b.Wk.Shape().Dims()[0]
-		b.matMulTransposed(normOutPtr, b.Wk, kPtr, seqLen, kDim, hiddenSize)
+		b.matMulTransposedWithBias(normOutPtr, b.Wk, b.WkBias, kPtr, seqLen, kDim, hiddenSize)
 	}
-
-	// Wv: [numKVHeads*headDim, hiddenSize] -> V: [seqLen, numKVHeads*headDim]
 	if !b.Wv.DevicePtr().IsNil() {
 		vDim := b.Wv.Shape().Dims()[0]
-		b.matMulTransposed(normOutPtr, b.Wv, vPtr, seqLen, vDim, hiddenSize)
+		b.matMulTransposedWithBias(normOutPtr, b.Wv, b.WvBias, vPtr, seqLen, vDim, hiddenSize)
 	}
 
 	// 3. RoPE - Apply to Q and K
@@ -502,50 +470,73 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 	// 4. Attention
 	scale := float32(1.0 / sqrt(float64(headDim)))
 	if seqLen == 1 {
-		// Decode: use SDPA kernel (for single token, K/V are the current token only)
-		// For seqLen=1, pass headDim as stride (layout doesn't matter with single position)
 		b.backend.SDPA(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale, headDim)
 	} else {
-		// Prefill: use SDPAPrefill kernel with causal masking (FA2 threshold handled in backend)
 		b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
 	}
 
-	// 5. Output Projection and residual
+	// Save normOut for parallel residual
+	var attnResidualPtr tensor.DevicePtr
+	if b.ParallelResidual {
+		attnResidualPtr = upPtr
+	} else {
+		attnResidualPtr = normOutPtr
+	}
+
+	// 5. Output Projection with bias support
 	if !b.Wo.DevicePtr().IsNil() {
 		oDim := b.Wo.Shape().Dims()[0]
-		b.matMulTransposed(attnOutPtr, b.Wo, normOutPtr, seqLen, oDim, numHeads*headDim)
-		// Add residual: x = x + normOut
+		b.matMulTransposedWithBias(attnOutPtr, b.Wo, b.WoBias, attnResidualPtr, seqLen, oDim, numHeads*headDim)
+		if !b.ParallelResidual {
+			b.backend.Add(xPtr, attnResidualPtr, xPtr, seqLen*hiddenSize)
+		}
+	}
+
+	// 6. FFN normalization
+	if !b.ParallelResidual && !b.FFNNorm.DevicePtr().IsNil() {
+		b.applyNorm(xPtr, b.FFNNorm.DevicePtr(), b.FFNNormBias.DevicePtr(), normOutPtr, seqLen, hiddenSize)
+	}
+
+	// 7. MLP
+	if b.MLPType == MLPGELU {
+		if !b.W1.DevicePtr().IsNil() {
+			w1Dim := b.W1.Shape().Dims()[0]
+			b.matMulTransposedWithBias(normOutPtr, b.W1, b.W1Bias, gatePtr, seqLen, w1Dim, hiddenSize)
+		}
+		if b.geluOps != nil {
+			b.geluOps.GELU(gatePtr, gatePtr, seqLen*intermediateSize)
+		}
+		if !b.W2.DevicePtr().IsNil() {
+			w2Dim := b.W2.Shape().Dims()[0]
+			b.matMulTransposedWithBias(gatePtr, b.W2, b.W2Bias, normOutPtr, seqLen, w2Dim, intermediateSize)
+		}
+	} else {
+		if !b.W1.DevicePtr().IsNil() {
+			w1Dim := b.W1.Shape().Dims()[0]
+			b.matMulTransposed(normOutPtr, b.W1, gatePtr, seqLen, w1Dim, hiddenSize)
+		}
+		if !b.W3.DevicePtr().IsNil() {
+			w3Dim := b.W3.Shape().Dims()[0]
+			b.matMulTransposed(normOutPtr, b.W3, upPtr, seqLen, w3Dim, hiddenSize)
+		}
+		b.backend.SiLUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
+		if !b.W2.DevicePtr().IsNil() {
+			w2Dim := b.W2.Shape().Dims()[0]
+			b.matMulTransposed(gatePtr, b.W2, normOutPtr, seqLen, w2Dim, intermediateSize)
+		}
+	}
+
+	// 8. Add residuals
+	if b.ParallelResidual {
+		b.backend.Add(xPtr, attnResidualPtr, xPtr, seqLen*hiddenSize)
+		b.backend.Sync()
+		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
+	} else {
 		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
 	}
 
-	// 6. FFN RMSNorm
-	if !b.FFNNorm.DevicePtr().IsNil() {
-		b.backend.RMSNorm(xPtr, b.FFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
-	}
-
-	// 7. MLP: SwiGLU variant
-	// Gate projection: gate = SiLU(normOut @ W1^T)
-	if !b.W1.DevicePtr().IsNil() {
-		w1Dim := b.W1.Shape().Dims()[0]
-		b.matMulTransposed(normOutPtr, b.W1, gatePtr, seqLen, w1Dim, hiddenSize)
-	}
-
-	// Up projection: up = normOut @ W3^T
-	if !b.W3.DevicePtr().IsNil() {
-		w3Dim := b.W3.Shape().Dims()[0]
-		b.matMulTransposed(normOutPtr, b.W3, upPtr, seqLen, w3Dim, hiddenSize)
-	}
-
-	// Fused SiLU+Mul: gate = silu(gate) * up
-	b.backend.SiLUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
-
-	// Down projection and residual
-	if !b.W2.DevicePtr().IsNil() {
-		w2Dim := b.W2.Shape().Dims()[0]
-		b.matMulTransposed(gatePtr, b.W2, normOutPtr, seqLen, w2Dim, intermediateSize)
-		// Add residual: x = x + normOut
-		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
-	}
+	return x, nil
+}
 
 	return x, nil
 }
@@ -798,6 +789,8 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 	if b.ParallelResidual {
 		// Parallel residual: x = x + attn(norm(x)) + mlp(norm(x))
 		b.backend.Add(xPtr, attnResidualPtr, xPtr, seqLen*hiddenSize) // Add attention
+		// Sync required: second Add reads x which was just written by first Add
+		b.backend.Sync()
 		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)      // Add MLP
 	} else {
 		// Serial residual: x is already updated with attention, just add MLP
