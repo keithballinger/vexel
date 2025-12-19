@@ -18,6 +18,7 @@ type Tokenizer struct {
 	eos           int      // End of sequence token
 	addBos        bool     // Whether to add BOS token to prompts (false for Phi-2, GPT-2)
 	specialTokens []string // Special tokens to match before BPE (longest first)
+	useByteLevel  bool     // Whether to use ByteLevel BPE (spaces -> Ġ)
 }
 
 // Load loads a tokenizer from a file (tokenizer.json).
@@ -28,10 +29,6 @@ func Load(path string) (*Tokenizer, error) {
 	}
 	defer f.Close()
 
-	// Parse simplified structure.
-	// Real tokenizer.json is complex (normalizers, pre-tokenizers, model).
-	// We look for model.vocab.
-	
 	var data struct {
 		Model struct {
 			Vocab map[string]int `json:"vocab"`
@@ -66,7 +63,6 @@ func Load(path string) (*Tokenizer, error) {
 			eos = tok.ID
 		case "<|endoftext|>":
 			// Phi-2 and similar models use <|endoftext|> as both BOS and EOS
-			// These models typically don't prepend BOS to prompts
 			bos = tok.ID
 			eos = tok.ID
 			addBos = false // GPT-2/Phi style: don't add BOS
@@ -77,6 +73,12 @@ func Load(path string) (*Tokenizer, error) {
 			ids[tok.ID] = tok.Content
 		}
 		specialTokens = append(specialTokens, tok.Content)
+	}
+
+	// Check for ByteLevel BPE marker Ġ (U+0120)
+	useByteLevel := false
+	if _, ok := data.Model.Vocab["Ġ"]; ok {
+		useByteLevel = true
 	}
 
 	// Sort special tokens by length (longest first) for greedy matching
@@ -91,21 +93,16 @@ func Load(path string) (*Tokenizer, error) {
 		eos:           eos,
 		addBos:        addBos,
 		specialTokens: specialTokens,
+		useByteLevel:  useByteLevel,
 	}, nil
 }
 
 // Encode converts text to token IDs.
-// This is a simplified implementation that tries:
-// 1. Special token matching (exact match for special tokens)
-// 2. Exact match for the whole string
-// 3. Greedy longest-match tokenization
-// 4. Byte-level fallback for unknown characters
 func (t *Tokenizer) Encode(text string) ([]int, error) {
 	if text == "" {
 		return nil, nil
 	}
 
-	// Split on special tokens first, then encode each segment
 	segments := t.splitOnSpecialTokens(text)
 	var tokens []int
 
@@ -115,9 +112,7 @@ func (t *Tokenizer) Encode(text string) ([]int, error) {
 				tokens = append(tokens, id)
 			}
 		} else {
-			// Each segment after a special token starts at a word boundary
 			atWordBoundary := i == 0 || (i > 0 && segments[i-1].isSpecial)
-			// isAbsoluteStart is true only for the very first segment (no prior tokens)
 			isAbsoluteStart := i == 0 && len(tokens) == 0
 			segTokens, _ := t.encodeSegment(seg.text, atWordBoundary, isAbsoluteStart)
 			tokens = append(tokens, segTokens...)
@@ -131,13 +126,11 @@ func (t *Tokenizer) Encode(text string) ([]int, error) {
 	return tokens, nil
 }
 
-// segment represents a piece of text, either a special token or regular text
 type segment struct {
 	text      string
 	isSpecial bool
 }
 
-// splitOnSpecialTokens splits text around special tokens
 func (t *Tokenizer) splitOnSpecialTokens(text string) []segment {
 	if len(t.specialTokens) == 0 {
 		return []segment{{text: text, isSpecial: false}}
@@ -147,7 +140,6 @@ func (t *Tokenizer) splitOnSpecialTokens(text string) []segment {
 	remaining := text
 
 	for len(remaining) > 0 {
-		// Find the earliest special token
 		earliestIdx := -1
 		earliestPos := len(remaining)
 		var earliestToken string
@@ -162,19 +154,16 @@ func (t *Tokenizer) splitOnSpecialTokens(text string) []segment {
 		}
 
 		if earliestIdx < 0 {
-			// No more special tokens, add remaining text
 			if len(remaining) > 0 {
 				segments = append(segments, segment{text: remaining, isSpecial: false})
 			}
 			break
 		}
 
-		// Add text before special token
 		if earliestPos > 0 {
 			segments = append(segments, segment{text: remaining[:earliestPos], isSpecial: false})
 		}
 
-		// Add the special token
 		segments = append(segments, segment{text: earliestToken, isSpecial: true})
 		remaining = remaining[earliestPos+len(earliestToken):]
 	}
@@ -182,9 +171,6 @@ func (t *Tokenizer) splitOnSpecialTokens(text string) []segment {
 	return segments
 }
 
-// encodeSegment encodes a segment of text (not containing special tokens)
-// atWordBoundary indicates if this segment starts at a word boundary (start of text or after special token)
-// isAbsoluteStart indicates if this is the very beginning of the input (no prior tokens)
 func (t *Tokenizer) encodeSegment(text string, atWordBoundary bool, isAbsoluteStart bool) ([]int, error) {
 	if text == "" {
 		return nil, nil
@@ -195,103 +181,139 @@ func (t *Tokenizer) encodeSegment(text string, atWordBoundary bool, isAbsoluteSt
 		return []int{id}, nil
 	}
 
-	// Greedy longest-match tokenization
+	// Define space token based on tokenizer type
+	spaceChar := "▁" // SentencePiece default
+	if t.useByteLevel {
+		spaceChar = "Ġ"
+	}
+	spLen := len(spaceChar)
+
 	var tokens []int
 	remaining := text
 
 	for len(remaining) > 0 {
-		// Find longest matching token
 		bestLen := 0
 		bestID := -1
-
-		// SentencePiece uses ▁ (U+2581) as word boundary marker.
-		// At word boundaries (start of segment, after space), prefer ▁ prefixed tokens.
-		const spUnderscore = "▁"
-		spLen := len(spUnderscore) // 3 bytes in UTF-8
 
 		isFirstToken := len(tokens) == 0
 		isStart := isFirstToken && atWordBoundary
 		hasLeadingSpace := len(remaining) > 0 && remaining[0] == ' '
 
-		// At absolute start of input with special chars like <, try plain text match FIRST (no ▁ prefix)
-		// This is important for chat templates like <|system|> which shouldn't have leading space
 		startsWithSpecialChar := len(remaining) > 0 && (remaining[0] == '<' || remaining[0] == '[' || remaining[0] == '{')
-		if isFirstToken && isAbsoluteStart && !hasLeadingSpace && startsWithSpecialChar {
-			for l := min(len(remaining), 20); l > 0; l-- {
-				candidate := remaining[:l]
-				if id, ok := t.vocab[candidate]; ok {
-					bestLen = l
-					bestID = id
-					break
+		
+		if t.useByteLevel {
+			// ByteLevel Logic: Treat space as Ġ
+			// If has leading space, prefix with Ġ
+			if hasLeadingSpace {
+				textAfterSpace := remaining[1:]
+				prefixed := spaceChar + textAfterSpace
+				
+				// Try finding longest match with Ġ prefix
+				foundPrefixed := false
+				for l := min(len(prefixed), 40); l > spLen; l-- {
+					candidate := prefixed[:l]
+					if id, ok := t.vocab[candidate]; ok {
+						actualLen := 1 + (l - spLen)
+						if actualLen > bestLen {
+							bestLen = actualLen
+							bestID = id
+							foundPrefixed = true
+						}
+						break
+					}
+				}
+				
+				// If no match with suffix, try just Ġ
+				if !foundPrefixed && bestID < 0 {
+					if id, ok := t.vocab[spaceChar]; ok {
+						bestLen = 1 // consume space
+						bestID = id
+					}
+				}
+			} else {
+				// No leading space, standard match
+				for l := min(len(remaining), 40); l > 0; l-- {
+					candidate := remaining[:l]
+					if id, ok := t.vocab[candidate]; ok {
+						bestLen = l
+						bestID = id
+						break
+					}
 				}
 			}
-		}
+		} else {
+			// SentencePiece Logic (Original)
+			if isFirstToken && isAbsoluteStart && !hasLeadingSpace && startsWithSpecialChar {
+				for l := min(len(remaining), 20); l > 0; l-- {
+					candidate := remaining[:l]
+					if id, ok := t.vocab[candidate]; ok {
+						bestLen = l
+						bestID = id
+						break
+					}
+				}
+			}
 
-		// At word boundary, try ▁ prefix (preferred for SentencePiece)
-		// BUT: don't add ▁ prefix if starting with newline or special chars at absolute start
-		startsWithNewline := len(remaining) > 0 && remaining[0] == '\n'
-		skipSpacePrefix := startsWithNewline || (isAbsoluteStart && startsWithSpecialChar)
-		if bestID < 0 && isStart && !hasLeadingSpace && !skipSpacePrefix {
-			prefixed := spUnderscore + remaining
-			foundPrefixed := false
-			for l := min(len(prefixed), 20+spLen); l > spLen; l-- {
-				candidate := prefixed[:l]
-				if id, ok := t.vocab[candidate]; ok {
-					bestLen = l - spLen
-					bestID = id
-					foundPrefixed = true
-					break
-				}
-			}
-			// If no ▁X token found at word boundary, emit just ▁
-			if !foundPrefixed {
-				if id, ok := t.vocab[spUnderscore]; ok {
-					bestLen = 0 // don't consume any characters
-					bestID = id
-				}
-			}
-		}
-
-		if hasLeadingSpace {
-			textAfterSpace := remaining[1:]
-			prefixed := spUnderscore + textAfterSpace
-			foundPrefixed := false
-			for l := min(len(prefixed), 20+spLen); l > spLen; l-- {
-				candidate := prefixed[:l]
-				if id, ok := t.vocab[candidate]; ok {
-					actualLen := 1 + (l - spLen)
-					if actualLen > bestLen {
-						bestLen = actualLen
+			startsWithNewline := len(remaining) > 0 && remaining[0] == '\n'
+			skipSpacePrefix := startsWithNewline || (isAbsoluteStart && startsWithSpecialChar)
+			if bestID < 0 && isStart && !hasLeadingSpace && !skipSpacePrefix {
+				prefixed := spaceChar + remaining
+				foundPrefixed := false
+				for l := min(len(prefixed), 20+spLen); l > spLen; l-- {
+					candidate := prefixed[:l]
+					if id, ok := t.vocab[candidate]; ok {
+						bestLen = l - spLen
 						bestID = id
 						foundPrefixed = true
+						break
 					}
-					break
+				}
+				if !foundPrefixed {
+					if id, ok := t.vocab[spaceChar]; ok {
+						bestLen = 0
+						bestID = id
+					}
 				}
 			}
-			// If no ▁X token found, emit just ▁ (the space marker)
-			if !foundPrefixed && bestID < 0 {
-				if id, ok := t.vocab[spUnderscore]; ok {
-					bestLen = 1 // consume just the space
-					bestID = id
-				}
-			}
-		}
 
-		// Fall back to plain text match if no ▁ match found, or for mid-word
-		if bestID < 0 {
-			for l := min(len(remaining), 20); l > 0; l-- {
-				candidate := remaining[:l]
-				if id, ok := t.vocab[candidate]; ok {
-					bestLen = l
-					bestID = id
-					break
+			if hasLeadingSpace {
+				textAfterSpace := remaining[1:]
+				prefixed := spaceChar + textAfterSpace
+				foundPrefixed := false
+				for l := min(len(prefixed), 20+spLen); l > spLen; l-- {
+					candidate := prefixed[:l]
+					if id, ok := t.vocab[candidate]; ok {
+						actualLen := 1 + (l - spLen)
+						if actualLen > bestLen {
+							bestLen = actualLen
+							bestID = id
+							foundPrefixed = true
+						}
+						break
+					}
+				}
+				if !foundPrefixed && bestID < 0 {
+					if id, ok := t.vocab[spaceChar]; ok {
+						bestLen = 1
+						bestID = id
+					}
+				}
+			}
+
+			if bestID < 0 {
+				for l := min(len(remaining), 20); l > 0; l-- {
+					candidate := remaining[:l]
+					if id, ok := t.vocab[candidate]; ok {
+						bestLen = l
+						bestID = id
+						break
+					}
 				}
 			}
 		}
 
 		if bestID >= 0 {
 			tokens = append(tokens, bestID)
-			// Advance remaining by bestLen (can be 0 when emitting just ▁)
 			if bestLen > 0 {
 				if bestLen <= len(remaining) {
 					remaining = remaining[bestLen:]
@@ -299,16 +321,20 @@ func (t *Tokenizer) encodeSegment(text string, atWordBoundary bool, isAbsoluteSt
 					remaining = ""
 				}
 			}
-			// If bestLen == 0, we just emitted ▁ but don't consume input
-			// The next iteration will handle the actual content
 		} else {
-			// Byte-level fallback: encode as <0xNN>
 			b := remaining[0]
 			byteToken := fmt.Sprintf("<0x%02X>", b)
 			if id, ok := t.vocab[byteToken]; ok {
 				tokens = append(tokens, id)
 			} else {
-				// Skip unknown byte (shouldn't happen with proper tokenizer)
+				// Fallback for ByteLevel BPE: if <0xNN> not found,
+				// check if single char is in vocab (most ASCII are)
+				if t.useByteLevel {
+					charStr := string(b)
+					if id, ok := t.vocab[charStr]; ok {
+						tokens = append(tokens, id)
+					}
+				}
 			}
 			remaining = remaining[1:]
 		}
@@ -324,10 +350,8 @@ func min(a, b int) int {
 	return b
 }
 
-// byteTokenRegex matches byte tokens like <0x0A>, <0x20>, etc.
-var byteTokenRegex = regexp.MustCompile(`<0x([0-9A-Fa-f]{2})>`)
+var byteTokenRegex = regexp.MustCompile(`<0x([0-9A-Fa-f]{2})>`) 
 
-// Decode converts token IDs to text.
 func (t *Tokenizer) Decode(ids []int) (string, error) {
 	var out strings.Builder
 	for _, id := range ids {
@@ -335,50 +359,29 @@ func (t *Tokenizer) Decode(ids []int) (string, error) {
 			out.WriteString(s)
 		}
 	}
-	return decodeSpecialChars(out.String()), nil
+	s := out.String()
+	// Replace Ġ with space for ByteLevel
+	s = strings.ReplaceAll(s, "Ġ", " ")
+	return decodeSpecialChars(s), nil
 }
 
-// decodeSpecialChars converts SentencePiece and byte tokens to readable text.
 func decodeSpecialChars(s string) string {
-	// Replace SentencePiece underscore (U+2581) with space
 	s = strings.ReplaceAll(s, "▁", " ")
-
-	// Decode byte tokens like <0x0A> -> newline, <0x20> -> space
 	s = byteTokenRegex.ReplaceAllStringFunc(s, func(match string) string {
-		// Extract hex value
-		hexStr := match[3:5] // "0A" from "<0x0A>"
+		hexStr := match[3:5]
 		if b, err := strconv.ParseUint(hexStr, 16, 8); err == nil {
 			return string(rune(b))
 		}
-		return match // Return original if parse fails
+		return match
 	})
-
-	// Don't trim leading space - it's part of the token meaning
 	return s
 }
 
-// BOS returns the beginning-of-sequence token ID.
-func (t *Tokenizer) BOS() int {
-	return t.bos
-}
+func (t *Tokenizer) BOS() int { return t.bos }
+func (t *Tokenizer) EOS() int { return t.eos }
+func (t *Tokenizer) AddBOS() bool { return t.addBos }
+func (t *Tokenizer) VocabSize() int { return len(t.vocab) }
 
-// EOS returns the end-of-sequence token ID.
-func (t *Tokenizer) EOS() int {
-	return t.eos
-}
-
-// AddBOS returns whether this tokenizer should add BOS token to prompts.
-// Models like Llama expect BOS, while Phi-2/GPT-2 do not.
-func (t *Tokenizer) AddBOS() bool {
-	return t.addBos
-}
-
-// VocabSize returns the number of tokens in the vocabulary.
-func (t *Tokenizer) VocabSize() int {
-	return len(t.vocab)
-}
-
-// ChatTemplate defines how to format messages for chat models.
 type ChatTemplate struct {
 	SystemPrefix    string
 	SystemSuffix    string
@@ -388,20 +391,17 @@ type ChatTemplate struct {
 	AssistantSuffix string
 }
 
-// TinyLlamaChatTemplate returns the chat template for TinyLlama models.
-// Note: AssistantPrefix has trailing newline to match llama.cpp format.
 func TinyLlamaChatTemplate() ChatTemplate {
 	return ChatTemplate{
 		SystemPrefix:    "<|system|>\n",
 		SystemSuffix:    "</s>\n",
 		UserPrefix:      "<|user|>\n",
 		UserSuffix:      "</s>\n",
-		AssistantPrefix: "<|assistant|>\n", // Trailing newline to match llama.cpp
+		AssistantPrefix: "<|assistant|>\n",
 		AssistantSuffix: "</s>\n",
 	}
 }
 
-// Llama2ChatTemplate returns the chat template for Llama-2 chat models.
 func Llama2ChatTemplate() ChatTemplate {
 	return ChatTemplate{
 		SystemPrefix:    "[INST] <<SYS>>\n",
@@ -413,25 +413,16 @@ func Llama2ChatTemplate() ChatTemplate {
 	}
 }
 
-// FormatChat formats a conversation using the chat template.
-// messages is a slice of role/content pairs: [{"user", "Hello"}, {"assistant", "Hi!"}]
 func (ct ChatTemplate) FormatChat(systemPrompt string, userMessage string) string {
 	var sb strings.Builder
-
-	// Add system prompt if provided
 	if systemPrompt != "" {
 		sb.WriteString(ct.SystemPrefix)
 		sb.WriteString(systemPrompt)
 		sb.WriteString(ct.SystemSuffix)
 	}
-
-	// Add user message
 	sb.WriteString(ct.UserPrefix)
 	sb.WriteString(userMessage)
 	sb.WriteString(ct.UserSuffix)
-
-	// Add assistant prefix (model will generate the response)
 	sb.WriteString(ct.AssistantPrefix)
-
 	return sb.String()
 }
