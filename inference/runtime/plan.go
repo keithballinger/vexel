@@ -160,6 +160,9 @@ type ModelMeta struct {
 
 	// Quantization formats used (from GGUF metadata)
 	QuantFormats map[string]int // e.g., {"Q4_0": 225, "Q6_K": 1, "F32": 65}
+
+	// NormType specifies the normalization type (RMSNorm vs LayerNorm)
+	NormType NormType
 }
 
 // DeviceMeta contains device capability information.
@@ -218,6 +221,13 @@ func BuildExecutionPlan(model ModelMeta, device DeviceMeta, config *PlanConfig) 
 
 	// Step 3: Apply config overrides
 	applyConfigOverrides(plan, config)
+
+	// Step 3.5: Disable fused RMSNorm kernels for LayerNorm models
+	// These fused kernels only work with RMSNorm, not LayerNorm
+	if model.NormType == NormLayerNorm {
+		plan.Fusion.FuseRMSNormQKV = false
+		plan.Fusion.FuseRMSNormGateUp = false
+	}
 
 	// Step 4: Apply environment variable overrides
 	applyEnvOverrides(plan)

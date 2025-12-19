@@ -12,7 +12,11 @@ import (
 )
 
 // Debug flag - set DEBUG_DECODE=1 to enable
-var debugDecode = os.Getenv("DEBUG_DECODE") == "1"
+// Using a function to check at runtime instead of package init
+func isDebugDecode() bool {
+	return os.Getenv("DEBUG_DECODE") == "1"
+}
+var debugDecode = isDebugDecode()
 
 // debugTensor prints stats about a tensor (min, max, mean, first values)
 func debugTensor(name string, backend interface {
@@ -238,9 +242,7 @@ func (m *ModelRuntime) DecodeStep(inputs BatchRuntimeInputs) (tensor.Tensor, err
 	}
 
 	// 6. Final Norm (in-place on state)
-	if !m.FinalNorm.DevicePtr().IsNil() {
-		m.backend.RMSNorm(statePtr, m.FinalNorm.DevicePtr(), statePtr, batchSize, hiddenSize, float32(m.config.RMSNormEPS))
-	}
+	m.applyFinalNorm(statePtr, statePtr, batchSize, hiddenSize)
 	if debugDecode {
 		m.backend.Sync()
 		debugTensor("After Final Norm", m.backend, statePtr, batchSize*hiddenSize)
@@ -355,9 +357,7 @@ func (m *ModelRuntime) DecodeWithPagedKV(tokens []int, seqID int64, pos int) (te
 	m.backend.Sync()
 
 	// 6. Final Norm (in-place on state)
-	if !m.FinalNorm.DevicePtr().IsNil() {
-		m.backend.RMSNorm(statePtr, m.FinalNorm.DevicePtr(), statePtr, batchSize, hiddenSize, float32(m.config.RMSNormEPS))
-	}
+	m.applyFinalNorm(statePtr, statePtr, batchSize, hiddenSize)
 	// No sync needed - operations are serialized in Metal
 
 	// 7. Compute Logits: state @ OutputHead^T
@@ -390,8 +390,10 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 		return tensor.Tensor{}, fmt.Errorf("GPU KV cache not initialized")
 	}
 
-	if debugDecode {
-		fmt.Printf("[DECODE-GPU] tokens=%v pos=%d\n", tokens, pos)
+	// Check debug at runtime
+	debugNow := os.Getenv("DEBUG_DECODE") == "1"
+	if debugNow {
+		fmt.Printf("[DECODE-GPU] ENTERING DecodeWithGPUKV tokens=%v pos=%d debugDecode=%v\n", tokens, pos, debugDecode)
 	}
 
 	// Reset buffer pool if the backend supports it
@@ -451,13 +453,16 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 	scratch := tensor.NewTensor(tensor.NewShape(int(scratchBytes/4)), m.config.DType, scratchPtr)
 
 	// 5. Layer Loop using ExecuteWithGPUKV
+	if debugNow {
+		fmt.Printf("[DEBUG] debugNow=%v, debugDecode=%v, layers=%d\n", debugNow, debugDecode, len(m.layers))
+	}
 	for i, layer := range m.layers {
 		state, err = layer.ExecuteWithGPUKV(state, scratch, m.gpuCache, i, pos)
 		if err != nil {
 			return tensor.Tensor{}, fmt.Errorf("layer %d: %w", i, err)
 		}
 		// Debug every layer to trace where values go wrong
-		if debugDecode {
+		if debugNow {
 			m.backend.Sync()
 			debugTensor(fmt.Sprintf("[GPU] After Layer %d", i), m.backend, state.DevicePtr(), batchSize*hiddenSize)
 		}
@@ -485,9 +490,7 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 	}
 
 	// 7. Final Norm (only on last token)
-	if !m.FinalNorm.DevicePtr().IsNil() {
-		m.backend.RMSNorm(lastStatePtr, m.FinalNorm.DevicePtr(), lastStatePtr, 1, hiddenSize, float32(m.config.RMSNormEPS))
-	}
+	m.applyFinalNorm(lastStatePtr, lastStatePtr, 1, hiddenSize)
 	if debugDecode {
 		m.backend.Sync()
 		debugTensor("[GPU] After Final Norm", m.backend, lastStatePtr, hiddenSize)
@@ -613,9 +616,7 @@ func (m *ModelRuntime) PrefillWithPagedKV(tokens []int, seqID int64, startPos in
 		}
 	}
 
-	if !m.FinalNorm.DevicePtr().IsNil() {
-		m.backend.RMSNorm(lastTokenPtr, m.FinalNorm.DevicePtr(), lastTokenPtr, 1, hiddenSize, float32(m.config.RMSNormEPS))
-	}
+	m.applyFinalNorm(lastTokenPtr, lastTokenPtr, 1, hiddenSize)
 
 	// 7. Compute Logits for last token
 	logitsPtr, err := allocPtr(vocabSize * 4)
@@ -725,9 +726,7 @@ func (m *ModelRuntime) DecodeWithGPUKVAndHidden(tokens []int, pos int) (logits t
 	}
 
 	// 7. Final Norm (only on last token)
-	if !m.FinalNorm.DevicePtr().IsNil() {
-		m.backend.RMSNorm(lastStatePtr, m.FinalNorm.DevicePtr(), lastStatePtr, 1, hiddenSize, float32(m.config.RMSNormEPS))
-	}
+	m.applyFinalNorm(lastStatePtr, lastStatePtr, 1, hiddenSize)
 
 	// Copy POST-NORM hidden state to CPU for training
 	// This matches what lm_head sees, so Medusa heads initialized from lm_head will work correctly
@@ -834,9 +833,7 @@ func (m *ModelRuntime) VerifySpeculative(tokens []int, pos int) (tensor.Tensor, 
 	}
 
 	// 6. Final Norm - apply to all positions
-	if !m.FinalNorm.DevicePtr().IsNil() {
-		m.backend.RMSNorm(statePtr, m.FinalNorm.DevicePtr(), statePtr, seqLen, hiddenSize, float32(m.config.RMSNormEPS))
-	}
+	m.applyFinalNorm(statePtr, statePtr, seqLen, hiddenSize)
 
 	// 7. Compute Logits for ALL tokens
 	// Output: [seqLen, vocabSize]
@@ -931,9 +928,7 @@ func (m *ModelRuntime) VerifySpeculativeWithHidden(tokens []int, pos int) (tenso
 	}
 
 	// 6. Final Norm - apply to all positions
-	if !m.FinalNorm.DevicePtr().IsNil() {
-		m.backend.RMSNorm(statePtr, m.FinalNorm.DevicePtr(), statePtr, seqLen, hiddenSize, float32(m.config.RMSNormEPS))
-	}
+	m.applyFinalNorm(statePtr, statePtr, seqLen, hiddenSize)
 
 	// 7. Extract POST-NORM hidden states for training
 	// This matches what lm_head sees, so Medusa heads initialized from lm_head will work correctly

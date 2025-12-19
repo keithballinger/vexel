@@ -25,9 +25,10 @@ type ModelRuntime struct {
 	plan       *ExecutionPlan // Model-aware execution plan
 
 	// Global weights (stored as DevicePtr for GPU execution)
-	Embedding  tensor.Tensor
-	FinalNorm  tensor.Tensor
-	OutputHead tensor.Tensor
+	Embedding     tensor.Tensor
+	FinalNorm     tensor.Tensor
+	FinalNormBias tensor.Tensor // For LayerNorm architectures (Phi)
+	OutputHead    tensor.Tensor
 
 	// Keep mapped file alive
 	mappedFile interface{ Close() error }
@@ -87,7 +88,7 @@ func (m *ModelRuntime) ModelMeta() ModelMeta {
 	quantFormats := make(map[string]int)
 	for _, layer := range m.layers {
 		if layer.Wq.IsQuantized() {
-			quantFormats[string(layer.Wq.QuantProfile())]++
+			quantFormats[layer.Wq.QuantProfile().String()]++
 		}
 	}
 
@@ -109,12 +110,35 @@ func (m *ModelRuntime) ModelMeta() ModelMeta {
 		VocabSize:        m.config.VocabSize,
 		MaxSeqLen:        m.config.MaxSeqLen,
 		QuantFormats:     quantFormats,
+		NormType:         m.config.NormType,
 	}
 }
 
 // Backend returns the underlying compute backend.
 func (m *ModelRuntime) Backend() backend.Backend {
 	return m.backend
+}
+
+// applyFinalNorm applies the final normalization (RMSNorm or LayerNorm based on config).
+func (m *ModelRuntime) applyFinalNorm(xPtr, outPtr tensor.DevicePtr, rows, cols int) {
+	if m.FinalNorm.DevicePtr().IsNil() {
+		return
+	}
+	debug := os.Getenv("DEBUG_DECODE") == "1"
+	if m.config.NormType == NormLayerNorm {
+		if layerNormOps, ok := m.backend.(backend.LayerNormOps); ok {
+			if debug {
+				fmt.Printf("[DEBUG] applyFinalNorm: Using LayerNorm, bias=%v\n", !m.FinalNormBias.DevicePtr().IsNil())
+			}
+			layerNormOps.LayerNorm(xPtr, m.FinalNorm.DevicePtr(), m.FinalNormBias.DevicePtr(), outPtr, rows, cols, float32(m.config.RMSNormEPS))
+			return
+		}
+	}
+	// Fallback to RMSNorm
+	if debug {
+		fmt.Printf("[DEBUG] applyFinalNorm: Using RMSNorm\n")
+	}
+	m.backend.RMSNorm(xPtr, m.FinalNorm.DevicePtr(), outPtr, rows, cols, float32(m.config.RMSNormEPS))
 }
 
 // Layer returns the block runtime at the given index.

@@ -207,7 +207,10 @@ func TestSDPA(t *testing.T) {
 	b.ToDevice(kBuf, float32ToBytes(K))
 	b.ToDevice(vBuf, float32ToBytes(V))
 
-	b.SDPA(qBuf, kBuf, vBuf, outBuf, kvLen, numQHeads, numKVHeads, headDim, scale)
+	// For head-major layout, stride = maxSeqLen * headDim
+	// Since numKVHeads=1, layout is same as sequence-major
+	kvHeadStride := kvLen * headDim
+	b.SDPA(qBuf, kBuf, vBuf, outBuf, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
 	b.Sync()
 
 	resultBytes := make([]byte, numQHeads*headDim*4)
@@ -222,6 +225,73 @@ func TestSDPA(t *testing.T) {
 	// Verify the output is closer to V[0] than V[1] or V[2]
 	if result[0] < 1.0 || result[0] > 5.0 {
 		t.Errorf("Expected first dim close to V[0], got %f", result[0])
+	}
+}
+
+func TestMatMulLargeK(t *testing.T) {
+	// Test matmul with Phi-2 dimensions: M=2, N=2560, K=2560
+	b, err := NewBackend(0)
+	if err != nil {
+		t.Skipf("Metal backend not available: %v", err)
+	}
+	defer b.Close()
+
+	M, N, K := 2, 2560, 2560
+
+	// Create input data with distinct row values
+	A := make([]float32, M*K)
+	for i := 0; i < K; i++ {
+		A[i] = float32(i) / float32(K)         // Row 0: 0, 1/K, 2/K, ...
+		A[K+i] = -float32(i) / float32(K)      // Row 1: 0, -1/K, -2/K, ... (negative to be clearly different)
+	}
+
+	// Create identity-like weight matrix (first 4 columns: identity, rest zeros)
+	// This way we can verify the output row 0 != row 1
+	B := make([]float32, N*K)
+	for i := 0; i < N && i < K; i++ {
+		B[i*K+i] = 1.0 // Identity diagonal
+	}
+
+	aBuf := b.Alloc(len(A) * 4)
+	bBuf := b.Alloc(len(B) * 4)
+	cBuf := b.Alloc(M * N * 4)
+	defer b.Free(aBuf)
+	defer b.Free(bBuf)
+	defer b.Free(cBuf)
+
+	b.ToDevice(aBuf, float32ToBytes(A))
+	b.ToDevice(bBuf, float32ToBytes(B))
+
+	// C = A @ B^T
+	b.MatMulTransposed(aBuf, bBuf, cBuf, M, N, K)
+	b.Sync()
+
+	resultBytes := make([]byte, M*N*4)
+	b.ToHost(resultBytes, cBuf)
+	result := bytesToFloat32(resultBytes)
+
+	// Verify row 0 and row 1 are different
+	// Row 0 should have positive values, Row 1 should have negative values
+	row0Sum := float32(0)
+	row1Sum := float32(0)
+	for i := 0; i < N; i++ {
+		row0Sum += result[i]
+		row1Sum += result[N+i]
+	}
+
+	t.Logf("Row 0 first4: [%f, %f, %f, %f]", result[0], result[1], result[2], result[3])
+	t.Logf("Row 1 first4: [%f, %f, %f, %f]", result[N], result[N+1], result[N+2], result[N+3])
+	t.Logf("Row 0 sum: %f, Row 1 sum: %f", row0Sum, row1Sum)
+
+	// The sums should have opposite signs (or at least be clearly different)
+	if math.Abs(float64(row0Sum-row1Sum)) < 1e-5 {
+		t.Errorf("Row 0 and Row 1 have nearly identical sums - matmul may be computing same value for both rows")
+	}
+
+	// Specifically, with our input, result[0] should be A[0,0] = 0, result[1] should be A[0,1] = 1/K
+	// And result[N] should be A[1,0] = 0, result[N+1] should be A[1,1] = -1/K
+	if math.Abs(float64(result[1]-result[N+1])) < 1e-5 {
+		t.Errorf("result[1] = %f, result[N+1] = %f - expected different values", result[1], result[N+1])
 	}
 }
 

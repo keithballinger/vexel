@@ -120,6 +120,20 @@ void metal_rmsnorm_f32(void* queue, void* pipeline,
                        void* x, void* weight, void* out,
                        int batchSize, int dim, float eps);
 
+// LayerNorm: out = (x - mean) / sqrt(var + eps) * weight + bias
+void metal_layernorm_f32(void* queue, void* pipeline,
+                         void* x, void* weight, void* bias, void* out,
+                         int batchSize, int dim, float eps);
+
+// GELU activation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+void metal_gelu_f32(void* queue, void* pipeline,
+                    void* x, void* out, int n);
+
+// Add bias: out = x + bias (broadcasted across rows)
+void metal_add_bias_f32(void* queue, void* pipeline,
+                        void* x, void* bias, void* out,
+                        int rows, int cols);
+
 // Fused Add + RMSNorm: x = x + residual (in-place), then out = RMSNorm(x)
 void metal_add_rmsnorm_f32(void* queue, void* pipeline,
                            void* x, void* residual, void* weight, void* out,
@@ -141,17 +155,21 @@ void metal_rope_f32(void* queue, void* pipeline,
                     int batchSize, int seqLen, int numHeads, int headDim,
                     int startPos, float theta);
 
+// ropeDim: dimensions to rotate (can be < headDim for partial RoPE like Phi-2)
+// ropeNeox: 0 = LLaMA-style (interleaved pairs), 1 = NEOX-style (split pairs)
 void metal_rope_gqa_f32(void* queue, void* pipeline,
                         void* q, void* k,
                         int seqLen, int numQHeads, int numKVHeads, int headDim,
-                        int startPos, float theta);
+                        int startPos, int ropeDim, float theta, int ropeNeox);
 
 // RoPE for GQA with FP16 inputs/outputs
 // Computation in FP32 for numerical stability, I/O in FP16
+// ropeDim: dimensions to rotate (can be < headDim for partial RoPE like Phi-2)
+// ropeNeox: 0 = LLaMA-style (interleaved pairs), 1 = NEOX-style (split pairs)
 void metal_rope_gqa_f16(void* queue, void* pipeline,
                         void* q, void* k,
                         int seqLen, int numQHeads, int numKVHeads, int headDim,
-                        int startPos, float theta);
+                        int startPos, int ropeDim, float theta, int ropeNeox);
 
 void metal_softmax_f32(void* queue, void* pipeline,
                        void* x, void* out,
@@ -207,11 +225,12 @@ void metal_embedding_f32(void* queue,
 
 // Attention operations
 // SDPA for decode (single query position against KV cache)
-// Q: [numQHeads, headDim], K/V: [kvLen, numKVHeads, headDim]
+// Q: [numQHeads, headDim], K/V: [numKVHeads, maxSeqLen, headDim] (head-major layout)
+// kvHeadStride = maxSeqLen * headDim (stride between KV heads)
 void metal_sdpa_decode_f32(void* queue, void* pipeline,
                            void* Q, void* K, void* V, void* out,
                            int kvLen, int numQHeads, int numKVHeads, int headDim,
-                           float scale);
+                           float scale, int kvHeadStride);
 
 // SDPA for prefill (batched with causal masking)
 // Q/K/V: [seqLen, numHeads, headDim]
@@ -237,11 +256,12 @@ void metal_flash_attention_2_f16(void* queue, void* pipeline,
 
 // Flash Decoding - parallelized SDPA for decode phase
 // Uses threadgroup parallelism with online softmax reduction
-// Q: [numQHeads, headDim], K/V: [kvLen, numKVHeads, headDim]
+// Q: [numQHeads, headDim], K/V: [numKVHeads, maxSeqLen, headDim] (head-major layout)
+// kvHeadStride = maxSeqLen * headDim (stride between KV heads)
 void metal_sdpa_flash_decode_f32(void* queue, void* pipeline,
                                   void* Q, void* K, void* V, void* out,
                                   int kvLen, int numQHeads, int numKVHeads, int headDim,
-                                  float scale);
+                                  float scale, int kvHeadStride);
 
 // Legacy interface (deprecated)
 void metal_scaled_dot_product_attention(void* queue,

@@ -1629,6 +1629,139 @@ kernel void rmsnorm_f32(
 }
 
 // =============================================================================
+// LAYERNORM KERNEL (for Phi-2 and other non-LLaMA architectures)
+// =============================================================================
+// LayerNorm: out = (x - mean) / sqrt(var + eps) * weight + bias
+// Unlike RMSNorm, this computes both mean and variance.
+
+constant int LAYERNORM_THREADGROUP_SIZE = 256;
+
+kernel void layernorm_f32(
+    device const float* x [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int& dim [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    threadgroup float* shared [[threadgroup(0)]],  // Need 2 * num_warps floats
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int base = row * dim;
+
+    // Phase 1: Each thread computes partial sum and sum of squares
+    float sum = 0.0f;
+    float sumSq = 0.0f;
+    for (int i = tid; i < dim; i += LAYERNORM_THREADGROUP_SIZE) {
+        float val = x[base + i];
+        sum += val;
+        sumSq += val * val;
+    }
+
+    // Warp-level reduction for both sum and sumSq
+    sum = simd_sum(sum);
+    sumSq = simd_sum(sumSq);
+
+    // Store warp results to shared memory (interleaved: sum, sumSq)
+    if (simd_lane == 0) {
+        shared[simd_group * 2] = sum;
+        shared[simd_group * 2 + 1] = sumSq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Final reduction by first warp
+    float totalSum = 0.0f;
+    float totalSumSq = 0.0f;
+    if (simd_group == 0) {
+        int num_warps = (LAYERNORM_THREADGROUP_SIZE + 31) / 32;
+        float warp_sum = (simd_lane < (uint)num_warps) ? shared[simd_lane * 2] : 0.0f;
+        float warp_sumSq = (simd_lane < (uint)num_warps) ? shared[simd_lane * 2 + 1] : 0.0f;
+        totalSum = simd_sum(warp_sum);
+        totalSumSq = simd_sum(warp_sumSq);
+    }
+
+    // Compute mean and inverse std, broadcast via shared memory
+    if (tid == 0) {
+        float mean = totalSum / float(dim);
+        float var = (totalSumSq / float(dim)) - (mean * mean);
+        shared[0] = mean;
+        shared[1] = rsqrt(var + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float mean = shared[0];
+    float invStd = shared[1];
+
+    // Phase 2: Each thread normalizes its portion: (x - mean) * invStd * weight + bias
+    for (int i = tid; i < dim; i += LAYERNORM_THREADGROUP_SIZE) {
+        float normalized = (x[base + i] - mean) * invStd;
+        out[base + i] = normalized * weight[i] + bias[i];
+    }
+}
+
+// =============================================================================
+// GELU ACTIVATION KERNEL (for Phi-2 and other architectures)
+// =============================================================================
+// GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+
+kernel void gelu_f32(
+    device const float* x [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    // NOTE: No bounds check needed - dispatch_kernel handles exact thread count
+    // GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+    float val = x[gid];
+
+    // Clamp very large values to avoid numerical issues
+    // For |x| > 10, GELU(x) ≈ x (for positive) or 0 (for negative)
+    if (val > 10.0f) {
+        out[gid] = val;
+        return;
+    }
+    if (val < -10.0f) {
+        out[gid] = 0.0f;
+        return;
+    }
+
+    // Fast GELU approximation for normal range
+    float x3 = val * val * val;
+    float tanh_arg = 0.7978845608f * (val + 0.044715f * x3);  // sqrt(2/pi) ≈ 0.7978845608
+    float tanh_val = tanh(tanh_arg);
+    out[gid] = 0.5f * val * (1.0f + tanh_val);
+}
+
+// GELU with FP16 input/output
+kernel void gelu_f16(
+    device const half* x [[buffer(0)]],
+    device half* out [[buffer(1)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    float val = float(x[gid]);
+    float x3 = val * val * val;
+    float tanh_arg = 0.7978845608f * (val + 0.044715f * x3);
+    float tanh_val = tanh(tanh_arg);
+    out[gid] = half(0.5f * val * (1.0f + tanh_val));
+}
+
+// =============================================================================
+// ADDBIAS KERNEL (for architectures with bias terms)
+// =============================================================================
+// Adds bias to each row: out[row, col] = x[row, col] + bias[col]
+
+kernel void add_bias_f32(
+    device const float* x [[buffer(0)]],
+    device const float* bias [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant int& cols [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    int col = gid % cols;
+    out[gid] = x[gid] + bias[col];
+}
+
+// =============================================================================
 // FUSED RMSNORM + Q4_0 MATVEC KERNEL
 // =============================================================================
 // Combines RMSNorm(x) and Q4_0 MatVec(x_norm, W) into one kernel.
@@ -2015,6 +2148,8 @@ kernel void rope_f32(
 // RoPE for GQA - separate Q and K head counts
 // Q layout: [seqLen, numQHeads, headDim]
 // K layout: [seqLen, numKVHeads, headDim]
+// ropeNeox: 0 = LLaMA-style (interleaved pairs (0,1), (2,3)...),
+//           1 = NEOX-style (split pairs (i, i+ropeDim/2))
 kernel void rope_gqa_f32(
     device float* q [[buffer(0)]],
     device float* k [[buffer(1)]],
@@ -2023,7 +2158,9 @@ kernel void rope_gqa_f32(
     constant int& numKVHeads [[buffer(4)]],
     constant int& headDim [[buffer(5)]],
     constant int& startPos [[buffer(6)]],
-    constant float& theta [[buffer(7)]],
+    constant int& ropeDim [[buffer(7)]],  // Dimensions to rotate (can be < headDim for partial RoPE)
+    constant float& theta [[buffer(8)]],
+    constant int& ropeNeox [[buffer(9)]],  // 0 = LLaMA-style, 1 = NEOX-style
     uint2 gid [[thread_position_in_grid]]
 ) {
     int pos = gid.x;
@@ -2032,39 +2169,61 @@ kernel void rope_gqa_f32(
     if (pos >= seqLen) return;
 
     int absPos = startPos + pos;
-    int halfDim = headDim / 2;
+    // For partial RoPE (like Phi-2), only rotate first ropeDim dimensions
+    int halfRopeDim = ropeDim / 2;
 
-    // Process Q heads - interleaved layout: pairs are (0,1), (2,3), (4,5), ...
+    // Process Q heads
     if (head < numQHeads) {
         int qOffset = (pos * numQHeads + head) * headDim;
-        for (int j = 0; j < halfDim; j++) {
-            int idx = j * 2;
-            float freq = 1.0f / pow(theta, float(2 * j) / float(headDim));
+        for (int j = 0; j < halfRopeDim; j++) {
+            // Use ropeDim for frequency calculation to match expected RoPE behavior
+            float freq = 1.0f / pow(theta, float(2 * j) / float(ropeDim));
             float angle = float(absPos) * freq;
             float cos_val = cos(angle);
             float sin_val = sin(angle);
 
-            float q0 = q[qOffset + idx];
-            float q1 = q[qOffset + idx + 1];
-            q[qOffset + idx] = q0 * cos_val - q1 * sin_val;
-            q[qOffset + idx + 1] = q0 * sin_val + q1 * cos_val;
+            int idx0, idx1;
+            if (ropeNeox != 0) {
+                // NEOX-style: pairs are (i, i + ropeDim/2)
+                idx0 = j;
+                idx1 = j + halfRopeDim;
+            } else {
+                // LLaMA-style (interleaved): pairs are (2j, 2j+1)
+                idx0 = j * 2;
+                idx1 = j * 2 + 1;
+            }
+
+            float q0 = q[qOffset + idx0];
+            float q1 = q[qOffset + idx1];
+            q[qOffset + idx0] = q0 * cos_val - q1 * sin_val;
+            q[qOffset + idx1] = q0 * sin_val + q1 * cos_val;
         }
     }
 
-    // Process K heads (fewer due to GQA) - interleaved layout
+    // Process K heads (fewer due to GQA)
     if (head < numKVHeads) {
         int kOffset = (pos * numKVHeads + head) * headDim;
-        for (int j = 0; j < halfDim; j++) {
-            int idx = j * 2;
-            float freq = 1.0f / pow(theta, float(2 * j) / float(headDim));
+        for (int j = 0; j < halfRopeDim; j++) {
+            float freq = 1.0f / pow(theta, float(2 * j) / float(ropeDim));
             float angle = float(absPos) * freq;
             float cos_val = cos(angle);
             float sin_val = sin(angle);
 
-            float k0 = k[kOffset + idx];
-            float k1 = k[kOffset + idx + 1];
-            k[kOffset + idx] = k0 * cos_val - k1 * sin_val;
-            k[kOffset + idx + 1] = k0 * sin_val + k1 * cos_val;
+            int idx0, idx1;
+            if (ropeNeox != 0) {
+                // NEOX-style: pairs are (i, i + ropeDim/2)
+                idx0 = j;
+                idx1 = j + halfRopeDim;
+            } else {
+                // LLaMA-style (interleaved): pairs are (2j, 2j+1)
+                idx0 = j * 2;
+                idx1 = j * 2 + 1;
+            }
+
+            float k0 = k[kOffset + idx0];
+            float k1 = k[kOffset + idx1];
+            k[kOffset + idx0] = k0 * cos_val - k1 * sin_val;
+            k[kOffset + idx1] = k0 * sin_val + k1 * cos_val;
         }
     }
 }
@@ -2072,6 +2231,9 @@ kernel void rope_gqa_f32(
 // RoPE for GQA with FP16 inputs/outputs
 // Computation done in FP32 for numerical stability, I/O in FP16
 // Eliminates FP32->FP16 conversions in attention path
+// ropeDim: dimensions to rotate (can be < headDim for partial RoPE like Phi-2)
+// ropeNeox: 0 = LLaMA-style (interleaved pairs (0,1), (2,3)...),
+//           1 = NEOX-style (split pairs (i, i+ropeDim/2))
 kernel void rope_gqa_f16(
     device half* q [[buffer(0)]],
     device half* k [[buffer(1)]],
@@ -2080,7 +2242,9 @@ kernel void rope_gqa_f16(
     constant int& numKVHeads [[buffer(4)]],
     constant int& headDim [[buffer(5)]],
     constant int& startPos [[buffer(6)]],
-    constant float& theta [[buffer(7)]],
+    constant int& ropeDim [[buffer(7)]],  // Dimensions to rotate (can be < headDim for partial RoPE)
+    constant float& theta [[buffer(8)]],
+    constant int& ropeNeox [[buffer(9)]],  // 0 = LLaMA-style, 1 = NEOX-style
     uint2 gid [[thread_position_in_grid]]
 ) {
     int pos = gid.x;
@@ -2089,43 +2253,65 @@ kernel void rope_gqa_f16(
     if (pos >= seqLen) return;
 
     int absPos = startPos + pos;
-    int halfDim = headDim / 2;
+    // For partial RoPE (like Phi-2), only rotate first ropeDim dimensions
+    int halfRopeDim = ropeDim / 2;
 
-    // Process Q heads - interleaved layout: pairs are (0,1), (2,3), (4,5), ...
+    // Process Q heads
     if (head < numQHeads) {
         int qOffset = (pos * numQHeads + head) * headDim;
-        for (int j = 0; j < halfDim; j++) {
-            int idx = j * 2;
-            float freq = 1.0f / pow(theta, float(2 * j) / float(headDim));
+        for (int j = 0; j < halfRopeDim; j++) {
+            // Use ropeDim for frequency calculation to match expected RoPE behavior
+            float freq = 1.0f / pow(theta, float(2 * j) / float(ropeDim));
             float angle = float(absPos) * freq;
             float cos_val = cos(angle);
             float sin_val = sin(angle);
 
+            int idx0, idx1;
+            if (ropeNeox != 0) {
+                // NEOX-style: pairs are (i, i + ropeDim/2)
+                idx0 = j;
+                idx1 = j + halfRopeDim;
+            } else {
+                // LLaMA-style (interleaved): pairs are (2j, 2j+1)
+                idx0 = j * 2;
+                idx1 = j * 2 + 1;
+            }
+
             // Read as FP16, compute in FP32
-            float q0 = float(q[qOffset + idx]);
-            float q1 = float(q[qOffset + idx + 1]);
+            float q0 = float(q[qOffset + idx0]);
+            float q1 = float(q[qOffset + idx1]);
             // Write back as FP16
-            q[qOffset + idx] = half(q0 * cos_val - q1 * sin_val);
-            q[qOffset + idx + 1] = half(q0 * sin_val + q1 * cos_val);
+            q[qOffset + idx0] = half(q0 * cos_val - q1 * sin_val);
+            q[qOffset + idx1] = half(q0 * sin_val + q1 * cos_val);
         }
     }
 
-    // Process K heads (fewer due to GQA) - interleaved layout
+    // Process K heads (fewer due to GQA)
     if (head < numKVHeads) {
         int kOffset = (pos * numKVHeads + head) * headDim;
-        for (int j = 0; j < halfDim; j++) {
-            int idx = j * 2;
-            float freq = 1.0f / pow(theta, float(2 * j) / float(headDim));
+        for (int j = 0; j < halfRopeDim; j++) {
+            float freq = 1.0f / pow(theta, float(2 * j) / float(ropeDim));
             float angle = float(absPos) * freq;
             float cos_val = cos(angle);
             float sin_val = sin(angle);
 
+            int idx0, idx1;
+            if (ropeNeox != 0) {
+                // NEOX-style: pairs are (i, i + ropeDim/2)
+                idx0 = j;
+                idx1 = j + halfRopeDim;
+            } else {
+                // LLaMA-style (interleaved): pairs are (2j, 2j+1)
+                idx0 = j * 2;
+                idx1 = j * 2 + 1;
+            }
+
             // Read as FP16, compute in FP32
-            float k0 = float(k[kOffset + idx]);
-            float k1 = float(k[kOffset + idx + 1]);
+            float k0 = float(k[kOffset + idx0]);
+            float k1 = float(k[kOffset + idx1]);
             // Write back as FP16
-            k[kOffset + idx] = half(k0 * cos_val - k1 * sin_val);
-            k[kOffset + idx + 1] = half(k0 * sin_val + k1 * cos_val);
+            k[kOffset + idx0] = half(k0 * cos_val - k1 * sin_val);
+            k[kOffset + idx1] = half(k0 * sin_val + k1 * cos_val);
         }
     }
 }
@@ -3166,6 +3352,7 @@ kernel void sdpa_gqa_f32(
     constant int& numKVHeads [[buffer(6)]],
     constant int& headDim [[buffer(7)]],
     constant float& scale [[buffer(8)]],
+    constant int& kvHeadStride [[buffer(9)]],  // Stride between KV heads (maxSeqLen * headDim)
     uint gid [[thread_position_in_grid]]
 ) {
     int qHead = gid;
@@ -3178,10 +3365,14 @@ kernel void sdpa_gqa_f32(
     int qOffset = qHead * headDim;
     int outOffset = qHead * headDim;
 
+    // KV cache layout: [numKVHeads, maxSeqLen, headDim]
+    // For head h, position p: offset = h * kvHeadStride + p * headDim
+    int kvHeadBase = kvHead * kvHeadStride;
+
     // First pass: find max score for numerical stability
     float maxScore = -INFINITY;
     for (int pos = 0; pos < kvLen; pos++) {
-        int kOffset = pos * numKVHeads * headDim + kvHead * headDim;
+        int kOffset = kvHeadBase + pos * headDim;
         float dot = 0.0f;
         for (int d = 0; d < headDim; d++) {
             dot += Q[qOffset + d] * K[kOffset + d];
@@ -3197,8 +3388,8 @@ kernel void sdpa_gqa_f32(
     // Second pass: compute softmax and weighted sum
     float sumExp = 0.0f;
     for (int pos = 0; pos < kvLen; pos++) {
-        int kOffset = pos * numKVHeads * headDim + kvHead * headDim;
-        int vOffset = pos * numKVHeads * headDim + kvHead * headDim;
+        int kOffset = kvHeadBase + pos * headDim;
+        int vOffset = kvHeadBase + pos * headDim;
 
         // Recompute score
         float dot = 0.0f;
@@ -3238,6 +3429,7 @@ kernel void sdpa_flash_decode_f32(
     constant int& numKVHeads [[buffer(6)]],
     constant int& headDim [[buffer(7)]],
     constant float& scale [[buffer(8)]],
+    constant int& kvHeadStride [[buffer(9)]],  // Stride between KV heads (maxSeqLen * headDim)
     threadgroup float* shared [[threadgroup(0)]],
     uint gid [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]],
@@ -3253,6 +3445,10 @@ kernel void sdpa_flash_decode_f32(
 
     int qOffset = qHead * headDim;
 
+    // KV cache layout: [numKVHeads, maxSeqLen, headDim]
+    // For head h, position p: offset = h * kvHeadStride + p * headDim
+    int kvHeadBase = kvHead * kvHeadStride;
+
     // Shared memory layout:
     // [0..kvLen-1]: attention weights (after softmax)
     // [kvLen..kvLen+7]: warp max/sum values
@@ -3262,7 +3458,7 @@ kernel void sdpa_flash_decode_f32(
     // Phase 1a: Each thread computes scores for its KV positions
     float localMax = -INFINITY;
     for (int pos = tid; pos < kvLen; pos += FLASH_DECODE_THREADS) {
-        int kOffset = pos * numKVHeads * headDim + kvHead * headDim;
+        int kOffset = kvHeadBase + pos * headDim;
         float dot = 0.0f;
         for (int d = 0; d < headDim; d++) {
             dot += Q[qOffset + d] * K[kOffset + d];
@@ -3324,7 +3520,7 @@ kernel void sdpa_flash_decode_f32(
     for (int d = tid; d < headDim; d += FLASH_DECODE_THREADS) {
         float sum = 0.0f;
         for (int pos = 0; pos < kvLen; pos++) {
-            int vOffset = pos * numKVHeads * headDim + kvHead * headDim;
+            int vOffset = kvHeadBase + pos * headDim;
             sum += weights[pos] * V[vOffset + d];
         }
         out[outOffset + d] = sum;
@@ -4721,6 +4917,79 @@ void metal_rmsnorm_f32(void* queuePtr, void* pipelinePtr,
     finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
+void metal_layernorm_f32(void* queuePtr, void* pipelinePtr,
+                         void* x, void* weight, void* bias, void* out,
+                         int batchSize, int dim, float eps) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    int threadgroupSize = 256;
+    int numWarps = (threadgroupSize + 31) / 32;
+    // LayerNorm needs 2 * numWarps for sum and sumSq
+    int sharedMemSize = numWarps * 2 * sizeof(float);
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)x offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)weight offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)bias offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBytes:&dim length:sizeof(dim) atIndex:4];
+    [encoder setBytes:&eps length:sizeof(eps) atIndex:5];
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    // One threadgroup per row
+    MTLSize threadgroups = MTLSizeMake(batchSize, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_gelu_f32(void* queuePtr, void* pipelinePtr,
+                    void* x, void* out, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)x,
+        (__bridge id<MTLBuffer>)out
+    ];
+
+    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+void metal_add_bias_f32(void* queuePtr, void* pipelinePtr,
+                        void* x, void* bias, void* out,
+                        int rows, int cols) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    int totalElements = rows * cols;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)x offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)bias offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:2];
+    [encoder setBytes:&cols length:sizeof(cols) atIndex:3];
+
+    // One thread per element
+    int threadgroupSize = 256;
+    int numThreadgroups = (totalElements + threadgroupSize - 1) / threadgroupSize;
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
 void metal_add_rmsnorm_f32(void* queuePtr, void* pipelinePtr,
                            void* x, void* residual, void* weight, void* out,
                            int batchSize, int dim, float eps) {
@@ -4776,7 +5045,7 @@ void metal_rope_f32(void* queuePtr, void* pipelinePtr,
 void metal_rope_gqa_f32(void* queuePtr, void* pipelinePtr,
                         void* q, void* k,
                         int seqLen, int numQHeads, int numKVHeads, int headDim,
-                        int startPos, float theta) {
+                        int startPos, int ropeDim, float theta, int ropeNeox) {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
     id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
 
@@ -4790,7 +5059,9 @@ void metal_rope_gqa_f32(void* queuePtr, void* pipelinePtr,
         [NSData dataWithBytes:&numKVHeads length:sizeof(numKVHeads)],
         [NSData dataWithBytes:&headDim length:sizeof(headDim)],
         [NSData dataWithBytes:&startPos length:sizeof(startPos)],
-        [NSData dataWithBytes:&theta length:sizeof(theta)]
+        [NSData dataWithBytes:&ropeDim length:sizeof(ropeDim)],
+        [NSData dataWithBytes:&theta length:sizeof(theta)],
+        [NSData dataWithBytes:&ropeNeox length:sizeof(ropeNeox)]
     ];
 
     // Dispatch with max(numQHeads, numKVHeads) threads per position
@@ -5419,7 +5690,7 @@ void metal_embedding_f32(void* queuePtr,
 void metal_sdpa_decode_f32(void* queuePtr, void* pipelinePtr,
                            void* Q, void* K, void* V, void* out,
                            int kvLen, int numQHeads, int numKVHeads, int headDim,
-                           float scale) {
+                           float scale, int kvHeadStride) {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
     id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
 
@@ -5437,6 +5708,7 @@ void metal_sdpa_decode_f32(void* queuePtr, void* pipelinePtr,
     [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
     [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
     [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+    [encoder setBytes:&kvHeadStride length:sizeof(kvHeadStride) atIndex:9];
 
     // Dispatch one thread per Q head
     MTLSize threadgroupSize = MTLSizeMake(MIN(pipeline.maxTotalThreadsPerThreadgroup, (NSUInteger)numQHeads), 1, 1);
@@ -5451,7 +5723,7 @@ void metal_sdpa_decode_f32(void* queuePtr, void* pipelinePtr,
 void metal_sdpa_flash_decode_f32(void* queuePtr, void* pipelinePtr,
                                   void* Q, void* K, void* V, void* out,
                                   int kvLen, int numQHeads, int numKVHeads, int headDim,
-                                  float scale) {
+                                  float scale, int kvHeadStride) {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
     id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
 
@@ -5469,6 +5741,7 @@ void metal_sdpa_flash_decode_f32(void* queuePtr, void* pipelinePtr,
     [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
     [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
     [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+    [encoder setBytes:&kvHeadStride length:sizeof(kvHeadStride) atIndex:9];
 
     // Shared memory layout:
     // - weights[kvLen]: attention weights
@@ -5557,10 +5830,12 @@ void metal_matvec_q4_0_fused_rmsnorm_f16_out(void* queuePtr, void* pipelinePtr,
 }
 
 // RoPE for GQA with FP16 tensors
+// ropeDim: dimensions to rotate (can be < headDim for partial RoPE like Phi-2)
+// ropeNeox: 0 = LLaMA-style (interleaved pairs), 1 = NEOX-style (split pairs)
 void metal_rope_gqa_f16(void* queuePtr, void* pipelinePtr,
                          void* q, void* k,
                          int seqLen, int numQHeads, int numKVHeads, int headDim,
-                         int startPos, float theta) {
+                         int startPos, int ropeDim, float theta, int ropeNeox) {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
     id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
 
@@ -5576,7 +5851,9 @@ void metal_rope_gqa_f16(void* queuePtr, void* pipelinePtr,
     [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:4];
     [encoder setBytes:&headDim length:sizeof(headDim) atIndex:5];
     [encoder setBytes:&startPos length:sizeof(startPos) atIndex:6];
-    [encoder setBytes:&theta length:sizeof(theta) atIndex:7];
+    [encoder setBytes:&ropeDim length:sizeof(ropeDim) atIndex:7];
+    [encoder setBytes:&theta length:sizeof(theta) atIndex:8];
+    [encoder setBytes:&ropeNeox length:sizeof(ropeNeox) atIndex:9];
 
     // Grid: [seqLen, max(numQHeads, numKVHeads)]
     int maxHeads = MAX(numQHeads, numKVHeads);

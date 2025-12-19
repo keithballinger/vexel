@@ -301,6 +301,97 @@ func getScaleMinK4(j int, q []byte) (uint8, uint8) {
 	return scale, min
 }
 
+// DequantizeQ5_K converts Q5_K quantized data to float32.
+// Q5_K format: 256 elements per block (8 sub-blocks of 32 elements).
+// Block layout (176 bytes):
+//   - d (2 bytes): fp16 super-block scale for quantized scales
+//   - dmin (2 bytes): fp16 super-block scale for quantized mins
+//   - scales[12] (12 bytes): 6-bit quantized scales/mins packed
+//   - qh[32] (32 bytes): high bits for 5-bit values
+//   - qs[128] (128 bytes): 4-bit quantized values (low 4 bits of 5-bit values)
+//
+// Implementation follows llama.cpp's dequantize_row_q5_K exactly.
+// The qh array stores high bits where qh[l] contains bits for elements at
+// positions l, l+32, l+64, l+96, l+128, l+160, l+192, l+224 (one bit each).
+func DequantizeQ5_K(data []byte, numElements int) []float32 {
+	const blockSize = 256
+	const bytesPerBlock = 176
+
+	numBlocks := (numElements + blockSize - 1) / blockSize
+	result := make([]float32, numElements)
+
+	for b := 0; b < numBlocks; b++ {
+		blockOffset := b * bytesPerBlock
+		if blockOffset+bytesPerBlock > len(data) {
+			break
+		}
+
+		// Parse block header
+		dU16 := binary.LittleEndian.Uint16(data[blockOffset:])
+		dminU16 := binary.LittleEndian.Uint16(data[blockOffset+2:])
+		d := float16ToFloat32(dU16)
+		dmin := float16ToFloat32(dminU16)
+
+		// Scales are in bytes 4-15 (12 bytes total)
+		scalesData := data[blockOffset+4 : blockOffset+16]
+		// High bits are in bytes 16-47 (32 bytes)
+		qh := data[blockOffset+16 : blockOffset+48]
+		// Low 4-bit quants are in bytes 48-175 (128 bytes)
+		qs := data[blockOffset+48 : blockOffset+176]
+
+		// Process 4 groups of 64 elements (using is=0,2,4,6 for scale indices)
+		qsOffset := 0
+		is := 0
+		// u1 and u2 are bit masks that rotate through qh byte for each group
+		u1 := uint8(1) // bit 0, then 2, then 4, then 6
+		u2 := uint8(2) // bit 1, then 3, then 5, then 7
+		for j := 0; j < blockSize; j += 64 {
+			// Get scale and min for first 32 elements in this group
+			sc1, m1 := getScaleMinK4(is+0, scalesData)
+			d1 := d * float32(sc1)
+			dm1 := dmin * float32(m1)
+
+			// Get scale and min for second 32 elements in this group
+			sc2, m2 := getScaleMinK4(is+1, scalesData)
+			d2 := d * float32(sc2)
+			dm2 := dmin * float32(m2)
+
+			// Process 32 bytes containing 64 elements
+			for l := 0; l < 32; l++ {
+				idx1 := b*blockSize + j + l
+				idx2 := b*blockSize + j + l + 32
+
+				// Get high bits from qh[l] using the rotating bit masks
+				hb1 := uint8(0)
+				if qh[l]&u1 != 0 {
+					hb1 = 16
+				}
+				hb2 := uint8(0)
+				if qh[l]&u2 != 0 {
+					hb2 = 16
+				}
+
+				if idx1 < numElements {
+					// Low 4 bits + high bit for 5-bit value
+					q := (qs[qsOffset+l] & 0x0F) + hb1
+					result[idx1] = d1*float32(q) - dm1
+				}
+				if idx2 < numElements {
+					// High nibble + high bit for 5-bit value
+					q := (qs[qsOffset+l] >> 4) + hb2
+					result[idx2] = d2*float32(q) - dm2
+				}
+			}
+			qsOffset += 32
+			is += 2
+			u1 <<= 2
+			u2 <<= 2
+		}
+	}
+
+	return result
+}
+
 // Dequantize converts quantized tensor data to float32 based on tensor type.
 func Dequantize(data []byte, tensorType TensorType, numElements int) []float32 {
 	switch tensorType {
@@ -327,6 +418,8 @@ func Dequantize(data []byte, tensorType TensorType, numElements int) []float32 {
 		return DequantizeQ6_K(data, numElements)
 	case TensorTypeQ4_K:
 		return DequantizeQ4_K(data, numElements)
+	case TensorTypeQ5_K:
+		return DequantizeQ5_K(data, numElements)
 	default:
 		// Unsupported type - return zeros
 		return make([]float32, numElements)

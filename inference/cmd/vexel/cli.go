@@ -8,10 +8,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
 	"vexel/inference/cmd/vexel/internal"
+	"vexel/inference/debug"
 	"vexel/inference/medusa"
 	"vexel/inference/memory"
 	"vexel/inference/pkg/gguf"
@@ -39,7 +41,32 @@ func main() {
 	medusaHeadsPath := flag.String("medusa-heads", "", "Path to pre-trained Medusa heads file (.medusa)")
 	saveMedusaPath := flag.String("save-medusa", "", "Path to save trained Medusa heads on exit")
 
+	// Debug harness flags
+	debugLayers := flag.String("debug-layers", "", "Comma-separated layer indices to trace (empty=none)")
+	debugPositions := flag.String("debug-positions", "", "Comma-separated position indices to trace (empty=all)")
+	debugOps := flag.String("debug-ops", "", "Comma-separated ops: input,norm,qkv,rope,kv,sdpa,wo,mlp,output (empty=all)")
+	debugOutput := flag.String("debug-output", "", "Output file for JSON trace (empty=stderr)")
+	debugVerbose := flag.Bool("debug-verbose", true, "Print human-readable debug output")
+
 	flag.Parse()
+
+	// Initialize debug harness if any debug flags are specified
+	if *debugLayers != "" {
+		cfg := debug.Config{
+			Layers:     parseIntList(*debugLayers),
+			Positions:  parseIntList(*debugPositions),
+			Ops:        parseStringList(*debugOps),
+			OutputPath: *debugOutput,
+			Verbose:    *debugVerbose,
+			MaxValues:  16,
+		}
+		if err := debug.Init(cfg); err != nil {
+			log.Fatalf("Failed to init debug harness: %v", err)
+		}
+		defer debug.Close()
+		fmt.Printf("Debug harness enabled: layers=%v positions=%v ops=%v\n",
+			cfg.Layers, cfg.Positions, cfg.Ops)
+	}
 
 	fmt.Println("Vexel Inference Engine - Interactive Mode")
 	fmt.Println("Loading model...")
@@ -65,8 +92,8 @@ func main() {
 		cfg = runtime.ModelConfigFromGGUF(gf.GetModelConfig())
 		gf.Close()
 
-		fmt.Printf("Config loaded from GGUF: %d layers, %d hidden, %d heads\n",
-			cfg.NumHiddenLayers, cfg.HiddenSize, cfg.NumAttentionHeads)
+		fmt.Printf("Config loaded from GGUF: %d layers, %d hidden, %d heads, RoPEDim=%d\n",
+			cfg.NumHiddenLayers, cfg.HiddenSize, cfg.NumAttentionHeads, cfg.RoPEDim)
 	} else {
 		// Default config for TinyLlama (SafeTensors mode)
 		cfg = runtime.ModelConfig{
@@ -115,10 +142,19 @@ func main() {
 		fmt.Printf("Tokenizer: %s (vocab size: %d)\n", tokPath, tokVocabSize)
 
 		// Check for vocab size mismatch - this catches wrong tokenizer errors early
+		// Allow small differences for models like Phi-2 where tokenizer and model report slightly different sizes
 		if tokVocabSize != cfg.VocabSize {
-			log.Fatalf("FATAL: Tokenizer vocab size (%d) does not match model vocab size (%d).\n"+
-				"This usually means you're using the wrong tokenizer for this model.\n"+
-				"Use -tokenizer flag to specify the correct tokenizer.json for your model.",
+			diff := cfg.VocabSize - tokVocabSize
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff > 2000 {
+				log.Fatalf("FATAL: Tokenizer vocab size (%d) does not match model vocab size (%d).\n"+
+					"This usually means you're using the wrong tokenizer for this model.\n"+
+					"Use -tokenizer flag to specify the correct tokenizer.json for your model.",
+					tokVocabSize, cfg.VocabSize)
+			}
+			fmt.Printf("Warning: Tokenizer vocab size (%d) differs from model (%d), but within tolerance\n",
 				tokVocabSize, cfg.VocabSize)
 		}
 	}
@@ -345,4 +381,41 @@ func resolveModelPath(path string) (string, bool, error) {
 	}
 
 	return "", false, fmt.Errorf("no model file found in %s", dir)
+}
+
+// parseIntList parses a comma-separated list of integers.
+func parseIntList(s string) []int {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	result := make([]int, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			log.Fatalf("Invalid integer in list: %q", p)
+		}
+		result = append(result, n)
+	}
+	return result
+}
+
+// parseStringList parses a comma-separated list of strings.
+func parseStringList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
 }

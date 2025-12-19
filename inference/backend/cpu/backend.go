@@ -280,10 +280,11 @@ func (b *cpuBackend) RoPEShift(k []float32, headDim, numKVHeads, numTokens, shif
 // For decode (single query), this means attending to all kvLen positions.
 //
 // Q: [numQHeads, headDim] - query vectors
-// K: [kvLen, numKVHeads, headDim] - key vectors from cache
-// V: [kvLen, numKVHeads, headDim] - value vectors from cache
+// K: [numKVHeads, maxSeqLen, headDim] - key cache (head-major layout)
+// V: [numKVHeads, maxSeqLen, headDim] - value cache (head-major layout)
 // out: [numQHeads, headDim] - output vectors
-func (b *cpuBackend) SDPA(q, k, v, out []float32, kvLen, numQHeads, numKVHeads, headDim int, scale float32) {
+// kvHeadStride: stride between KV heads (maxSeqLen * headDim)
+func (b *cpuBackend) SDPA(q, k, v, out []float32, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
 	// GQA: map Q heads to KV heads
 	headsPerKV := numQHeads / numKVHeads
 
@@ -302,11 +303,14 @@ func (b *cpuBackend) SDPA(q, k, v, out []float32, kvLen, numQHeads, numKVHeads, 
 		outOffset := h * headDim
 		outHead := out[outOffset : outOffset+headDim]
 
+		// KV cache layout: [numKVHeads, maxSeqLen, headDim]
+		// For head h, position p: offset = h * kvHeadStride + p * headDim
+		kvHeadBase := kvHead * kvHeadStride
+
 		// Compute attention scores: Q dot K for each position
 		for pos := 0; pos < kvLen; pos++ {
 			// K at position pos for this KV head
-			// K layout: [kvLen, numKVHeads, headDim]
-			kOffset := pos*numKVHeads*headDim + kvHead*headDim
+			kOffset := kvHeadBase + pos*headDim
 			kVec := k[kOffset : kOffset+headDim]
 
 			var dot float32
@@ -346,7 +350,7 @@ func (b *cpuBackend) SDPA(q, k, v, out []float32, kvLen, numQHeads, numKVHeads, 
 
 		for pos := 0; pos < kvLen; pos++ {
 			// V at position pos for this KV head
-			vOffset := pos*numKVHeads*headDim + kvHead*headDim
+			vOffset := kvHeadBase + pos*headDim
 			vVec := v[vOffset : vOffset+headDim]
 
 			weight := scores[pos]

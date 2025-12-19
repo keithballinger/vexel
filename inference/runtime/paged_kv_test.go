@@ -13,8 +13,27 @@ import (
 func TestPagedKVCacheWithSDPA(t *testing.T) {
 	backend := cpu.NewBackend()
 	ops := backend.(interface {
-		SDPA(q, k, v, out []float32, kvLen, numQHeads, numKVHeads, headDim int, scale float32)
+		SDPA(q, k, v, out []float32, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int)
 	})
+
+	toHeadMajor := func(kTokenMajor []float32, kvLen, numKVHeads, headDim int) []float32 {
+		kvSize := numKVHeads * headDim
+		if len(kTokenMajor) != kvLen*kvSize {
+			return nil
+		}
+		kHeadMajor := make([]float32, numKVHeads*kvLen*headDim)
+		kvHeadStride := kvLen * headDim
+
+		for pos := 0; pos < kvLen; pos++ {
+			for kvHead := 0; kvHead < numKVHeads; kvHead++ {
+				srcBase := pos*kvSize + kvHead*headDim
+				dstBase := kvHead*kvHeadStride + pos*headDim
+				copy(kHeadMajor[dstBase:dstBase+headDim], kTokenMajor[srcBase:srcBase+headDim])
+			}
+		}
+
+		return kHeadMajor
+	}
 
 	config := kv.PagedKVConfig{
 		NumLayers:  2,
@@ -77,6 +96,13 @@ func TestPagedKVCacheWithSDPA(t *testing.T) {
 		cachedK, cachedV := cache.GetKVSlice(seqID, layer, 2)
 		kvLen := 3
 
+		cachedK = toHeadMajor(cachedK, kvLen, numKVHeads, headDim)
+		cachedV = toHeadMajor(cachedV, kvLen, numKVHeads, headDim)
+		kvHeadStride := kvLen * headDim
+		if cachedK == nil || cachedV == nil {
+			t.Fatalf("failed to convert KV to head-major layout")
+		}
+
 		// Verify we got all positions
 		expectedKVSize := kvLen * numKVHeads * headDim
 		if len(cachedK) != expectedKVSize {
@@ -85,7 +111,7 @@ func TestPagedKVCacheWithSDPA(t *testing.T) {
 
 		// Run SDPA
 		out := make([]float32, numQHeads*headDim)
-		ops.SDPA(q, cachedK, cachedV, out, kvLen, numQHeads, numKVHeads, headDim, scale)
+		ops.SDPA(q, cachedK, cachedV, out, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
 
 		// Output should be a weighted combination of V values
 		// Since Q has nonzero components matching all K vectors,
@@ -129,8 +155,11 @@ func TestPagedKVCacheWithSDPA(t *testing.T) {
 			q[i] = 0.1
 		}
 		cachedK, cachedV := cache2.GetKVSlice(seqID2, layer, 0)
+		cachedK = toHeadMajor(cachedK, 1, numKVHeads, headDim)
+		cachedV = toHeadMajor(cachedV, 1, numKVHeads, headDim)
+		kvHeadStride := 1 * headDim
 		out := make([]float32, numQHeads*headDim)
-		ops.SDPA(q, cachedK, cachedV, out, 1, numQHeads, numKVHeads, headDim, scale)
+		ops.SDPA(q, cachedK, cachedV, out, 1, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
 
 		// With single position, output = V (softmax of single element = 1)
 		// Check that output matches V pattern for the corresponding KV head
@@ -154,7 +183,10 @@ func TestPagedKVCacheWithSDPA(t *testing.T) {
 
 		// Query at position 1 (attends to positions 0 and 1)
 		cachedK, cachedV = cache2.GetKVSlice(seqID2, layer, 1)
-		ops.SDPA(q, cachedK, cachedV, out, 2, numQHeads, numKVHeads, headDim, scale)
+		cachedK = toHeadMajor(cachedK, 2, numKVHeads, headDim)
+		cachedV = toHeadMajor(cachedV, 2, numKVHeads, headDim)
+		kvHeadStride = 2 * headDim
+		ops.SDPA(q, cachedK, cachedV, out, 2, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
 
 		// Output should be different from just V at position 1
 		// (it's a weighted combination of both positions)
@@ -192,13 +224,16 @@ func TestPagedKVCacheWithSDPA(t *testing.T) {
 		}
 
 		cachedK, cachedV := cache3.GetKVSlice(seqID3, layer, 4)
+		cachedK = toHeadMajor(cachedK, 5, numKVHeads, headDim)
+		cachedV = toHeadMajor(cachedV, 5, numKVHeads, headDim)
+		kvHeadStride := 5 * headDim
 		expectedSize := 5 * numKVHeads * headDim
 		if len(cachedK) != expectedSize {
 			t.Errorf("expected cachedK size %d for 5 positions, got %d", expectedSize, len(cachedK))
 		}
 
 		out := make([]float32, numQHeads*headDim)
-		ops.SDPA(q, cachedK, cachedV, out, 5, numQHeads, numKVHeads, headDim, scale)
+		ops.SDPA(q, cachedK, cachedV, out, 5, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
 
 		// Output should be nonzero
 		hasNonzero := false

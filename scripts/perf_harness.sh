@@ -7,7 +7,8 @@ VEXEL_BIN="${VEXEL_BIN:-./vexel}"
 LLAMA_BIN="${LLAMA_BIN:-llama-cli}"
 OUT_DIR="${OUT_DIR:-perf_reports}"
 
-export VEXEL_FA2_MIN_SEQ=16
+export VEXEL_FA2_MIN_SEQ="${VEXEL_FA2_MIN_SEQ:-16}"
+PROMPT_MODE="${PROMPT_MODE:-completion}" # completion|chat
 
 if [[ ! -f "$MODEL_PATH" ]]; then
   echo "Model not found: $MODEL_PATH" >&2
@@ -34,7 +35,7 @@ TOKENS=(50 64)
 mkdir -p "$OUT_DIR"
 report="$OUT_DIR/report-$(date +%Y%m%d-%H%M%S).md"
 
-echo "# Vexel vs llama.cpp (TinyLlama Q4_0)" >"$report"
+echo "# Vexel vs llama.cpp (TinyLlama Q4_0, mode: $PROMPT_MODE)" >"$report"
 echo "" >>"$report"
 echo "| Prompt | Max Tokens | Vexel Prefill | Vexel Decode | llama.cpp Prompt Eval | llama.cpp Decode | Similarity |" >>"$report"
 echo "|---|---|---|---|---|---|---|" >>"$report"
@@ -42,6 +43,24 @@ echo "|---|---|---|---|---|---|---|" >>"$report"
 run_case() {
   local prompt="$1"
   local tokens="$2"
+
+  local -a vexel_args llama_args
+  vexel_args=("$VEXEL_BIN" -model "$MODEL_PATH" -gpu -max-tokens "$tokens" -temp 0 -top-k 1 -top-p 0)
+  llama_args=("$LLAMA_BIN" -m "$MODEL_PATH" -p "$prompt" -n "$tokens" --no-warmup --temp 0 --top-k 1 --top-p 0 --seed 1)
+
+  case "$PROMPT_MODE" in
+    completion)
+      vexel_args+=(-completion)
+      llama_args+=(-no-cnv)
+      ;;
+    chat)
+      llama_args+=(-cnv -sys "You are a helpful assistant.")
+      ;;
+    *)
+      echo "Unknown PROMPT_MODE: $PROMPT_MODE (expected completion|chat)" >&2
+      exit 1
+      ;;
+  esac
 
   parse_tokps_pair() {
     # Return first two occurrences of "<number> tokens per second" separated by space
@@ -53,7 +72,7 @@ run_case() {
   l_log=$(mktemp)
 
   # Vexel
-  "$VEXEL_BIN" -model "$MODEL_PATH" -gpu -completion -max-tokens "$tokens" -temp 0 -top-k 1 -top-p 0 <<<"$prompt" >"$v_log"
+  "${vexel_args[@]}" <<<"$prompt" >"$v_log"
   local prefill decode
   prefill="N/A"; decode="N/A"
   local parsed
@@ -65,7 +84,7 @@ run_case() {
   fi
 
   # llama.cpp
-  LLAMA_LOG_COLORS=0 "$LLAMA_BIN" -m "$MODEL_PATH" -p "$prompt" -n "$tokens" --no-warmup --temp 0 --top-k 1 --top-p 0 --seed 1 >"$l_log" 2>&1
+  LLAMA_LOG_COLORS=0 "${llama_args[@]}" >"$l_log" 2>&1
   local llama_prompt llama_decode
   local tokps
   tokps=$(parse_tokps_pair "$l_log")
@@ -76,19 +95,64 @@ run_case() {
 
   # Correctness: compare generated text similarity
   local v_text l_text similarity
-  v_text=$(grep '^>>' "$v_log" | head -n1 | sed 's/^>> //')
-  l_text=$(perl -0777 -ne 'if(/<\|assistant\|>(.*)/s){$t=$1;$t=~s/> EOF by user.*//s; $t=~s/^\s+//; $t=~s/\s+$//; print $t}' "$l_log")
-  similarity=$(V_TEXT="$v_text" L_TEXT="$l_text" python - <<'PY'
-import difflib, os
-v = os.environ.get("V_TEXT","")
-l = os.environ.get("L_TEXT","")
-if not v or not l:
+  similarity=$(V_LOG="$v_log" L_LOG="$l_log" PROMPT="$prompt" python - <<'PY'
+import difflib
+import os
+import re
+
+v_log_path = os.environ["V_LOG"]
+l_log_path = os.environ["L_LOG"]
+prompt = os.environ["PROMPT"]
+
+with open(v_log_path, "r", encoding="utf-8", errors="replace") as f:
+    v_log = f.read()
+with open(l_log_path, "r", encoding="utf-8", errors="replace") as f:
+    l_log = f.read()
+
+def extract_vexel_text(log: str) -> str:
+    # Capture everything printed between the first and second REPL prompts.
+    m = re.search(r"^>> (.*?)(?:\n>> |\Z)", log, re.M | re.S)
+    if not m:
+        return ""
+
+    text = m.group(1)
+
+    # Drop perf line and noisy debug/profile lines.
+    text = re.sub(r"\n\[[0-9]+ tokens \|.*?\]\n?", "\n", text, flags=re.S)
+    text = re.sub(r"^\[(DEBUG|PROFILE)\].*\n?", "", text, flags=re.M)
+
+    return text.strip()
+
+def extract_llama_text(log: str, prompt: str) -> str:
+    # Extract the output block that appears right before perf lines.
+    # This is robust to metadata logs that may contain "<|assistant|>" in the chat template.
+    m = re.search(r"\*{29}.*?\*{29}\n(.*?)\n\ncommon_perf_print:", log, re.S)
+    if not m:
+        return ""
+
+    block = m.group(1).lstrip()
+
+    # Conversation mode: extract assistant text within the output block.
+    m = re.search(r"<\|assistant\|>(.*)", block, re.S)
+    if m:
+        text = re.sub(r"> EOF by user.*", "", m.group(1), flags=re.S)
+        return text.strip()
+
+    # Completion mode (-no-cnv): llama.cpp echoes the prompt, then generates continuation.
+    if block.startswith(prompt):
+        block = block[len(prompt):].lstrip()
+    return block.strip()
+
+v_text = extract_vexel_text(v_log)
+l_text = extract_llama_text(l_log, prompt)
+
+if not v_text or not l_text:
     print("N/A")
 else:
-    ratio = difflib.SequenceMatcher(None, v[:400], l[:400]).ratio()
+    ratio = difflib.SequenceMatcher(None, v_text[:400], l_text[:400]).ratio()
     print(f"{ratio:.3f}")
 PY
-  )
+)
 
   echo "| ${prompt//|/\\|} | $tokens | $prefill tok/s | $decode tok/s | $llama_prompt tok/s | $llama_decode tok/s | $similarity |" >>"$report"
 

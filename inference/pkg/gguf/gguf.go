@@ -117,6 +117,8 @@ func (t TensorType) BytesPerBlock() int {
 		return 2 + 32 // scale (f16) + 32 * 8 bits
 	case TensorTypeQ4_K:
 		return 144 // Complex k-quant structure
+	case TensorTypeQ5_K:
+		return 176 // d(2) + dmin(2) + scales(12) + qh(32) + qs(128)
 	case TensorTypeQ6_K:
 		return 210
 	default:
@@ -223,6 +225,7 @@ type File struct {
 	IntermediateSize int
 	ContextLength   int
 	RoPETheta       float32
+	RoPEDimCount    int // Dimensions for RoPE (0 = full headDim). For partial RoPE like Phi-2.
 
 	file *os.File // Underlying file for mmap access
 }
@@ -522,6 +525,11 @@ func (f *File) extractModelConfig() {
 	} else {
 		f.RoPETheta = 10000.0 // Default
 	}
+	// RoPE dimension count (for partial rotary like Phi-2)
+	// 0 means full head dimension (default for LLaMA-style)
+	if v, ok := f.Metadata[prefix+"rope.dimension_count"]; ok {
+		f.RoPEDimCount = int(v.AsUint32())
+	}
 
 	// Vocab size from tokenizer
 	if v, ok := f.Metadata["tokenizer.ggml.tokens"]; ok && v.Type == MetaTypeArray {
@@ -594,6 +602,7 @@ type ModelConfigValues struct {
 	VocabSize        int
 	ContextLength    int
 	RoPETheta        float32
+	RoPEDimCount     int // Dimensions for RoPE (0 = full headDim)
 }
 
 // GetModelConfig returns the extracted model configuration.
@@ -608,5 +617,6 @@ func (f *File) GetModelConfig() ModelConfigValues {
 		VocabSize:        f.VocabSize,
 		ContextLength:    f.ContextLength,
 		RoPETheta:        f.RoPETheta,
+		RoPEDimCount:     f.RoPEDimCount,
 	}
 }

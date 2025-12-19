@@ -10,7 +10,7 @@ import (
 func TestSDPA(t *testing.T) {
 	b := cpu.NewBackend()
 	ops, ok := b.(interface {
-		SDPA(q, k, v, out []float32, kvLen, numQHeads, numKVHeads, headDim int, scale float32)
+		SDPA(q, k, v, out []float32, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int)
 	})
 	if !ok {
 		t.Fatal("Backend does not expose SDPA")
@@ -18,7 +18,7 @@ func TestSDPA(t *testing.T) {
 
 	t.Run("single_head_single_position", func(t *testing.T) {
 		// Q: [1, 4] - single head, headDim=4
-		// K: [1, 1, 4] - single position, single KV head
+		// K: [1, 1, 4] - single position, single KV head (head-major layout)
 		// V: [1, 1, 4]
 		// With only one position, attention weight = 1.0, output = V
 
@@ -26,6 +26,7 @@ func TestSDPA(t *testing.T) {
 		numQHeads := 1
 		numKVHeads := 1
 		kvLen := 1
+		kvHeadStride := kvLen * headDim // For head-major layout
 
 		q := []float32{1.0, 0.0, 0.0, 0.0}
 		k := []float32{1.0, 0.0, 0.0, 0.0}
@@ -33,7 +34,7 @@ func TestSDPA(t *testing.T) {
 		out := make([]float32, headDim)
 
 		scale := float32(1.0 / math.Sqrt(float64(headDim)))
-		ops.SDPA(q, k, v, out, kvLen, numQHeads, numKVHeads, headDim, scale)
+		ops.SDPA(q, k, v, out, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
 
 		// With single position, softmax = 1.0, output = V
 		for i := 0; i < headDim; i++ {
@@ -45,16 +46,18 @@ func TestSDPA(t *testing.T) {
 
 	t.Run("single_head_two_positions", func(t *testing.T) {
 		// Q: [1, 4]
-		// K: [2, 1, 4] - two positions
-		// V: [2, 1, 4]
+		// K: [1, 2, 4] - two positions, head-major layout
+		// V: [1, 2, 4]
 
 		headDim := 4
 		numQHeads := 1
 		numKVHeads := 1
 		kvLen := 2
+		kvHeadStride := kvLen * headDim // For head-major layout
 
 		// Q dot K[0] should be higher, so more weight on V[0]
 		q := []float32{1.0, 0.0, 0.0, 0.0}
+		// Head-major layout: [head0: pos0, pos1]
 		k := []float32{
 			1.0, 0.0, 0.0, 0.0, // pos 0 - matches Q perfectly
 			0.0, 1.0, 0.0, 0.0, // pos 1 - orthogonal to Q
@@ -66,7 +69,7 @@ func TestSDPA(t *testing.T) {
 		out := make([]float32, headDim)
 
 		scale := float32(1.0 / math.Sqrt(float64(headDim)))
-		ops.SDPA(q, k, v, out, kvLen, numQHeads, numKVHeads, headDim, scale)
+		ops.SDPA(q, k, v, out, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
 
 		// Q dot K[0] = 1.0 * scale = 0.5
 		// Q dot K[1] = 0.0 * scale = 0.0
@@ -92,6 +95,7 @@ func TestSDPA(t *testing.T) {
 		numQHeads := 2
 		numKVHeads := 1
 		kvLen := 1
+		kvHeadStride := kvLen * headDim
 
 		q := []float32{
 			1.0, 0.0, 0.0, 0.0, // Q head 0
@@ -106,7 +110,7 @@ func TestSDPA(t *testing.T) {
 		out := make([]float32, numQHeads*headDim)
 
 		scale := float32(1.0 / math.Sqrt(float64(headDim)))
-		ops.SDPA(q, k, v, out, kvLen, numQHeads, numKVHeads, headDim, scale)
+		ops.SDPA(q, k, v, out, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
 
 		// Both Q heads should output V (since softmax of single element = 1)
 		for h := 0; h < numQHeads; h++ {
@@ -126,9 +130,11 @@ func TestSDPA(t *testing.T) {
 		numQHeads := 1
 		numKVHeads := 1
 		kvLen := 3
+		kvHeadStride := kvLen * headDim
 
 		// Simple uniform query
 		q := []float32{1.0, 1.0}
+		// Head-major layout: [head0: pos0, pos1, pos2]
 		k := []float32{
 			1.0, 0.0, // pos 0
 			0.0, 1.0, // pos 1
@@ -142,7 +148,7 @@ func TestSDPA(t *testing.T) {
 		out := make([]float32, headDim)
 
 		scale := float32(1.0 / math.Sqrt(float64(headDim)))
-		ops.SDPA(q, k, v, out, kvLen, numQHeads, numKVHeads, headDim, scale)
+		ops.SDPA(q, k, v, out, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
 
 		// Q dot K[0] = 1.0, Q dot K[1] = 1.0, Q dot K[2] = 2.0
 		// Scaled: 0.707, 0.707, 1.414

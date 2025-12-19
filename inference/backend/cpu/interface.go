@@ -31,7 +31,8 @@ type Backend interface {
 	// numKVHeads: number of KV heads (for GQA, numQHeads >= numKVHeads)
 	// headDim: dimension per head
 	// scale: typically 1/sqrt(headDim)
-	SDPA(q, k, v, out []float32, kvLen, numQHeads, numKVHeads, headDim int, scale float32)
+	// kvHeadStride: stride between KV heads (maxSeqLen * headDim for head-major layout)
+	SDPA(q, k, v, out []float32, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int)
 
 	// RoPEShift applies a uniform RoPE position shift to K vectors.
 	// This is used for fragment caching: when cached K has RoPE(0,1,2,...) applied,

@@ -101,7 +101,7 @@ func setupRuntime(t *testing.T, meta Metadata) *runtime.ModelRuntime {
 		DType:             tensor.Float32,
 	}
 
-	backend := cpu.NewBackend()
+	backend := cpu.NewCPUBackend()
 	ctx := memory.NewInferenceContext(tensor.CPU)
 	scratchSize := cfg.ScratchBytes(1)
 	logitsSize := int64(cfg.VocabSize) * 4

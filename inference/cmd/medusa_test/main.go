@@ -1,3 +1,5 @@
+//go:build metal && darwin && cgo
+
 // Command medusa_test is an integration test for Medusa speculative decoding.
 // It loads a model, runs inference with online training, and reports metrics.
 //

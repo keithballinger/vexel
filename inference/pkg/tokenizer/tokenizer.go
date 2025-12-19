@@ -16,6 +16,7 @@ type Tokenizer struct {
 	ids           map[int]string
 	bos           int      // Beginning of sequence token
 	eos           int      // End of sequence token
+	addBos        bool     // Whether to add BOS token to prompts (false for Phi-2, GPT-2)
 	specialTokens []string // Special tokens to match before BPE (longest first)
 }
 
@@ -53,6 +54,7 @@ func Load(path string) (*Tokenizer, error) {
 	// Default special token IDs (Llama convention)
 	bos := 1
 	eos := 2
+	addBos := true // Default: add BOS for Llama-style models
 
 	// Collect special tokens and find BOS/EOS
 	var specialTokens []string
@@ -62,6 +64,12 @@ func Load(path string) (*Tokenizer, error) {
 			bos = tok.ID
 		case "</s>":
 			eos = tok.ID
+		case "<|endoftext|>":
+			// Phi-2 and similar models use <|endoftext|> as both BOS and EOS
+			// These models typically don't prepend BOS to prompts
+			bos = tok.ID
+			eos = tok.ID
+			addBos = false // GPT-2/Phi style: don't add BOS
 		}
 		// Add all added_tokens to vocab and special tokens list
 		if _, exists := data.Model.Vocab[tok.Content]; !exists {
@@ -81,6 +89,7 @@ func Load(path string) (*Tokenizer, error) {
 		ids:           ids,
 		bos:           bos,
 		eos:           eos,
+		addBos:        addBos,
 		specialTokens: specialTokens,
 	}, nil
 }
@@ -356,6 +365,12 @@ func (t *Tokenizer) BOS() int {
 // EOS returns the end-of-sequence token ID.
 func (t *Tokenizer) EOS() int {
 	return t.eos
+}
+
+// AddBOS returns whether this tokenizer should add BOS token to prompts.
+// Models like Llama expect BOS, while Phi-2/GPT-2 do not.
+func (t *Tokenizer) AddBOS() bool {
+	return t.addBos
 }
 
 // VocabSize returns the number of tokens in the vocabulary.

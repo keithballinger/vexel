@@ -225,19 +225,51 @@ func (m *ModelRuntime) requiredTensorNames() []string {
 		"lm_head.weight",
 	}
 
+	// Add final norm bias for LayerNorm architectures
+	if m.config.NormType == NormLayerNorm {
+		names = append(names, "model.norm.bias")
+	}
+
 	for i := 0; i < m.config.NumHiddenLayers; i++ {
 		prefix := fmt.Sprintf("model.layers.%d.", i)
-		names = append(names,
-			prefix+"self_attn.q_proj.weight",
-			prefix+"self_attn.k_proj.weight",
-			prefix+"self_attn.v_proj.weight",
-			prefix+"self_attn.o_proj.weight",
-			prefix+"mlp.gate_proj.weight",
-			prefix+"mlp.up_proj.weight",
-			prefix+"mlp.down_proj.weight",
-			prefix+"input_layernorm.weight",
-			prefix+"post_attention_layernorm.weight",
-		)
+
+		if m.config.MLPType == MLPGELU {
+			// Phi-style architecture: combined QKV, fc1/fc2 MLP
+			// Note: Phi uses parallel residual - no separate FFN norm (ffn_norm/post_attention_layernorm)
+			// Both attn and MLP share the same attn_norm input
+			names = append(names,
+				prefix+"self_attn.qkv_proj.weight", // Combined QKV
+				prefix+"self_attn.o_proj.weight",
+				prefix+"mlp.fc1.weight", // Up/Gate combined
+				prefix+"mlp.fc2.weight", // Down
+				prefix+"input_layernorm.weight",
+				// No post_attention_layernorm for parallel residual
+			)
+			// Add bias tensors
+			if m.config.HasBias {
+				names = append(names,
+					prefix+"self_attn.qkv_proj.bias",
+					prefix+"self_attn.o_proj.bias",
+					prefix+"mlp.fc1.bias",
+					prefix+"mlp.fc2.bias",
+					prefix+"input_layernorm.bias",
+					// No post_attention_layernorm.bias for parallel residual
+				)
+			}
+		} else {
+			// LLaMA-style architecture: separate Q/K/V, gate/up/down MLP
+			names = append(names,
+				prefix+"self_attn.q_proj.weight",
+				prefix+"self_attn.k_proj.weight",
+				prefix+"self_attn.v_proj.weight",
+				prefix+"self_attn.o_proj.weight",
+				prefix+"mlp.gate_proj.weight",
+				prefix+"mlp.up_proj.weight",
+				prefix+"mlp.down_proj.weight",
+				prefix+"input_layernorm.weight",
+				prefix+"post_attention_layernorm.weight",
+			)
+		}
 	}
 
 	return names
@@ -431,6 +463,9 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 	if err := copyToDevice(&m.FinalNorm); err != nil {
 		return fmt.Errorf("final_norm: %w", err)
 	}
+	if err := copyToDevice(&m.FinalNormBias); err != nil {
+		return fmt.Errorf("final_norm_bias: %w", err)
+	}
 	if err := copyToDevice(&m.OutputHead); err != nil {
 		return fmt.Errorf("output_head: %w", err)
 	}
@@ -440,26 +475,50 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 		if err := copyToDevice(&layer.AttnNorm); err != nil {
 			return fmt.Errorf("layer %d attn_norm: %w", i, err)
 		}
+		if err := copyToDevice(&layer.AttnNormBias); err != nil {
+			return fmt.Errorf("layer %d attn_norm_bias: %w", i, err)
+		}
 		if err := copyToDevice(&layer.Wq); err != nil {
 			return fmt.Errorf("layer %d wq: %w", i, err)
+		}
+		if err := copyToDevice(&layer.WqBias); err != nil {
+			return fmt.Errorf("layer %d wq_bias: %w", i, err)
 		}
 		if err := copyToDevice(&layer.Wk); err != nil {
 			return fmt.Errorf("layer %d wk: %w", i, err)
 		}
+		if err := copyToDevice(&layer.WkBias); err != nil {
+			return fmt.Errorf("layer %d wk_bias: %w", i, err)
+		}
 		if err := copyToDevice(&layer.Wv); err != nil {
 			return fmt.Errorf("layer %d wv: %w", i, err)
+		}
+		if err := copyToDevice(&layer.WvBias); err != nil {
+			return fmt.Errorf("layer %d wv_bias: %w", i, err)
 		}
 		if err := copyToDevice(&layer.Wo); err != nil {
 			return fmt.Errorf("layer %d wo: %w", i, err)
 		}
+		if err := copyToDevice(&layer.WoBias); err != nil {
+			return fmt.Errorf("layer %d wo_bias: %w", i, err)
+		}
 		if err := copyToDevice(&layer.FFNNorm); err != nil {
 			return fmt.Errorf("layer %d ffn_norm: %w", i, err)
+		}
+		if err := copyToDevice(&layer.FFNNormBias); err != nil {
+			return fmt.Errorf("layer %d ffn_norm_bias: %w", i, err)
 		}
 		if err := copyToDevice(&layer.W1); err != nil {
 			return fmt.Errorf("layer %d w1: %w", i, err)
 		}
+		if err := copyToDevice(&layer.W1Bias); err != nil {
+			return fmt.Errorf("layer %d w1_bias: %w", i, err)
+		}
 		if err := copyToDevice(&layer.W2); err != nil {
 			return fmt.Errorf("layer %d w2: %w", i, err)
+		}
+		if err := copyToDevice(&layer.W2Bias); err != nil {
+			return fmt.Errorf("layer %d w2_bias: %w", i, err)
 		}
 		if err := copyToDevice(&layer.W3); err != nil {
 			return fmt.Errorf("layer %d w3: %w", i, err)
@@ -482,11 +541,15 @@ func (m *ModelRuntime) mapTensor(name string, t tensor.Tensor) {
 		m.FinalNorm = t
 		return
 	}
+	if name == "model.norm.bias" {
+		m.FinalNormBias = t
+		return
+	}
 	if name == "lm_head.weight" {
 		m.OutputHead = t
 		return
 	}
-	
+
 	// Layers: model.layers.{i}.X
 	if strings.HasPrefix(name, "model.layers.") {
 		parts := strings.Split(name, ".")
@@ -495,29 +558,151 @@ func (m *ModelRuntime) mapTensor(name string, t tensor.Tensor) {
 		if err != nil || idx >= len(m.layers) {
 			return
 		}
-		
+
 		layer := m.layers[idx]
 		suffix := strings.Join(parts[3:], ".")
-		
+
 		switch suffix {
+		// LLaMA-style separate Q/K/V projections
 		case "self_attn.q_proj.weight":
 			layer.Wq = t
 		case "self_attn.k_proj.weight":
 			layer.Wk = t
 		case "self_attn.v_proj.weight":
 			layer.Wv = t
+
+		// Phi-style combined QKV projection (needs splitting)
+		case "self_attn.qkv_proj.weight":
+			m.splitQKVWeight(layer, t)
+		case "self_attn.qkv_proj.bias":
+			m.splitQKVBias(layer, t)
+
+		// Output projection
 		case "self_attn.o_proj.weight":
 			layer.Wo = t
+		case "self_attn.o_proj.bias":
+			layer.WoBias = t
+
+		// LLaMA-style MLP (SwiGLU)
 		case "mlp.gate_proj.weight":
 			layer.W1 = t
 		case "mlp.up_proj.weight":
 			layer.W3 = t
 		case "mlp.down_proj.weight":
 			layer.W2 = t
+
+		// Phi-style MLP (GELU)
+		case "mlp.fc1.weight":
+			layer.W1 = t
+		case "mlp.fc1.bias":
+			layer.W1Bias = t
+		case "mlp.fc2.weight":
+			layer.W2 = t
+		case "mlp.fc2.bias":
+			layer.W2Bias = t
+
+		// Normalization layers
 		case "input_layernorm.weight":
 			layer.AttnNorm = t
+		case "input_layernorm.bias":
+			layer.AttnNormBias = t
 		case "post_attention_layernorm.weight":
 			layer.FFNNorm = t
+		case "post_attention_layernorm.bias":
+			layer.FFNNormBias = t
 		}
 	}
+}
+
+// splitQKVWeight splits a combined QKV weight matrix into separate Q, K, V tensors.
+// Phi-2 has [3*hidden, hidden] shaped Wqkv that contains Q, K, V stacked.
+func (m *ModelRuntime) splitQKVWeight(layer *BlockRuntime, combined tensor.Tensor) {
+	dims := combined.Shape().Dims()
+	if len(dims) != 2 {
+		fmt.Printf("Warning: unexpected QKV weight shape: %v\n", dims)
+		return
+	}
+
+	totalRows := dims[0] // 3 * hidden (or adjusted for GQA)
+	cols := dims[1]      // hidden
+
+	// Calculate Q, K, V sizes based on head configuration
+	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	qRows := m.config.NumAttentionHeads * headDim    // Q uses all heads
+	kvRows := m.config.NumKeyValueHeads * headDim   // K, V may use fewer heads (GQA)
+
+	// Verify total matches
+	expectedRows := qRows + kvRows + kvRows
+	if totalRows != expectedRows {
+		fmt.Printf("Warning: QKV weight rows %d != expected %d (Q=%d, KV=%d each)\n",
+			totalRows, expectedRows, qRows, kvRows)
+		return
+	}
+
+	// Get raw data pointer
+	srcPtr := combined.DevicePtr()
+	if srcPtr.IsNil() {
+		return
+	}
+
+	// For quantized tensors, we need different handling
+	if combined.IsQuantized() {
+		// For Q4_0, calculate block boundaries
+		// This is complex - for now, log warning and skip
+		fmt.Printf("Warning: splitting quantized QKV not yet supported\n")
+		return
+	}
+
+	// F32 tensors: 4 bytes per element
+	elemSize := 4
+
+	// Create sub-tensors by offsetting into the combined buffer
+	qSize := qRows * cols * elemSize
+	kvSize := kvRows * cols * elemSize
+
+	qPtr := srcPtr
+	kPtr := tensor.DevicePtrOffset(srcPtr, uintptr(qSize))
+	vPtr := tensor.DevicePtrOffset(srcPtr, uintptr(qSize+kvSize))
+
+	layer.Wq = tensor.NewTensor(tensor.NewShape(qRows, cols), m.config.DType, qPtr)
+	layer.Wk = tensor.NewTensor(tensor.NewShape(kvRows, cols), m.config.DType, kPtr)
+	layer.Wv = tensor.NewTensor(tensor.NewShape(kvRows, cols), m.config.DType, vPtr)
+}
+
+// splitQKVBias splits a combined QKV bias vector into separate Q, K, V tensors.
+func (m *ModelRuntime) splitQKVBias(layer *BlockRuntime, combined tensor.Tensor) {
+	dims := combined.Shape().Dims()
+	if len(dims) != 1 {
+		fmt.Printf("Warning: unexpected QKV bias shape: %v\n", dims)
+		return
+	}
+
+	totalSize := dims[0]
+
+	// Calculate Q, K, V sizes based on head configuration
+	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	qSize := m.config.NumAttentionHeads * headDim
+	kvSize := m.config.NumKeyValueHeads * headDim
+
+	expectedSize := qSize + kvSize + kvSize
+	if totalSize != expectedSize {
+		fmt.Printf("Warning: QKV bias size %d != expected %d\n", totalSize, expectedSize)
+		return
+	}
+
+	srcPtr := combined.DevicePtr()
+	if srcPtr.IsNil() {
+		return
+	}
+
+	// F32 bias: 4 bytes per element
+	elemSize := 4
+
+	qPtr := srcPtr
+	kPtr := tensor.DevicePtrOffset(srcPtr, uintptr(qSize*elemSize))
+	vPtr := tensor.DevicePtrOffset(srcPtr, uintptr((qSize+kvSize)*elemSize))
+
+	layer.WqBias = tensor.NewTensor(tensor.NewShape(qSize), m.config.DType, qPtr)
+	layer.WkBias = tensor.NewTensor(tensor.NewShape(kvSize), m.config.DType, kPtr)
+	layer.WvBias = tensor.NewTensor(tensor.NewShape(kvSize), m.config.DType, vPtr)
 }

@@ -15,6 +15,9 @@ import (
 // Ensure Backend implements the interface
 var _ backend.Backend = (*CPUBackend)(nil)
 var _ backend.QuantizedMatMul = (*CPUBackend)(nil)
+var _ backend.LayerNormOps = (*CPUBackend)(nil)
+var _ backend.GELUOps = (*CPUBackend)(nil)
+var _ backend.BiasOps = (*CPUBackend)(nil)
 
 // CPUBackend implements the Backend interface using CPU execution.
 type CPUBackend struct{}
@@ -215,9 +218,17 @@ func (b *CPUBackend) RMSNorm(x, weight, out tensor.DevicePtr, rows, cols int, ep
 }
 
 // RoPE applies Rotary Positional Embeddings in-place.
-// Uses interleaved (NEOX-style) layout where pairs are (0,1), (2,3), (4,5), ...
-// This matches llama.cpp's implementation for Llama-family models.
-func (b *CPUBackend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos int, theta float32) {
+// ropeDim specifies how many dimensions to rotate (0 = full headDim for LLaMA-style,
+// otherwise partial rotation for Phi-2 where only first ropeDim are rotated).
+// ropeNeox: true = NEOX-style (split pairs: i, i+dim/2), false = LLaMA-style (interleaved: 2i, 2i+1)
+func (b *CPUBackend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos, ropeDim int, theta float32, ropeNeox bool) {
+	// For partial RoPE (like Phi-2), only rotate first ropeDim dimensions
+	effectiveRopeDim := ropeDim
+	if effectiveRopeDim == 0 {
+		effectiveRopeDim = headDim
+	}
+	halfRopeDim := effectiveRopeDim / 2
+
 	qData := ptrToFloat32Slice(q, seqLen*numHeads*headDim)
 	totalVectors := len(qData) / headDim
 
@@ -226,19 +237,30 @@ func (b *CPUBackend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, 
 		pos := startPos + seqPos
 		offset := i * headDim
 
-		// Interleaved layout: pairs are (0,1), (2,3), (4,5), ...
-		for j := 0; j < headDim/2; j++ {
-			idx := j * 2
-			exp := float64(2*j) / float64(headDim)
+		// Only rotate first effectiveRopeDim dimensions
+		for j := 0; j < halfRopeDim; j++ {
+			// Compute indices based on RoPE style
+			var idx0, idx1 int
+			if ropeNeox {
+				// NEOX-style: pairs are (j, j + halfRopeDim)
+				idx0 = j
+				idx1 = j + halfRopeDim
+			} else {
+				// LLaMA-style (interleaved): pairs are (2j, 2j+1)
+				idx0 = j * 2
+				idx1 = j*2 + 1
+			}
+
+			exp := float64(2*j) / float64(effectiveRopeDim)
 			freq := float32(1.0 / math.Pow(float64(theta), exp))
 			angle := float32(pos) * freq
 			cos := float32(math.Cos(float64(angle)))
 			sin := float32(math.Sin(float64(angle)))
 
-			val1 := qData[offset+idx]
-			val2 := qData[offset+idx+1]
-			qData[offset+idx] = val1*cos - val2*sin
-			qData[offset+idx+1] = val1*sin + val2*cos
+			val1 := qData[offset+idx0]
+			val2 := qData[offset+idx1]
+			qData[offset+idx0] = val1*cos - val2*sin
+			qData[offset+idx1] = val1*sin + val2*cos
 		}
 	}
 
@@ -250,18 +272,29 @@ func (b *CPUBackend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, 
 			pos := startPos + seqPos
 			offset := i * headDim
 
-			for j := 0; j < headDim/2; j++ {
-				idx := j * 2
-				exp := float64(2*j) / float64(headDim)
+			for j := 0; j < halfRopeDim; j++ {
+				// Compute indices based on RoPE style
+				var idx0, idx1 int
+				if ropeNeox {
+					// NEOX-style: pairs are (j, j + halfRopeDim)
+					idx0 = j
+					idx1 = j + halfRopeDim
+				} else {
+					// LLaMA-style (interleaved): pairs are (2j, 2j+1)
+					idx0 = j * 2
+					idx1 = j*2 + 1
+				}
+
+				exp := float64(2*j) / float64(effectiveRopeDim)
 				freq := float32(1.0 / math.Pow(float64(theta), exp))
 				angle := float32(pos) * freq
 				cos := float32(math.Cos(float64(angle)))
 				sin := float32(math.Sin(float64(angle)))
 
-				val1 := kData[offset+idx]
-				val2 := kData[offset+idx+1]
-				kData[offset+idx] = val1*cos - val2*sin
-				kData[offset+idx+1] = val1*sin + val2*cos
+				val1 := kData[offset+idx0]
+				val2 := kData[offset+idx1]
+				kData[offset+idx0] = val1*cos - val2*sin
+				kData[offset+idx1] = val1*sin + val2*cos
 			}
 		}
 	}
@@ -289,6 +322,74 @@ func (b *CPUBackend) SiLUMul(gate, up, out tensor.DevicePtr, n int) {
 		g := gateData[i]
 		sigmoid := 1.0 / (1.0 + float32(math.Exp(float64(-g))))
 		outData[i] = (g * sigmoid) * upData[i]
+	}
+}
+
+// LayerNorm performs Layer Normalization with mean subtraction.
+// Formula: out = (x - mean) / sqrt(var + eps) * weight + bias
+func (b *CPUBackend) LayerNorm(x, weight, bias, out tensor.DevicePtr, rows, cols int, eps float32) {
+	xData := ptrToFloat32Slice(x, rows*cols)
+	wData := ptrToFloat32Slice(weight, cols)
+	bData := ptrToFloat32Slice(bias, cols)
+	outData := ptrToFloat32Slice(out, rows*cols)
+
+	for i := 0; i < rows; i++ {
+		offset := i * cols
+		row := xData[offset : offset+cols]
+
+		// Compute mean
+		var sum float32
+		for j := 0; j < cols; j++ {
+			sum += row[j]
+		}
+		mean := sum / float32(cols)
+
+		// Compute variance
+		var varSum float32
+		for j := 0; j < cols; j++ {
+			diff := row[j] - mean
+			varSum += diff * diff
+		}
+		variance := varSum / float32(cols)
+
+		// Normalize and apply weight/bias
+		invStd := 1.0 / float32(math.Sqrt(float64(variance+eps)))
+		for j := 0; j < cols; j++ {
+			normalized := (row[j] - mean) * invStd
+			outData[offset+j] = normalized*wData[j] + bData[j]
+		}
+	}
+}
+
+// GELU applies the Gaussian Error Linear Unit activation function.
+// Uses fast approximation: 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+func (b *CPUBackend) GELU(x, out tensor.DevicePtr, n int) {
+	xData := ptrToFloat32Slice(x, n)
+	outData := ptrToFloat32Slice(out, n)
+
+	const sqrtTwoPi = 0.7978845608 // sqrt(2/π)
+	const coeff = 0.044715
+
+	for i := 0; i < n; i++ {
+		val := xData[i]
+		x3 := val * val * val
+		tanhArg := sqrtTwoPi * (val + coeff*x3)
+		tanhVal := float32(math.Tanh(float64(tanhArg)))
+		outData[i] = 0.5 * val * (1.0 + tanhVal)
+	}
+}
+
+// AddBias performs row-wise bias addition: out[i] = x[i] + bias[i % cols]
+func (b *CPUBackend) AddBias(x, bias, out tensor.DevicePtr, rows, cols int) {
+	xData := ptrToFloat32Slice(x, rows*cols)
+	biasData := ptrToFloat32Slice(bias, cols)
+	outData := ptrToFloat32Slice(out, rows*cols)
+
+	for i := 0; i < rows; i++ {
+		offset := i * cols
+		for j := 0; j < cols; j++ {
+			outData[offset+j] = xData[offset+j] + biasData[j]
+		}
 	}
 }
 
@@ -361,10 +462,12 @@ func (b *CPUBackend) Embedding(ids tensor.DevicePtr, numTokens int, table, out t
 }
 
 // SDPA performs Scaled Dot-Product Attention for decode.
-func (b *CPUBackend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32) {
+// KV cache is in head-major layout: [numKVHeads, maxSeqLen, headDim]
+// kvHeadStride = maxSeqLen * headDim
+func (b *CPUBackend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
 	qData := ptrToFloat32Slice(q, numQHeads*headDim)
-	kData := ptrToFloat32Slice(k, kvLen*numKVHeads*headDim)
-	vData := ptrToFloat32Slice(v, kvLen*numKVHeads*headDim)
+	kData := ptrToFloat32Slice(k, numKVHeads*kvHeadStride)
+	vData := ptrToFloat32Slice(v, numKVHeads*kvHeadStride)
 	outData := ptrToFloat32Slice(out, numQHeads*headDim)
 
 	headsPerKV := numQHeads / numKVHeads
@@ -378,8 +481,12 @@ func (b *CPUBackend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKV
 		outOffset := h * headDim
 		outHead := outData[outOffset : outOffset+headDim]
 
+		// KV cache layout: [numKVHeads, maxSeqLen, headDim]
+		// For head h, position p: offset = h * kvHeadStride + p * headDim
+		kvHeadBase := kvHead * kvHeadStride
+
 		for pos := 0; pos < kvLen; pos++ {
-			kOffset := pos*numKVHeads*headDim + kvHead*headDim
+			kOffset := kvHeadBase + pos*headDim
 			kVec := kData[kOffset : kOffset+headDim]
 
 			var dot float32
@@ -412,7 +519,7 @@ func (b *CPUBackend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKV
 		}
 
 		for pos := 0; pos < kvLen; pos++ {
-			vOffset := pos*numKVHeads*headDim + kvHead*headDim
+			vOffset := kvHeadBase + pos*headDim
 			vVec := vData[vOffset : vOffset+headDim]
 
 			weight := scores[pos]

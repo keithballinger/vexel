@@ -213,6 +213,9 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 	if useGPUCache {
 		// Use GPU KV cache for single-sequence decode
 		// GPU KV cache only supports single sequence
+		if os.Getenv("DEBUG_DECODE") == "1" {
+			fmt.Printf("[SCHEDULER] Calling DecodeWithGPUKV tokens=%v pos=%d\n", tokens, positions[0])
+		}
 		if len(decodeSeqs) == 1 {
 			logits, err = s.runtime.DecodeWithGPUKV(tokens, positions[0])
 		} else {
@@ -588,9 +591,11 @@ func (s *Scheduler) AddSequence(seq *Sequence) {
 	if s.tokenizer != nil && len(seq.PromptTokens()) == 0 && seq.prompt != "" {
 		tokens, err := s.tokenizer.Encode(seq.prompt)
 		if err == nil {
-			// Prepend BOS token - LLMs expect BOS at start of sequence
-			bos := s.tokenizer.BOS()
-			tokens = append([]int{bos}, tokens...)
+			// Prepend BOS token only for models that expect it (Llama, not Phi-2)
+			if s.tokenizer.AddBOS() {
+				bos := s.tokenizer.BOS()
+				tokens = append([]int{bos}, tokens...)
+			}
 			seq.SetPromptTokens(tokens)
 		}
 	}

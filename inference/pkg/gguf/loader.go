@@ -39,6 +39,9 @@ var SupportedArchitectures = map[string]bool{
 	"llama":   true, // LLaMA 2/3, TinyLlama, Mistral, Codestral
 	"mistral": true, // Some Mistral models use this
 	"qwen2":   true, // Qwen 2 is LLaMA-compatible
+	"phi":     true, // Phi-2/3 (LayerNorm, GELU MLP, combined QKV)
+	"phi2":    true, // Some Phi-2 models use this identifier
+	"phi3":    true, // Phi-3 identifier
 }
 
 // ValidateArchitecture checks if the architecture is supported and returns a warning if not.
@@ -118,6 +121,7 @@ var TensorNameMapping = map[string]string{
 	"model.embed_tokens.weight": "token_embd.weight",
 	"lm_head.weight":            "output.weight",
 	"model.norm.weight":         "output_norm.weight",
+	"model.norm.bias":           "output_norm.bias", // For LayerNorm architectures (Phi)
 }
 
 // GetLayerTensorName converts a layer tensor name to GGUF format.
@@ -142,24 +146,53 @@ func GetLayerTensorName(hfName string) string {
 	// Map suffix to GGUF style
 	var ggufSuffix string
 	switch suffix {
+	// LLaMA-style separate Q/K/V projections
 	case "self_attn.q_proj.weight":
 		ggufSuffix = "attn_q.weight"
 	case "self_attn.k_proj.weight":
 		ggufSuffix = "attn_k.weight"
 	case "self_attn.v_proj.weight":
 		ggufSuffix = "attn_v.weight"
+
+	// Phi-style combined QKV projection
+	case "self_attn.qkv_proj.weight":
+		ggufSuffix = "attn_qkv.weight"
+	case "self_attn.qkv_proj.bias":
+		ggufSuffix = "attn_qkv.bias"
+
+	// Output projection (same for LLaMA and Phi)
 	case "self_attn.o_proj.weight":
 		ggufSuffix = "attn_output.weight"
+	case "self_attn.o_proj.bias":
+		ggufSuffix = "attn_output.bias"
+
+	// LLaMA-style MLP (SwiGLU: gate, up, down)
 	case "mlp.gate_proj.weight":
 		ggufSuffix = "ffn_gate.weight"
 	case "mlp.up_proj.weight":
 		ggufSuffix = "ffn_up.weight"
 	case "mlp.down_proj.weight":
 		ggufSuffix = "ffn_down.weight"
+
+	// Phi-style MLP (GELU: fc1/up, fc2/down)
+	case "mlp.fc1.weight":
+		ggufSuffix = "ffn_up.weight"
+	case "mlp.fc1.bias":
+		ggufSuffix = "ffn_up.bias"
+	case "mlp.fc2.weight":
+		ggufSuffix = "ffn_down.weight"
+	case "mlp.fc2.bias":
+		ggufSuffix = "ffn_down.bias"
+
+	// Normalization layers
 	case "input_layernorm.weight":
 		ggufSuffix = "attn_norm.weight"
+	case "input_layernorm.bias":
+		ggufSuffix = "attn_norm.bias"
 	case "post_attention_layernorm.weight":
 		ggufSuffix = "ffn_norm.weight"
+	case "post_attention_layernorm.bias":
+		ggufSuffix = "ffn_norm.bias"
 	default:
 		return hfName
 	}

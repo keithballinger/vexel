@@ -1,22 +1,78 @@
 package runtime
 
 import (
+	"fmt"
+
 	"vexel/inference/pkg/gguf"
 	"vexel/inference/tensor"
 )
 
+// NormType specifies the normalization layer type.
+type NormType int
+
+const (
+	// NormRMSNorm uses Root Mean Square normalization (LLaMA, Mistral).
+	NormRMSNorm NormType = iota
+	// NormLayerNorm uses Layer Normalization with mean subtraction (Phi, GPT-2).
+	NormLayerNorm
+)
+
+func (n NormType) String() string {
+	switch n {
+	case NormRMSNorm:
+		return "RMSNorm"
+	case NormLayerNorm:
+		return "LayerNorm"
+	default:
+		return "Unknown"
+	}
+}
+
+// MLPType specifies the feed-forward network structure.
+type MLPType int
+
+const (
+	// MLPSwiGLU uses SiLU-gated linear unit with 3 projections (LLaMA, Mistral).
+	// Structure: down(silu(gate(x)) * up(x))
+	MLPSwiGLU MLPType = iota
+	// MLPGELU uses GELU activation with 2 projections (Phi, GPT-2).
+	// Structure: down(gelu(up(x)))
+	MLPGELU
+)
+
+func (m MLPType) String() string {
+	switch m {
+	case MLPSwiGLU:
+		return "SwiGLU"
+	case MLPGELU:
+		return "GELU"
+	default:
+		return "Unknown"
+	}
+}
+
 // ModelConfig defines the hyperparameters for the model architecture.
 type ModelConfig struct {
-	HiddenSize       int
-	IntermediateSize int
-	NumHiddenLayers  int
+	HiddenSize        int
+	IntermediateSize  int
+	NumHiddenLayers   int
 	NumAttentionHeads int
 	NumKeyValueHeads  int
-	VocabSize        int
-	MaxSeqLen        int
-	RoPETheta        float64
-	RMSNormEPS       float64
-	DType            tensor.DType
+	VocabSize         int
+	MaxSeqLen         int
+	RoPETheta         float64
+	RMSNormEPS        float64
+	DType             tensor.DType
+
+	// Architecture-specific settings
+	NormType         NormType // Normalization type (RMSNorm or LayerNorm)
+	MLPType          MLPType  // MLP structure (SwiGLU or GELU)
+	HasBias          bool     // Whether model has bias terms in projections
+	ParallelResidual bool     // True for parallel residual (Phi): x + attn(norm(x)) + mlp(norm(x))
+	                          // False for serial residual (LLaMA): x + attn(norm1(x)), then x + mlp(norm2(x))
+	RoPEDim          int      // Dimensions to apply RoPE to (0 = full headDim for LLaMA-style)
+	                          // Phi-2 uses partial RoPE where only first 32 dims of 80 are rotated
+	RoPENeox         bool     // Use NEOX-style RoPE (split pairs: i, i+dim/2) vs LLaMA-style (interleaved: 2i, 2i+1)
 }
 
 // MemoryPlan holds the estimated memory usage breakdown.
@@ -40,6 +96,29 @@ func Llama3_8B() ModelConfig {
 		RoPETheta:         500000.0,
 		RMSNormEPS:        1e-5,
 		DType:             tensor.BFloat16,
+		NormType:          NormRMSNorm,
+		MLPType:           MLPSwiGLU,
+		HasBias:           false,
+	}
+}
+
+// Phi2 returns the configuration for the Phi-2 model.
+func Phi2() ModelConfig {
+	return ModelConfig{
+		HiddenSize:        2560,
+		IntermediateSize:  10240, // 4x hidden
+		NumHiddenLayers:   32,
+		NumAttentionHeads: 32,
+		NumKeyValueHeads:  32, // Phi-2 uses MHA, not GQA
+		VocabSize:         51200,
+		MaxSeqLen:         2048,
+		RoPETheta:         10000.0,
+		RMSNormEPS:        1e-5, // Phi uses LayerNorm eps
+		DType:             tensor.Float32,
+		NormType:          NormLayerNorm,
+		MLPType:           MLPGELU,
+		HasBias:           true,
+		ParallelResidual:  true, // Phi uses parallel residual: x + attn(norm(x)) + mlp(norm(x))
 	}
 }
 
@@ -179,6 +258,37 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		ropeTheta = 10000.0 // Default RoPE theta
 	}
 
+	// Determine architecture-specific settings based on model architecture
+	normType := NormRMSNorm
+	mlpType := MLPSwiGLU
+	hasBias := false
+	parallelResidual := false
+	ropeNeox := false // Default to LLaMA-style (interleaved pairs)
+
+	switch g.Architecture {
+	case "phi", "phi2", "phi3":
+		normType = NormLayerNorm
+		mlpType = MLPGELU
+		hasBias = true
+		parallelResidual = true // Phi uses parallel residual
+		ropeNeox = true         // Phi uses NEOX-style RoPE (split pairs)
+	case "gpt2", "gptneox":
+		normType = NormLayerNorm
+		mlpType = MLPGELU
+		hasBias = true
+		ropeNeox = true // GPT-NeoX uses NEOX-style RoPE (split pairs)
+		// GPT-2/NeoX use serial residual
+	case "llama", "mistral", "qwen2":
+		// Default LLaMA-family settings
+		normType = NormRMSNorm
+		mlpType = MLPSwiGLU
+		hasBias = false
+		// LLaMA uses LLaMA-style RoPE (interleaved pairs)
+	}
+
+	fmt.Printf("[CONFIG] Architecture=%s: NormType=%v, MLPType=%v, HasBias=%v, ParallelResidual=%v, RoPENeox=%v\n",
+		g.Architecture, normType, mlpType, hasBias, parallelResidual, ropeNeox)
+
 	return ModelConfig{
 		HiddenSize:        g.HiddenSize,
 		IntermediateSize:  g.IntermediateSize,
@@ -190,5 +300,11 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		RoPETheta:         ropeTheta,
 		RMSNormEPS:        1e-5, // Standard default
 		DType:             tensor.Float32, // We dequantize to F32 for CPU
+		NormType:          normType,
+		MLPType:           mlpType,
+		HasBias:           hasBias,
+		ParallelResidual:  parallelResidual,
+		RoPEDim:           g.RoPEDimCount, // 0 = full headDim, otherwise partial RoPE
+		RoPENeox:          ropeNeox,       // NEOX-style (split) vs LLaMA-style (interleaved) RoPE
 	}
 }

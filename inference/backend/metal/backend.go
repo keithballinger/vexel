@@ -63,6 +63,9 @@ type Backend struct {
 	matvecQ4FusedRMSNormF16Pipeline unsafe.Pointer // FP16 output version
 	softmaxPipeline                 unsafe.Pointer
 	rmsnormPipeline                 unsafe.Pointer
+	layernormPipeline               unsafe.Pointer
+	geluPipeline                    unsafe.Pointer
+	addBiasPipeline                 unsafe.Pointer
 	addRMSNormPipeline              unsafe.Pointer
 	ropePipeline                    unsafe.Pointer
 	ropeGQAPipeline                 unsafe.Pointer
@@ -175,6 +178,9 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matvecQ4FusedRMSNormF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_fused_rmsnorm_f16_out"))
 	b.softmaxPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("softmax_f32"))
 	b.rmsnormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_f32"))
+	b.layernormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("layernorm_f32"))
+	b.geluPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("gelu_f32"))
+	b.addBiasPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_bias_f32"))
 	b.addRMSNormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_rmsnorm_f32"))
 	b.ropePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_f32"))
 	b.ropeGQAPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_gqa_f32"))
@@ -565,6 +571,29 @@ func (b *Backend) RMSNorm(x, weight, out tensor.DevicePtr, rows, cols int, eps f
 		C.int(rows), C.int(cols), C.float(eps))
 }
 
+// LayerNorm performs Layer normalization (for Phi-2 and similar architectures).
+// out = (x - mean) / sqrt(var + eps) * weight + bias
+func (b *Backend) LayerNorm(x, weight, bias, out tensor.DevicePtr, rows, cols int, eps float32) {
+	C.metal_layernorm_f32(b.queue, b.layernormPipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(weight.Addr()),
+		unsafe.Pointer(bias.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(rows), C.int(cols), C.float(eps))
+}
+
+// GELU applies the GELU activation function.
+// out = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+func (b *Backend) GELU(x, out tensor.DevicePtr, n int) {
+	C.metal_gelu_f32(b.queue, b.geluPipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
+}
+
+// AddBias adds bias to each row: out[row, col] = x[row, col] + bias[col]
+func (b *Backend) AddBias(x, bias, out tensor.DevicePtr, rows, cols int) {
+	C.metal_add_bias_f32(b.queue, b.addBiasPipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(bias.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(rows), C.int(cols))
+}
+
 // AddRMSNorm performs fused residual addition + RMSNorm.
 // x = x + residual (in-place), then out = RMSNorm(x, weight)
 // This saves one memory round-trip compared to separate Add + RMSNorm.
@@ -576,24 +605,45 @@ func (b *Backend) AddRMSNorm(x, residual, weight, out tensor.DevicePtr, rows, co
 }
 
 // RoPE applies rotary position encoding.
-func (b *Backend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos int, theta float32) {
+// ropeDim: dimensions to rotate (0 = full headDim). For partial RoPE like Phi-2.
+// ropeNeox: true = NEOX-style (split pairs), false = LLaMA-style (interleaved pairs)
+func (b *Backend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos, ropeDim int, theta float32, ropeNeox bool) {
+	// If ropeDim is 0 or equals headDim, rotate all dimensions
+	effectiveRopeDim := ropeDim
+	if effectiveRopeDim == 0 {
+		effectiveRopeDim = headDim
+	}
 	// Use GQA-aware RoPE kernel which handles Q and K head counts separately
+	neoxFlag := 0
+	if ropeNeox {
+		neoxFlag = 1
+	}
 	C.metal_rope_gqa_f32(b.queue, b.ropeGQAPipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		C.int(seqLen), C.int(numHeads), C.int(numKVHeads), C.int(headDim),
-		C.int(startPos), C.float(theta))
+		C.int(startPos), C.int(effectiveRopeDim), C.float(theta), C.int(neoxFlag))
 }
 
 // RoPEF16 applies rotary position encoding with FP16 inputs/outputs.
 // Computation done in FP32 for numerical stability, I/O in FP16.
-func (b *Backend) RoPEF16(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos int, theta float32) {
+// ropeDim: dimensions to rotate (0 = full headDim). For partial RoPE like Phi-2.
+// ropeNeox: true = NEOX-style (split pairs), false = LLaMA-style (interleaved pairs)
+func (b *Backend) RoPEF16(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos, ropeDim int, theta float32, ropeNeox bool) {
 	if b.ropeGQAF16Pipeline == nil {
 		panic("RoPEF16 called but pipeline unavailable")
+	}
+	effectiveRopeDim := ropeDim
+	if effectiveRopeDim == 0 {
+		effectiveRopeDim = headDim
+	}
+	neoxFlag := 0
+	if ropeNeox {
+		neoxFlag = 1
 	}
 	C.metal_rope_gqa_f16(b.queue, b.ropeGQAF16Pipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		C.int(seqLen), C.int(numHeads), C.int(numKVHeads), C.int(headDim),
-		C.int(startPos), C.float(theta))
+		C.int(startPos), C.int(effectiveRopeDim), C.float(theta), C.int(neoxFlag))
 }
 
 // Softmax applies softmax row-wise.
@@ -694,7 +744,7 @@ func (b *Backend) Embedding(ids tensor.DevicePtr, numTokens int, table, out tens
 
 // SDPA performs scaled dot-product attention for decode (single query token).
 // Uses Flash Decoding for longer sequences, naive for short ones.
-func (b *Backend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32) {
+func (b *Backend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
 	// Use Flash Decoding for longer KV lengths where parallelism helps
 	// For short sequences, the overhead of threadgroup sync isn't worth it
 	useFlash := b.sdpaFlashDecodePipeline != nil && kvLen >= 16
@@ -704,14 +754,14 @@ func (b *Backend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHea
 			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 			unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
-			C.float(scale))
+			C.float(scale), C.int(kvHeadStride))
 	} else {
 		// Use naive SDPA for short sequences
 		C.metal_sdpa_decode_f32(b.queue, b.sdpaDecodePipeline,
 			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 			unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
-			C.float(scale))
+			C.float(scale), C.int(kvHeadStride))
 	}
 }
 

@@ -34,7 +34,7 @@ func (s *SpyBackend) Alloc(bytes int) tensor.DevicePtr {
 	data := make([]byte, bytes)
 	return tensor.NewDevicePtr(tensor.CPU, uintptr(unsafe.Pointer(&data[0])))
 }
-func (s *SpyBackend) Free(ptr tensor.DevicePtr)              {}
+func (s *SpyBackend) Free(ptr tensor.DevicePtr)                 {}
 func (s *SpyBackend) ToDevice(dst tensor.DevicePtr, src []byte) {}
 func (s *SpyBackend) ToHost(dst []byte, src tensor.DevicePtr)   {}
 func (s *SpyBackend) Sync()                                     {}
@@ -49,7 +49,7 @@ func (s *SpyBackend) MatMulTransposed(a, b, out tensor.DevicePtr, m, n, k int) {
 func (s *SpyBackend) RMSNorm(x, weight, out tensor.DevicePtr, rows, cols int, eps float32) {
 	s.RMSNormCalls++
 }
-func (s *SpyBackend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos int, theta float32) {
+func (s *SpyBackend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos, ropeDim int, theta float32, ropeNeox bool) {
 	s.RoPECalls++
 }
 func (s *SpyBackend) SiLU(x, out tensor.DevicePtr, n int) {
@@ -64,7 +64,7 @@ func (s *SpyBackend) Softmax(x, out tensor.DevicePtr, rows, cols int) {
 func (s *SpyBackend) Embedding(ids tensor.DevicePtr, numTokens int, table, out tensor.DevicePtr, vocabSize, dim int) {
 	s.EmbeddingCalls++
 }
-func (s *SpyBackend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32) {
+func (s *SpyBackend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
 	s.SDPACalls++
 }
 func (s *SpyBackend) SDPAPrefill(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {

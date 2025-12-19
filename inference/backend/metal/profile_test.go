@@ -103,8 +103,9 @@ func TestProfileOperations(t *testing.T) {
 	backend.Sync()
 
 	start = time.Now()
+	ropeDim := headDim // Use full RoPE
 	for i := 0; i < iterations; i++ {
-		backend.RoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, M, 0, 10000.0)
+		backend.RoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, M, 0, ropeDim, 10000.0, false)
 	}
 	backend.Sync()
 	ropeTime := time.Since(start) / time.Duration(iterations)
@@ -119,9 +120,11 @@ func TestProfileOperations(t *testing.T) {
 	outSDPA := backend.Alloc(numHeads * headDim * 4)
 	backend.Sync()
 
+	maxSeqLen := 2048 // Typical max seq len for KV cache
+	kvHeadStride := maxSeqLen * headDim
 	start = time.Now()
 	for i := 0; i < iterations; i++ {
-		backend.SDPA(qSDPA, kSDPA, vSDPA, outSDPA, kvLen, numHeads, numKVHeads, headDim, 0.125)
+		backend.SDPA(qSDPA, kSDPA, vSDPA, outSDPA, kvLen, numHeads, numKVHeads, headDim, 0.125, kvHeadStride)
 	}
 	backend.Sync()
 	sdpaTime := time.Since(start) / time.Duration(iterations)
@@ -136,7 +139,7 @@ func TestProfileOperations(t *testing.T) {
 
 	start = time.Now()
 	for i := 0; i < iterations; i++ {
-		backend.SDPA(qSDPA, kSDPA256, vSDPA256, outSDPA, kvLen, numHeads, numKVHeads, headDim, 0.125)
+		backend.SDPA(qSDPA, kSDPA256, vSDPA256, outSDPA, kvLen, numHeads, numKVHeads, headDim, 0.125, kvHeadStride)
 	}
 	backend.Sync()
 	sdpa256Time := time.Since(start) / time.Duration(iterations)
@@ -176,9 +179,9 @@ func TestProfileOperations(t *testing.T) {
 	fmt.Printf("MatMulQ4_0 [512,2048] x [2048,2048]: %.3f ms (%.1f GB/s effective)\n",
 		float64(matmulPrefillTime.Microseconds())/1000,
 		float64(M*N*K*2)/float64(matmulPrefillTime.Nanoseconds())) // approximate FLOPs/bandwidth? Weights: N*K/2 bytes. Read weights once per batch?
-		// Weights 2048*2048*0.5625 bytes = 2.3MB. Input 512*2048*4 = 4MB. Output 4MB.
-		// Total IO = 10MB per call.
-		// Throughput = 10MB / time.
+	// Weights 2048*2048*0.5625 bytes = 2.3MB. Input 512*2048*4 = 4MB. Output 4MB.
+	// Total IO = 10MB per call.
+	// Throughput = 10MB / time.
 
 	// 2. FlashAttention2 F16
 	// Convert Q, K, V to F16 first
@@ -191,7 +194,7 @@ func TestProfileOperations(t *testing.T) {
 	kF16 := backend.Alloc(kSize * 2)
 	vF16 := backend.Alloc(kSize * 2)
 	outF16 := backend.Alloc(qSize * 2)
-	
+
 	// Measure F16 conversion time
 	start = time.Now()
 	for i := 0; i < prefillIter; i++ {
@@ -215,7 +218,7 @@ func TestProfileOperations(t *testing.T) {
 	// Matmul: 7 per layer
 	// Attention: 1 FA2 + conversion overhead
 	// RoPE, RMSNorm: scaled by 512 (approx)
-	
+
 	// Measure RoPE/RMSNorm for M=512
 	start = time.Now()
 	for i := 0; i < prefillIter; i++ {
@@ -225,8 +228,9 @@ func TestProfileOperations(t *testing.T) {
 	normPrefillTime := time.Since(start) / time.Duration(prefillIter)
 
 	start = time.Now()
+	prefillRopeDim := headDim // Use full RoPE
 	for i := 0; i < prefillIter; i++ {
-		backend.RoPE(qF32, kF32, headDim, numHeads, numKVHeads, M, 0, 10000.0)
+		backend.RoPE(qF32, kF32, headDim, numHeads, numKVHeads, M, 0, prefillRopeDim, 10000.0, false)
 	}
 	backend.Sync()
 	ropePrefillTime := time.Since(start) / time.Duration(prefillIter)
@@ -387,9 +391,11 @@ func BenchmarkSDPA_Decode(b *testing.B) {
 	outPtr := backend.Alloc(numHeads * headDim * 4)
 	backend.Sync()
 
+	benchMaxSeqLen := 2048
+	benchKVHeadStride := benchMaxSeqLen * headDim
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		backend.SDPA(qPtr, kPtr, vPtr, outPtr, kvLen, numHeads, numKVHeads, headDim, 0.125)
+		backend.SDPA(qPtr, kPtr, vPtr, outPtr, kvLen, numHeads, numKVHeads, headDim, 0.125, benchKVHeadStride)
 		backend.Sync()
 	}
 }

@@ -70,7 +70,9 @@ type FP16Ops interface {
 	// RoPEF16 applies Rotary Position Embeddings in-place to FP16 Q and K.
 	// Computation done in FP32 for numerical stability, I/O in FP16.
 	// q: [seqLen, numHeads, headDim] in FP16, k: [seqLen, numKVHeads, headDim] in FP16
-	RoPEF16(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos int, theta float32)
+	// ropeDim: number of dimensions to rotate (0 = full headDim)
+	// ropeNeox: true = NEOX-style (split pairs: i, i+dim/2), false = LLaMA-style (interleaved: 2i, 2i+1)
+	RoPEF16(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos, ropeDim int, theta float32, ropeNeox bool)
 
 	// ScatterKVF16 transposes KV data from [newTokens, numKVHeads, headDim] to [numKVHeads, maxSeqLen, headDim].
 	// This efficiently populates the head-major KV cache layout in a single kernel dispatch.
@@ -124,6 +126,32 @@ type ArgmaxOps interface {
 	// Argmax returns the index of the maximum value in the input tensor.
 	// input: [n] in FP32, returns index of maximum element
 	Argmax(input tensor.DevicePtr, n int) int
+}
+
+// LayerNormOps is an optional interface for backends that support LayerNorm.
+// Required for Phi, GPT-2, and other architectures that use LayerNorm instead of RMSNorm.
+type LayerNormOps interface {
+	// LayerNorm performs Layer Normalization with mean subtraction.
+	// x: [rows, cols], weight: [cols], bias: [cols], out: [rows, cols]
+	// Computes: out = (x - mean) / sqrt(var + eps) * weight + bias
+	LayerNorm(x, weight, bias, out tensor.DevicePtr, rows, cols int, eps float32)
+}
+
+// GELUOps is an optional interface for backends that support GELU activation.
+// Required for Phi, GPT-2, BERT, and other architectures that use GELU instead of SiLU.
+type GELUOps interface {
+	// GELU applies the Gaussian Error Linear Unit activation function.
+	// Uses fast approximation: 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+	// x: [n], out: [n]
+	GELU(x, out tensor.DevicePtr, n int)
+}
+
+// BiasOps is an optional interface for backends that support bias addition.
+// Required for architectures with bias terms in linear projections (Phi, GPT-2).
+type BiasOps interface {
+	// AddBias performs row-wise bias addition: out[i] = x[i] + bias[i % cols]
+	// x: [rows, cols], bias: [cols], out: [rows, cols]
+	AddBias(x, bias, out tensor.DevicePtr, rows, cols int)
 }
 
 // TrainingOps is an optional interface for backends that support neural network training.
@@ -191,7 +219,10 @@ type Backend interface {
 
 	// RoPE applies Rotary Position Embeddings in-place to Q and K.
 	// q: [seqLen, numHeads, headDim], k: [seqLen, numKVHeads, headDim] (can be nil)
-	RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos int, theta float32)
+	// ropeDim: number of dimensions to rotate (0 = full headDim for LLaMA-style,
+	//          otherwise partial rotation for Phi-2 where only first ropeDim are rotated)
+	// ropeNeox: true = NEOX-style (split pairs: i, i+dim/2), false = LLaMA-style (interleaved: 2i, 2i+1)
+	RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos, ropeDim int, theta float32, ropeNeox bool)
 
 	// SiLU applies the SiLU activation function element-wise.
 	// x: [n], out: [n]
@@ -217,10 +248,11 @@ type Backend interface {
 
 	// SDPA performs Scaled Dot-Product Attention for decode (single query).
 	// Q: [numQHeads, headDim] - single query token
-	// K: [kvLen, numKVHeads, headDim] - key cache
-	// V: [kvLen, numKVHeads, headDim] - value cache
+	// K: [numKVHeads, maxSeqLen, headDim] - key cache (head-major layout)
+	// V: [numKVHeads, maxSeqLen, headDim] - value cache (head-major layout)
 	// out: [numQHeads, headDim]
-	SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32)
+	// kvHeadStride: stride between KV heads (maxSeqLen * headDim)
+	SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int)
 
 	// SDPAPrefill performs SDPA for prefill with causal masking.
 	// Q: [seqLen, numQHeads, headDim]
