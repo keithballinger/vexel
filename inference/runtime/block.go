@@ -535,14 +535,10 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
 	}
 
-	return x, nil
-}
-
-	return x, nil
-}
-
-// ExecuteWithPagedKV performs the forward pass using paged KV cache.
-// This version stores K/V during prefill and retrieves them during decode.
+		return x, nil
+	}
+	
+	// ExecuteWithPagedKV performs the forward pass using paged KV cache.// This version stores K/V during prefill and retrieves them during decode.
 func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *kv.PagedKVCache, seqID int64, layerIdx, startPos int) (tensor.Tensor, error) {
 	xPtr := x.DevicePtr()
 	scratchPtr := scratch.DevicePtr()

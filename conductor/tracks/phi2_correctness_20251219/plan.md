@@ -9,7 +9,7 @@
 ## Phase 2: Math Path Correctness
 - [~] Task: Write unit tests for Phi-2 specific math operations (LayerNorm, GELU, bias, parallel residual, RoPE-NeoX)
 - [x] Task: Debug and fix Phi-2 specific math path implementations in Metal kernels and Go bindings [cd446c9]
-- [ ] Task: Verify math operation correctness against known reference values
+- [~] Task: Verify math operation correctness against known reference values
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Math Path Correctness' (Protocol in workflow.md)
 
 ## Phase 3: End-to-End Inference Parity
