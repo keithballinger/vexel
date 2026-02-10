@@ -300,9 +300,9 @@ void metal_convert_f16_to_f32(void* queue, void* pipeline,
 
 // KV Cache scatter: transpose from [newTokens, numKVHeads, headDim] to [numKVHeads, maxSeqLen, headDim]
 // Used for efficient GPU-side KV cache layout transformation
-void metal_scatter_kv_f16(void* queue, void* pipeline,
-                           void* src, void* dst,
-                           int newTokens, int numKVHeads, int headDim, int maxSeqLen, int seqPos);
+void metal_scatter_kv_f16(void* queue, void* pipeline, void* src, void* dst, int newTokens, int numKVHeads, int headDim, int maxSeqLen, int seqPos);
+void metal_scatter_kv_f32(void* queue, void* pipeline, void* src, void* dst, int newTokens, int numKVHeads, int headDim, int maxSeqLen, int seqPos);
+
 
 // =============================================================================
 // Q8_0 Quantization for KV Cache

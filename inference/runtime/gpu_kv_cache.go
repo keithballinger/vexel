@@ -169,6 +169,18 @@ func (c *GPUKVCache) AppendKV(layerIdx int, kPtr, vPtr tensor.DevicePtr, newToke
 			}
 			return c.kBuffers[layerIdx], c.vBuffers[layerIdx], fullSeqLen
 		}
+	} else {
+		// Try F32 scatter kernel
+		if scatter, ok := c.backend.(backend.KVScatter); ok {
+			scatter.ScatterKV(kPtr, c.kBuffers[layerIdx], newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
+			scatter.ScatterKV(vPtr, c.vBuffers[layerIdx], newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
+
+			fullSeqLen = c.seqLen + newTokens
+			if layerIdx == c.numLayers-1 {
+				c.seqLen += newTokens
+			}
+			return c.kBuffers[layerIdx], c.vBuffers[layerIdx], fullSeqLen
+		}
 	}
 
 	// Fall back to blit copies (less efficient but works for all cases)

@@ -79,6 +79,12 @@ type FP16Ops interface {
 	ScatterKVF16(src, dst tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int)
 }
 
+// KVScatter is an optional interface for backends that support efficient KV cache population.
+type KVScatter interface {
+	// ScatterKV transposes KV data from [newTokens, numKVHeads, headDim] to [numKVHeads, maxSeqLen, headDim].
+	ScatterKV(src, dst tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int)
+}
+
 // FusedOps is an optional interface for backends that support fused kernel operations.
 // Fused kernels combine multiple operations to reduce memory bandwidth.
 type FusedOps interface {
