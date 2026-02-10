@@ -139,3 +139,45 @@ func TestRoPEPhi2(t *testing.T) {
 		t.Errorf("Dimensions within ropeDim were not rotated")
 	}
 }
+
+func TestAddBias(t *testing.T) {
+	b, err := NewBackend(0)
+	if err != nil {
+		t.Skipf("Metal backend not available: %v", err)
+	}
+	defer b.Close()
+
+	rows, cols := 2, 4
+	input := []float32{
+		1, 2, 3, 4,
+		5, 6, 7, 8,
+	}
+	bias := []float32{0.1, 0.2, 0.3, 0.4}
+
+	xBuf := b.Alloc(len(input) * 4)
+	bBuf := b.Alloc(len(bias) * 4)
+	outBuf := b.Alloc(len(input) * 4)
+	defer b.Free(xBuf)
+	defer b.Free(bBuf)
+	defer b.Free(outBuf)
+
+	b.ToDevice(xBuf, float32ToBytes(input))
+	b.ToDevice(bBuf, float32ToBytes(bias))
+
+	b.AddBias(xBuf, bBuf, outBuf, rows, cols)
+	b.Sync()
+
+	resultBytes := make([]byte, len(input)*4)
+	b.ToHost(resultBytes, outBuf)
+	result := bytesToFloat32(resultBytes)
+
+	for i := 0; i < rows; i++ {
+		for j := 0; j < cols; j++ {
+			expected := input[i*cols+j] + bias[j]
+			got := result[i*cols+j]
+			if math.Abs(float64(got-expected)) > 1e-5 {
+				t.Errorf("AddBias mismatch at [%d,%d]: got %f, want %f", i, j, got, expected)
+			}
+		}
+	}
+}
