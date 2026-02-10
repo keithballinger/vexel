@@ -1,6 +1,6 @@
 # Track Plan: Metal Performance Optimization (Phi-2)
 
-## Phase 1: Optimized Metal Kernels
+## Phase 1: Optimized Metal Kernels [checkpoint: 27a7bb2]
 - [x] Task: Implement Optimized LayerNorm Metal Kernel [verified]
     - [x] Write Go-side unit test using Metal backend in `inference/backend/metal/phi2_ops_test.go`
     - [x] Implement MSL kernel in `inference/backend/metal/metal_bridge_darwin.m` (highly optimized)
@@ -18,7 +18,7 @@
     - [x] Write Go-side unit test for row-wise bias addition
     - [x] Implement MSL kernel (consider fusing with matmul or using as standalone)
     - [x] Verify correctness
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Optimized Metal Kernels' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Optimized Metal Kernels' (Protocol in workflow.md) [27a7bb2]
 
 ## Phase 2: Runtime Integration & GPU Residency
 - [ ] Task: Enable Metal Path for Phi-2 in BlockRuntime
