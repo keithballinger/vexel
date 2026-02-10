@@ -1,0 +1,8 @@
+{
+  "id": "phi2_quant_fix_20260209",
+  "name": "Phi-2 Metal Quantization Fix",
+  "description": "Debug and enable Q4_K/Q6_K quantized inference for Phi-2 on Metal to unlock memory-bound performance.",
+  "status": "todo",
+  "created_at": "2026-02-09T14:00:00Z",
+  "type": "optimization"
+}
