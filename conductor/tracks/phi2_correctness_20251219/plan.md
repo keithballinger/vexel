@@ -13,7 +13,7 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Math Path Correctness' (Protocol in workflow.md)
 
 ## Phase 3: End-to-End Inference Parity
-- [ ] Task: Write integration test for greedy output parity on "Hello!" prompt
-- [ ] Task: Final debugging of inference logic to achieve long-prefix parity with llama.cpp
-- [ ] Task: Run performance harness to confirm fix and document throughput
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: End-to-End Inference Parity' (Protocol in workflow.md)
+- [x] Task: Write integration test for greedy output parity on "Hello!" prompt [5d694c7]
+- [x] Task: Final debugging of inference logic to achieve long-prefix parity with llama.cpp [e68e79b]
+- [x] Task: Run performance harness to confirm fix and document throughput [5620737]
+- [~] Task: Conductor - User Manual Verification 'Phase 3: End-to-End Inference Parity' (Protocol in workflow.md)
