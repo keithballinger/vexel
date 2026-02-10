@@ -29,7 +29,7 @@
     - [x] Ensure no CPU fallbacks are triggered during the Phi-2 forward pass
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Runtime Integration & GPU Residency' (Protocol in workflow.md) [cc5602c]
 
-## Phase 3: Performance Verification & Parity [checkpoint: ]
+## Phase 3: Performance Verification & Parity [checkpoint: 108377d]
 - [x] Task: End-to-End Correctness Parity on Metal [verified]
     - [x] Run `TestPhi2Parity` configured with Metal backend
     - [x] Verify long-prefix (20+ tokens) matching against llama.cpp
@@ -38,4 +38,4 @@
     - [x] Identify bottlenecks (Batching disabled due to RAW hazards, Q4_K produces 0s)
     - [ ] Run performance harness to measure prefill and decode tokens/sec
     - [ ] Identify and address any memory bottlenecks or synchronization stalls
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Performance Verification & Parity' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Performance Verification & Parity' (Protocol in workflow.md) [108377d]
