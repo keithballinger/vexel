@@ -20,14 +20,14 @@
     - [x] Verify correctness
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Optimized Metal Kernels' (Protocol in workflow.md) [27a7bb2]
 
-## Phase 2: Runtime Integration & GPU Residency
+## Phase 2: Runtime Integration & GPU Residency [checkpoint: cc5602c]
 - [x] Task: Enable Metal Path for Phi-2 in BlockRuntime [verified]
     - [x] Update `Execute` and `ExecuteWithPagedKV` in `inference/runtime/block.go` to dispatch to Metal kernels
     - [x] Ensure `applyNorm` and `matMulTransposedWithBias` correctly handle Metal backend
 - [x] Task: Verify Full GPU Weight Residency [verified]
     - [x] Validate `CopyWeightsToDevice` in `inference/runtime/loader.go` for Phi-2 biases and combined tensors
     - [x] Ensure no CPU fallbacks are triggered during the Phi-2 forward pass
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Runtime Integration & GPU Residency' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Runtime Integration & GPU Residency' (Protocol in workflow.md) [cc5602c]
 
 ## Phase 3: Performance Verification & Parity
 - [ ] Task: End-to-End Correctness Parity on Metal
