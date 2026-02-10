@@ -4,6 +4,10 @@
 - **Go:** The primary language for the inference engine's control plane, API bindings, and the performance harness.
 - **Metal:** Used for high-performance GPU-accelerated LLM kernels on Apple Silicon.
 
+## Supported Architectures
+- **LLaMA Family:** Support for RMSNorm and SwiGLU architectures (LLaMA 2/3, Mistral).
+- **Phi Family:** Support for LayerNorm, GELU, and parallel residual architectures (Phi-2, Phi-3).
+
 ## Development & Infrastructure
 - **llama.cpp:** Used as the reference implementation for correctness verification and performance benchmarking.
 - **Makefile:** Orchestrates the build process for both the Go components and any native dependencies.
