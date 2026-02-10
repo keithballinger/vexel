@@ -148,8 +148,11 @@ func (c *GPUKVCache) KVHeadStride() int {
 // kPtr, vPtr should contain [newTokens, numKVHeads, headDim] data (input layout).
 // Cache stores data as [numKVHeads, maxSeqLen, headDim] for decode-friendly access.
 // For FP32 cache: expects FP32 input. For FP16 cache: expects FP16 input.
+// AppendKV appends new key/value pairs to the cache for the specified layer.
+// kPtr, vPtr: [newTokens, numKVHeads, headDim] (source data)
+// srcDType: data type of the source tensor (F32 or F16)
 // Returns the GPU pointers to the full K/V cache for this layer.
-func (c *GPUKVCache) AppendKV(layerIdx int, kPtr, vPtr tensor.DevicePtr, newTokens int) (fullK, fullV tensor.DevicePtr, fullSeqLen int) {
+func (c *GPUKVCache) AppendKV(layerIdx int, kPtr, vPtr tensor.DevicePtr, srcDType tensor.DType, newTokens int) (fullK, fullV tensor.DevicePtr, fullSeqLen int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -159,9 +162,19 @@ func (c *GPUKVCache) AppendKV(layerIdx int, kPtr, vPtr tensor.DevicePtr, newToke
 	// Try FP16 scatter kernel first (single dispatch, most efficient)
 	if c.useFP16 {
 		if fp16Ops, ok := c.backend.(backend.FP16Ops); ok {
-			// Use GPU scatter kernel - single dispatch for K and V
-			fp16Ops.ScatterKVF16(kPtr, c.kBuffers[layerIdx], newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
-			fp16Ops.ScatterKVF16(vPtr, c.vBuffers[layerIdx], newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
+			if srcDType == tensor.Float32 {
+				// Convert F32 -> F16 and scatter
+				// Check if backend supports F32->F16 scatter (custom extension)
+				// Since we just added it to FP16Ops, we can use it?
+				// Wait, I added it to the Backend struct methods but did I add it to the interface definition?
+				// Yes, I added it to FP16Ops interface.
+				fp16Ops.ScatterKVF32ToF16(kPtr, c.kBuffers[layerIdx], newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
+				fp16Ops.ScatterKVF32ToF16(vPtr, c.vBuffers[layerIdx], newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
+			} else {
+				// Input is already F16 (or we assume it matches cache if not F32)
+				fp16Ops.ScatterKVF16(kPtr, c.kBuffers[layerIdx], newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
+				fp16Ops.ScatterKVF16(vPtr, c.vBuffers[layerIdx], newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
+			}
 
 			fullSeqLen = c.seqLen + newTokens
 			if layerIdx == c.numLayers-1 {

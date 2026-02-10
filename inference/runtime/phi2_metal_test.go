@@ -44,8 +44,8 @@ func TestPhi2MetalParity(t *testing.T) {
 		t.Fatalf("Failed to create runtime: %v", err)
 	}
 
-	// Use LoadWeightsF32 for now as quantized kernels might have issues
-	err = m.LoadWeightsF32(modelPath)
+	// Use LoadWeights (quantized support)
+	err = m.LoadWeights(modelPath)
 	if err != nil {
 		t.Fatalf("Failed to load weights: %v", err)
 	}
@@ -167,7 +167,8 @@ func BenchmarkPhi2Metal(b *testing.B) {
 		b.Fatal(err)
 	}
 	
-	err = m.LoadWeightsF32(modelPath)
+	// Use quantized weights for benchmark
+	err = m.LoadWeights(modelPath)
 	if err != nil {
 		b.Fatal(err)
 	}

@@ -77,6 +77,11 @@ type FP16Ops interface {
 	// ScatterKVF16 transposes KV data from [newTokens, numKVHeads, headDim] to [numKVHeads, maxSeqLen, headDim].
 	// This efficiently populates the head-major KV cache layout in a single kernel dispatch.
 	ScatterKVF16(src, dst tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int)
+
+	// ScatterKVF32ToF16 transposes and converts KV data from F32 to F16.
+	// src: [newTokens, numKVHeads, headDim] in F32
+	// dst: [numKVHeads, maxSeqLen, headDim] in F16
+	ScatterKVF32ToF16(src, dst tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int)
 }
 
 // KVScatter is an optional interface for backends that support efficient KV cache population.

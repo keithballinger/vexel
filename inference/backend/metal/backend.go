@@ -102,6 +102,7 @@ type Backend struct {
 	convertF16ToF32Pipeline     unsafe.Pointer
 	scatterKVF16Pipeline        unsafe.Pointer
 	scatterKVF32Pipeline        unsafe.Pointer
+	scatterKVF32ToF16Pipeline   unsafe.Pointer
 
 	// Q8_0 Quantization pipelines (for KV cache)
 	quantizeF32ToQ8_0Pipeline   unsafe.Pointer
@@ -218,6 +219,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.convertF16ToF32Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("convert_f16_to_f32"))
 	b.scatterKVF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("scatter_kv_f16"))
 	b.scatterKVF32Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("scatter_kv_f32"))
+	b.scatterKVF32ToF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("scatter_kv_f32_to_f16"))
 
 	// Q8_0 quantization pipelines
 	b.quantizeF32ToQ8_0Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("quantize_f32_to_q8_0"))
@@ -897,9 +899,18 @@ func (b *Backend) ConvertF16ToF32(in, out tensor.DevicePtr, n int) {
 func (b *Backend) ScatterKVF16(src, dst tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int) {
 	C.metal_scatter_kv_f16(b.queue, b.scatterKVF16Pipeline,
 		unsafe.Pointer(src.Addr()), unsafe.Pointer(dst.Addr()),
-		C.int(newTokens), C.int(numKVHeads), C.int(headDim),
-		C.int(maxSeqLen), C.int(seqPos))
+		C.int(newTokens), C.int(numKVHeads), C.int(headDim), C.int(maxSeqLen), C.int(seqPos))
 }
+
+func (b *Backend) ScatterKVF32ToF16(src, dst tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int) {
+	if b.scatterKVF32ToF16Pipeline == nil {
+		panic("ScatterKVF32ToF16 called but pipeline unavailable")
+	}
+	C.metal_scatter_kv_f32_to_f16(b.queue, b.scatterKVF32ToF16Pipeline,
+		unsafe.Pointer(src.Addr()), unsafe.Pointer(dst.Addr()),
+		C.int(newTokens), C.int(numKVHeads), C.int(headDim), C.int(maxSeqLen), C.int(seqPos))
+}
+
 
 func (b *Backend) ScatterKV(src, dst tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int) {
 	C.metal_scatter_kv_f32(b.queue, b.scatterKVF32Pipeline,

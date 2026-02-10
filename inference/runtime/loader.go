@@ -49,9 +49,9 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 	for _, hfName := range tensorNames {
 		ggufName := gguf.GetLayerTensorName(hfName)
 
-
 		// First, check the tensor type to decide loading strategy
 		info, found := loader.GetTensorInfo(ggufName)
+        // ...
 		if !found {
 			// Try alternative naming patterns
 			altNames := m.alternativeGGUFNames(ggufName)
@@ -62,6 +62,9 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 					break
 				}
 			}
+		}
+		if found {
+			fmt.Printf("Loading %s (%s): Type=%v\n", hfName, ggufName, info.Type)
 		}
 		if !found {
 			fmt.Printf("Warning: tensor %s (%s) not found\n", hfName, ggufName)

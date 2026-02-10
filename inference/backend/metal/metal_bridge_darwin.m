@@ -2594,6 +2594,32 @@ kernel void scatter_kv_f32(
     dst[dstOffset] = src[gid];
 }
 
+kernel void scatter_kv_f32_to_f16(
+    device const float* src [[buffer(0)]], // Input: [newTokens, numKVHeads, headDim] in F32
+    device half* dst [[buffer(1)]],        // Output: [numKVHeads, maxSeqLen, headDim] in F16
+    constant int& newTokens [[buffer(2)]],
+    constant int& numKVHeads [[buffer(3)]],
+    constant int& headDim [[buffer(4)]],
+    constant int& maxSeqLen [[buffer(5)]],
+    constant int& seqPos [[buffer(6)]],    // Starting position in sequence
+    uint gid [[thread_position_in_grid]]
+) {
+    int totalElements = newTokens * numKVHeads * headDim;
+    if (gid >= (uint)totalElements) return;
+
+    // Decode source indices
+    int srcHeadStride = numKVHeads * headDim;
+    int t = gid / srcHeadStride;
+    int remainder = gid % srcHeadStride;
+    int h = remainder / headDim;
+    int d = remainder % headDim;
+
+    // Compute destination offset
+    int dstOffset = h * maxSeqLen * headDim + (seqPos + t) * headDim + d;
+
+    dst[dstOffset] = half(src[gid]);
+}
+
 // =============================================================================
 // Q8_0 Quantization for KV Cache
 // Q8_0 format: 34 bytes per 32 elements (2-byte f16 scale + 32 int8 values)
@@ -5413,6 +5439,34 @@ void metal_scatter_kv_f16(void* queuePtr, void* pipelinePtr,
 void metal_scatter_kv_f32(void* queuePtr, void* pipelinePtr,
                            void* src, void* dst,
                            int newTokens, int numKVHeads, int headDim, int maxSeqLen, int seqPos) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)src offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)dst offset:0 atIndex:1];
+    [encoder setBytes:&newTokens length:sizeof(newTokens) atIndex:2];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:3];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:4];
+    [encoder setBytes:&maxSeqLen length:sizeof(maxSeqLen) atIndex:5];
+    [encoder setBytes:&seqPos length:sizeof(seqPos) atIndex:6];
+
+    int totalElements = newTokens * numKVHeads * headDim;
+    int threadgroupSize = 256;
+    MTLSize gridSize = MTLSizeMake(totalElements, 1, 1);
+    MTLSize tgSize = MTLSizeMake(threadgroupSize, 1, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
+
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_scatter_kv_f32_to_f16(void* queuePtr, void* pipelinePtr,
+                                  void* src, void* dst,
+                                  int newTokens, int numKVHeads, int headDim, int maxSeqLen, int seqPos) {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
     id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
 

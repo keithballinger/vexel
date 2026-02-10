@@ -1104,22 +1104,20 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		if useFP16Path {
 			// FP16 path: K and V already in FP16 (from fused kernel), no conversion needed
 			// AppendKV uses CopyBufferBatched which integrates with command batching
-			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kF16Ptr, vF16Ptr, seqLen)
+			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kF16Ptr, vF16Ptr, tensor.Float16, seqLen)
 		} else if useFP16KVCache {
-			// Convert FP32 K/V to FP16 before storing in cache
-			b.fp16Ops.ConvertF32ToF16(kPtr, kF16Ptr, kvSize)
-			b.fp16Ops.ConvertF32ToF16(vPtr, vF16Ptr, kvSize)
-			// AppendKV uses CopyBufferBatched which integrates with command batching
-			// No explicit sync needed - blit and compute on same command buffer
-			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kF16Ptr, vF16Ptr, seqLen)
+			// Use optimized F32->F16 scatter kernel (single dispatch)
+			// No explicit conversion needed
+			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kPtr, vPtr, tensor.Float32, seqLen)
 		} else if useQ8KVCache {
 			// Quantize FP32 K/V to Q8_0 before storing in cache
 			b.q8Ops.QuantizeF32ToQ8_0(kPtr, kQ8Ptr, kvSize)
 			b.q8Ops.QuantizeF32ToQ8_0(vPtr, vQ8Ptr, kvSize)
 			// AppendKV uses CopyBufferBatched - no explicit sync needed
-			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kQ8Ptr, vQ8Ptr, seqLen)
+			// Q8 path handles its own types implicitly via buffer size
+			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kQ8Ptr, vQ8Ptr, tensor.Uint8, seqLen)
 		} else {
-			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kPtr, vPtr, seqLen)
+			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kPtr, vPtr, tensor.Float32, seqLen)
 		}
 	})
 
