@@ -7,10 +7,10 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Tokenizer Parity' (Protocol in workflow.md) [f8152f6]
 
 ## Phase 2: Math Path Correctness
-- [~] Task: Write unit tests for Phi-2 specific math operations (LayerNorm, GELU, bias, parallel residual, RoPE-NeoX)
+- [x] Task: Write unit tests for Phi-2 specific math operations (LayerNorm, GELU, bias, parallel residual, RoPE-NeoX) [1e89f2a]
 - [x] Task: Debug and fix Phi-2 specific math path implementations in Metal kernels and Go bindings [cd446c9]
-- [~] Task: Verify math operation correctness against known reference values
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Math Path Correctness' (Protocol in workflow.md)
+- [x] Task: Verify math operation correctness against known reference values [1e89f2a]
+- [~] Task: Conductor - User Manual Verification 'Phase 2: Math Path Correctness' (Protocol in workflow.md)
 
 ## Phase 3: End-to-End Inference Parity
 - [ ] Task: Write integration test for greedy output parity on "Hello!" prompt

@@ -24,6 +24,8 @@ func TestPhi2BlockLogicCPU(t *testing.T) {
 		HasBias:           true,
 		ParallelResidual:  true,
 		RMSNormEPS:        1e-5,
+		RoPETheta:         10000.0,
+		RoPENeox:          true,
 	}
 
 	block := NewBlockRuntime(b, config)
