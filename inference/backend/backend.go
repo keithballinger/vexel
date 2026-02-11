@@ -43,6 +43,11 @@ type QuantizedMatMul interface {
 	// B contains raw Q6_K data (210 bytes per 256 elements). Used for lm_head.
 	// Currently only supports M=1 (matvec for decode).
 	MatMulQ6_K(a, b, out tensor.DevicePtr, m, n, k int)
+
+	// MatMulQ5_K performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q5_K format.
+	// B contains raw Q5_K data (176 bytes per 256 elements).
+	// Currently only supports M=1 (matvec for decode).
+	MatMulQ5_K(a, b, out tensor.DevicePtr, m, n, k int)
 }
 
 // FP16Ops is an optional interface for backends that support FP16 (half-precision) operations.

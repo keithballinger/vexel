@@ -83,10 +83,14 @@ type Backend struct {
 	matmulQ4BatchedPipeline     unsafe.Pointer
 	matmulQ4SimdgroupPipeline   unsafe.Pointer
 	matvecQ6KPipeline           unsafe.Pointer
-	matvecQ6KNR2Pipeline        unsafe.Pointer  // Optimized Q6_K with nr0=2
-	matvecQ4KPipeline           unsafe.Pointer
-	matmulQ4KBatchedPipeline    unsafe.Pointer
-
+			matvecQ6KNR2Pipeline        unsafe.Pointer // Optimized Q6_K with nr0=2
+			matvecQ4KPipeline           unsafe.Pointer
+			matvecQ4KNR2Pipeline        unsafe.Pointer
+			matvecQ5KPipeline           unsafe.Pointer
+		
+			matvecQ5KNR2Pipeline        unsafe.Pointer
+			matmulQ4KBatchedPipeline    unsafe.Pointer
+		
 	// FP16 (Half-Precision) pipelines
 	addF16Pipeline          unsafe.Pointer
 	mulF16Pipeline          unsafe.Pointer
@@ -202,6 +206,9 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matvecQ6KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q6k_multi_output_f32"))
 	b.matvecQ6KNR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q6k_nr2_f32"))
 	b.matvecQ4KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_multi_output_f32"))
+	b.matvecQ4KNR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_nr2_f32"))
+	b.matvecQ5KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q5k_multi_output_f32"))
+	b.matvecQ5KNR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q5k_nr2_f32"))
 	b.matmulQ4KBatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4k_batched_f32"))
 
 	// FP16 pipelines
@@ -490,30 +497,47 @@ func (b *Backend) MatVecQ4_0MultiOutput(a, bMat, out tensor.DevicePtr, n, k int)
 
 // MatMulQ6_K performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q6_K format.
 // B contains raw Q6_K data (210 bytes per 256 elements).
-// Only supports M=1 (matvec) for now - used for lm_head during decode.
+// Currently only supports M=1 (matvec) natively, uses loop for M>1.
 var q6kNR2DebugOnce sync.Once
 
 func (b *Backend) MatMulQ6_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
-	if m != 1 {
-		panic("MatMulQ6_K only supports M=1 (matvec) for now")
-	}
-	// Use optimized NR2 kernel (2 outputs per simdgroup) if available
-	if b.matvecQ6KNR2Pipeline != nil {
-		q6kNR2DebugOnce.Do(func() {
-			fmt.Println("[DEBUG] Using Q6_K NR2 kernel for LM head")
-		})
-		C.metal_matvec_q6k_nr2_f32(b.queue, b.matvecQ6KNR2Pipeline,
+	if m == 1 {
+		// Use optimized NR2 kernel (2 outputs per simdgroup) if available
+		if b.matvecQ6KNR2Pipeline != nil {
+			q6kNR2DebugOnce.Do(func() {
+				fmt.Println("[DEBUG] Using Q6_K NR2 kernel for LM head")
+			})
+			C.metal_matvec_q6k_nr2_f32(b.queue, b.matvecQ6KNR2Pipeline,
+				unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+				C.int(n), C.int(k))
+			return
+		}
+		// Fall back to original kernel
+		if b.matvecQ6KPipeline == nil {
+			panic("MatMulQ6_K called but no Q6_K pipeline available")
+		}
+		C.metal_matvec_q6k_multi_output_f32(b.queue, b.matvecQ6KPipeline,
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(n), C.int(k))
-		return
+	} else {
+		// Looped matvec for prefill
+		stateRowBytes := uintptr(k * 4)
+		outRowBytes := uintptr(n * 4)
+		for i := 0; i < m; i++ {
+			rowA := tensor.DevicePtrOffset(a, uintptr(i)*stateRowBytes)
+			rowOut := tensor.DevicePtrOffset(out, uintptr(i)*outRowBytes)
+
+			if b.matvecQ6KNR2Pipeline != nil {
+				C.metal_matvec_q6k_nr2_f32(b.queue, b.matvecQ6KNR2Pipeline,
+					unsafe.Pointer(rowA.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(rowOut.Addr()),
+					C.int(n), C.int(k))
+			} else {
+				C.metal_matvec_q6k_multi_output_f32(b.queue, b.matvecQ6KPipeline,
+					unsafe.Pointer(rowA.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(rowOut.Addr()),
+					C.int(n), C.int(k))
+			}
+		}
 	}
-	// Fall back to original kernel
-	if b.matvecQ6KPipeline == nil {
-		panic("MatMulQ6_K called but no Q6_K pipeline available")
-	}
-	C.metal_matvec_q6k_multi_output_f32(b.queue, b.matvecQ6KPipeline,
-		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
-		C.int(n), C.int(k))
 }
 
 // MatMulQ4_K performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q4_K format.
@@ -521,11 +545,21 @@ func (b *Backend) MatMulQ6_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 func (b *Backend) MatMulQ4_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 	if m == 1 {
 		// Decode: use optimized matvec kernel
+		if b.matvecQ4KNR2Pipeline != nil {
+			C.metal_matvec_q4k_nr2_f32(b.queue, b.matvecQ4KNR2Pipeline,
+				unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+				unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
+				unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+				C.int(n), C.int(k))
+			return
+		}
 		if b.matvecQ4KPipeline == nil {
 			panic("MatMulQ4_K called but no matvecQ4KPipeline available")
 		}
 		C.metal_matvec_q4k_multi_output_f32(b.queue, b.matvecQ4KPipeline,
-			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
 			C.int(n), C.int(k))
 	} else {
 		// Prefill: use batched kernel
@@ -533,8 +567,57 @@ func (b *Backend) MatMulQ4_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 			panic("MatMulQ4_K called with M>1 but no matmulQ4KBatchedPipeline available")
 		}
 		C.metal_matmul_q4k_batched_f32(b.queue, b.matmulQ4KBatchedPipeline,
-			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
 			C.int(m), C.int(n), C.int(k))
+	}
+}
+
+// MatMulQ5_K performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q5_K format.
+// B contains raw Q5_K data (176 bytes per 256 elements).
+// Currently only supports M=1 (matvec) natively, uses loop for M>1.
+func (b *Backend) MatMulQ5_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	if m == 1 {
+		// if b.matvecQ5KNR2Pipeline != nil {
+		// 	offsets := []C.uint64_t{
+		// 		C.uint64_t(a.Offset()),
+		// 		C.uint64_t(bMat.Offset()),
+		// 		C.uint64_t(out.Offset()),
+		// 	}
+		// 	C.metal_matvec_q5k_nr2_f32_v4(
+		// 		b.queue,
+		// 		b.matvecQ5KNR2Pipeline,
+		// 		unsafe.Pointer(a.Addr()),
+		// 		unsafe.Pointer(bMat.Addr()),
+		// 		unsafe.Pointer(out.Addr()),
+		// 		C.int(n),
+		// 		C.int(k),
+		// 		unsafe.Pointer(&offsets[0]))
+		// 	return
+		// }
+		if b.matvecQ5KPipeline == nil {
+			panic("MatMulQ5_K called but no matvecQ5KPipeline available")
+		}
+		C.metal_matvec_q5k_multi_output_f32(b.queue, b.matvecQ5KPipeline,
+			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			C.int(n), C.int(k))
+	} else {
+		// Looped matvec for prefill
+		stateRowBytes := uintptr(k * 4)
+		outRowBytes := uintptr(n * 4)
+		for i := 0; i < m; i++ {
+			rowA := tensor.DevicePtrOffset(a, uintptr(i)*stateRowBytes)
+			rowOut := tensor.DevicePtrOffset(out, uintptr(i)*outRowBytes)
+
+			C.metal_matvec_q5k_multi_output_f32(b.queue, b.matvecQ5KPipeline,
+				unsafe.Pointer(rowA.Addr()), C.uint64_t(rowA.Offset()),
+				unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
+				unsafe.Pointer(rowOut.Addr()), C.uint64_t(rowOut.Offset()),
+				C.int(n), C.int(k))
+		}
 	}
 }
 
@@ -872,7 +955,16 @@ func (b *Backend) MatMulQ4_0_F16(a, bMat, out tensor.DevicePtr, n, k int) {
 // All tensors in FP16. Provides 2x KV cache bandwidth savings.
 // kvHeadStride: stride between KV heads in elements (maxSeqLen * headDim).
 func (b *Backend) SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
-	// Use original kernel - vectorized attempts didn't show improvement
+	// Use vectorized kernel if available and headDim is multiple of 4
+	if b.sdpaDecodeF16VecPipeline != nil && headDim%4 == 0 {
+		C.metal_sdpa_decode_f16(b.queue, b.sdpaDecodeF16VecPipeline,
+			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+			unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+			C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+			C.float(scale), C.int(kvHeadStride))
+		return
+	}
+
 	C.metal_sdpa_decode_f16(b.queue, b.sdpaDecodeF16Pipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),

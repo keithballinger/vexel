@@ -181,7 +181,12 @@ func BenchmarkPhi2Metal(b *testing.B) {
 	m.CreateGPUKVCache(512)
 
 	if os.Getenv("VEXEL_GPU_PROFILE") == "1" {
+		metal.ResetGPUProfile()
 		defer metal.PrintGPUProfile()
+	}
+	if os.Getenv("DEBUG_PROFILE") == "1" {
+		ResetProfile()
+		defer PrintProfile()
 	}
 
 	// One decode step (pos 10)

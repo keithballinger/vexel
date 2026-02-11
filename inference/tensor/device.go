@@ -45,7 +45,7 @@ func (p DevicePtr) BaseAddr() uintptr {
 	return p.addr
 }
 
-// Offset returns the offset within the buffer (for GPU sub-allocations).
+// Offset returns the offset within the buffer in bytes.
 func (p DevicePtr) Offset() int {
 	return p.offset
 }

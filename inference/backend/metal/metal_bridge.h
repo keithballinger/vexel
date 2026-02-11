@@ -106,15 +106,40 @@ void metal_matvec_q6k_nr2_f32(void* queue, void* pipeline,
                                void* A, void* B, void* C,
                                int N, int K);
 
+#include <stdint.h>
+
 // Q4_K multi-output matvec: for attention projections using Q4_K quantization
 void metal_matvec_q4k_multi_output_f32(void* queue, void* pipeline,
-                                        void* A, void* B, void* C,
+                                        void* A, uint64_t aOff,
+                                        void* B, uint64_t bOff,
+                                        void* C, uint64_t cOff,
                                         int N, int K);
+
+// Q4_K NR2 matvec: 2 outputs per simdgroup (interleaved activations)
+void metal_matvec_q4k_nr2_f32(void* queue, void* pipeline,
+                               void* A, uint64_t aOff,
+                               void* B, uint64_t bOff,
+                               void* C, uint64_t cOff,
+                               int N, int K);
 
 // Q4_K batched matmul: C = A @ B^T where A is [M,K], B is [N,K] Q4_K, C is [M,N]
 void metal_matmul_q4k_batched_f32(void* queue, void* pipeline,
-                                   void* A, void* B, void* C,
+                                   void* A, uint64_t aOff,
+                                   void* B, uint64_t bOff,
+                                   void* C, uint64_t cOff,
                                    int M, int N, int K);
+
+// Q5_K multi-output matvec
+void metal_matvec_q5k_multi_output_f32(void* queue, void* pipeline,
+                                        void* A, uint64_t aOff,
+                                        void* B, uint64_t bOff,
+                                        void* C, uint64_t cOff,
+                                        int N, int K);
+
+// Q5_K NR2 matvec: 8 arguments (safe limit)
+void metal_matvec_q5k_nr2_f32_v4(void* queue, void* pipeline,
+                                  void* A, void* B, void* C,
+                                  int N, int K, void* offsetsPtr);
 
 void metal_rmsnorm_f32(void* queue, void* pipeline,
                        void* x, void* weight, void* out,

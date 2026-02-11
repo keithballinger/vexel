@@ -107,9 +107,23 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			)
 			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
 			q4Count++
-		} else if info.Type == gguf.TensorTypeQ6_K && hfName == "lm_head.weight" {
-			// Keep lm_head as Q6_K for GPU-native quantized inference
-			// All output head paths now use M=1, so Q6_K matvec kernel works
+		} else if info.Type == gguf.TensorTypeQ5_K && m.isWeightMatrix(hfName) {
+			// Q5_K native GPU kernel
+			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
+			if err != nil {
+				fmt.Printf("Warning: failed to load raw Q5_K tensor %s: %v\n", hfName, err)
+				continue
+			}
+			t = tensor.NewQuantTensor(
+				tensor.NewShape(dims...),
+				m.config.DType,
+				tensor.NewDevicePtr(tensor.CPU, uintptr(unsafe.Pointer(&rawData[0]))),
+				tensor.Q5_K,
+			)
+			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
+			q4Count++
+		} else if info.Type == gguf.TensorTypeQ6_K && (m.isWeightMatrix(hfName) || hfName == "lm_head.weight") {
+			// Keep as Q6_K for GPU-native quantized inference
 			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
 			if err != nil {
 				fmt.Printf("Warning: failed to load raw tensor %s: %v\n", hfName, err)
@@ -122,6 +136,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 				tensor.Q6_K,
 			)
 			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
+			q4Count++
 		} else {
 			// Dequantize to F32 for embeddings, norms, or non-Q4_0/Q6_K types
 			data, dims, err := loader.LoadTensor(ggufName)
@@ -576,8 +591,10 @@ func (m *ModelRuntime) mapTensor(name string, t tensor.Tensor) {
 
 		// Phi-style combined QKV projection (needs splitting)
 		case "self_attn.qkv_proj.weight":
+			layer.Wqkv = t
 			m.splitQKVWeight(layer, t)
 		case "self_attn.qkv_proj.bias":
+			layer.WqkvBias = t
 			m.splitQKVBias(layer, t)
 
 		// Output projection
@@ -650,9 +667,40 @@ func (m *ModelRuntime) splitQKVWeight(layer *BlockRuntime, combined tensor.Tenso
 
 	// For quantized tensors, we need different handling
 	if combined.IsQuantized() {
-		// For Q4_0, calculate block boundaries
-		// This is complex - for now, log warning and skip
-		fmt.Printf("Warning: splitting quantized QKV not yet supported\n")
+		profile := combined.QuantProfile()
+		var blockSize, bytesPerBlock int
+		switch profile {
+		case tensor.Q4_0:
+			blockSize, bytesPerBlock = 32, 18
+		case tensor.Q4_K:
+			blockSize, bytesPerBlock = 256, 144
+		case tensor.Q5_K:
+			blockSize, bytesPerBlock = 256, 176
+		case tensor.Q6_K:
+			blockSize, bytesPerBlock = 256, 210
+		default:
+			fmt.Printf("Warning: splitting quantized profile %v not yet supported\n", profile)
+			return
+		}
+
+		qElements := qRows * cols
+		kvElements := kvRows * cols
+
+		if qElements%blockSize != 0 || kvElements%blockSize != 0 {
+			fmt.Printf("Warning: quantized split point not aligned with block size (%d)\n", blockSize)
+			return
+		}
+
+		qSizeBytes := (qElements / blockSize) * bytesPerBlock
+		kvSizeBytes := (kvElements / blockSize) * bytesPerBlock
+
+		qPtr := srcPtr
+		kPtr := tensor.DevicePtrOffset(srcPtr, uintptr(qSizeBytes))
+		vPtr := tensor.DevicePtrOffset(srcPtr, uintptr(qSizeBytes+kvSizeBytes))
+
+		layer.Wq = tensor.NewQuantTensor(tensor.NewShape(qRows, cols), m.config.DType, qPtr, profile)
+		layer.Wk = tensor.NewQuantTensor(tensor.NewShape(kvRows, cols), m.config.DType, kPtr, profile)
+		layer.Wv = tensor.NewQuantTensor(tensor.NewShape(kvRows, cols), m.config.DType, vPtr, profile)
 		return
 	}
 

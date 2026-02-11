@@ -14,6 +14,8 @@ const (
 	Q6_K
 	// Q4_K represents 4-bit k-quant quantization (better alignment than Q4_0).
 	Q4_K
+	// Q5_K represents 5-bit k-quant quantization.
+	Q5_K
 )
 
 func (q QuantProfile) String() string {
@@ -28,6 +30,8 @@ func (q QuantProfile) String() string {
 		return "Q6_K"
 	case Q4_K:
 		return "Q4_K"
+	case Q5_K:
+		return "Q5_K"
 	default:
 		return "Unknown"
 	}

@@ -229,12 +229,13 @@ type BlockRuntime struct {
 	ParallelResidual bool     // True: x + attn(norm(x)) + mlp(norm(x)), False: serial
 
 	// Weights (stored as DevicePtr for GPU execution)
-	AttnNorm   tensor.Tensor
-	Wq, Wk, Wv tensor.Tensor
-	Wo         tensor.Tensor
+	AttnNorm     tensor.Tensor
+	Wq, Wk, Wv   tensor.Tensor
+	Wqkv         tensor.Tensor // Combined QKV projection (optional, for Phi-2 optimization)
+	Wo           tensor.Tensor
 
-	FFNNorm    tensor.Tensor
-	W1, W2, W3 tensor.Tensor // Gate, Down, Up (W3 not used for GELU MLP)
+	FFNNorm      tensor.Tensor
+	W1, W2, W3   tensor.Tensor // Gate, Down, Up (W3 not used for GELU MLP)
 
 	// Optional bias tensors (for Phi, GPT-2, etc.)
 	AttnNormBias tensor.Tensor // LayerNorm bias for attention
@@ -242,6 +243,7 @@ type BlockRuntime struct {
 	WqBias       tensor.Tensor // Q projection bias
 	WkBias       tensor.Tensor // K projection bias
 	WvBias       tensor.Tensor // V projection bias
+	WqkvBias     tensor.Tensor // Combined QKV projection bias (optional, for Phi-2 optimization)
 	WoBias       tensor.Tensor // Output projection bias
 	W1Bias       tensor.Tensor // Gate/Up projection bias
 	W2Bias       tensor.Tensor // Down projection bias
@@ -342,6 +344,10 @@ func (b *BlockRuntime) matMulTransposed(a tensor.DevicePtr, w tensor.Tensor, out
 		case tensor.Q6_K:
 			// Use GPU-native Q6_K kernel (only M=1 for now)
 			b.quantMatMul.MatMulQ6_K(a, w.DevicePtr(), out, m, n, k)
+			return
+		case tensor.Q5_K:
+			// Use GPU-native Q5_K kernel (only M=1 for now)
+			b.quantMatMul.MatMulQ5_K(a, w.DevicePtr(), out, m, n, k)
 			return
 		default:
 			// Warn about unsupported quantization profile - falling back to F32
@@ -809,7 +815,12 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 
 	// Use command buffer batching if available (and not profiling - profiling needs sync points)
 	// Note: Batching disabled - causes incorrect output due to Metal memory hazards
-	useBatching := false // b.batcher != nil && !profiler.enabled
+	useBatching := b.batcher != nil
+	// Profiler disables batching to measure individual kernel times
+	if os.Getenv("VEXEL_GPU_PROFILE") == "1" {
+		useBatching = false
+	}
+
 	if useBatching {
 		b.batcher.BeginBatch()
 		defer b.batcher.EndBatch()
@@ -862,10 +873,11 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	gateBytes := seqLen * intermediateSize * 4
 	upBytes := seqLen * intermediateSize * 4
 
-	// Allocate intermediate buffers from scratch space
+	// Allocate intermediate buffers from scratch space if available, otherwise use backend.Alloc
 	var normOutPtr, qPtr, kPtr, vPtr, attnOutPtr, gatePtr, upPtr tensor.DevicePtr
 
-	if scratchPtr.Location() == tensor.CPU {
+	if !scratch.DevicePtr().IsNil() {
+		scratchPtr := scratch.DevicePtr()
 		offset := uintptr(0)
 		normOutPtr = tensor.DevicePtrOffset(scratchPtr, offset)
 		offset += uintptr(normOutBytes)
@@ -977,59 +989,22 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			b.debugBlockTensor(fmt.Sprintf("L%d AttnNorm weights", layerIdx), b.AttnNorm.DevicePtr(), hiddenSize)
 		}
 
-		profileOp("Wq", func() {
-			if !b.Wq.DevicePtr().IsNil() {
-				qDim := b.Wq.Shape().Dims()[0]
-				b.matMulTransposedWithBias(normOutPtr, b.Wq, b.WqBias, qPtr, seqLen, qDim, hiddenSize)
-			}
-		})
-
-		profileOp("Wk", func() {
-			if !b.Wk.DevicePtr().IsNil() {
-				kDim := b.Wk.Shape().Dims()[0]
-				b.matMulTransposedWithBias(normOutPtr, b.Wk, b.WkBias, kPtr, seqLen, kDim, hiddenSize)
-			}
-		})
-
-		profileOp("Wv", func() {
-			if !b.Wv.DevicePtr().IsNil() {
-				vDim := b.Wv.Shape().Dims()[0]
-				// Debug: show Wv quantization profile and input values
-				if debugThisLayer {
-					fmt.Printf("[DEBUG] L%d Wv: IsQuant=%v, Profile=%v, m=%d, n=%d, k=%d\n",
-						layerIdx, b.Wv.IsQuantized(), b.Wv.QuantProfile(), seqLen, vDim, hiddenSize)
-					// Print normOut token 0 and token 1 values
-					if seqLen > 1 && layerIdx == 0 {
-						b.backend.Sync()
-						b.debugBlockTensorAtOffset("L0 normOut[0] before Wv", normOutPtr, 0, 4)
-						b.debugBlockTensorAtOffset("L0 normOut[1] before Wv", normOutPtr, hiddenSize, 4)
-					}
+		profileOp("Wqkv", func() {
+			if !b.Wqkv.DevicePtr().IsNil() {
+				qkvDim := b.Wqkv.Shape().Dims()[0]
+				b.matMulTransposedWithBias(normOutPtr, b.Wqkv, b.WqkvBias, qPtr, seqLen, qkvDim, hiddenSize)
+			} else {
+				if !b.Wq.DevicePtr().IsNil() {
+					qDim := b.Wq.Shape().Dims()[0]
+					b.matMulTransposedWithBias(normOutPtr, b.Wq, b.WqBias, qPtr, seqLen, qDim, hiddenSize)
 				}
-				// Debug: print pointer addresses and force sync to verify result
-				if debugThisLayer && seqLen > 1 && layerIdx == 0 {
-					fmt.Printf("[DEBUG] L0 Wv matmul: normOutPtr=%#x, WvPtr=%#x, vPtr=%#x\n",
-						normOutPtr.Addr(), b.Wv.DevicePtr().Addr(), vPtr.Addr())
-					// Print first 4 elements of Wv weight (first row)
-					b.debugBlockTensor("L0 Wv weights row0", b.Wv.DevicePtr(), 4)
-					// Print Wv bias
-					if !b.WvBias.DevicePtr().IsNil() {
-						b.debugBlockTensor("L0 WvBias", b.WvBias.DevicePtr(), 4)
-					} else {
-						fmt.Println("[DEBUG] L0 WvBias is nil")
-					}
-					// Force sync before matmul to ensure input is valid
-					b.backend.Sync()
+				if !b.Wk.DevicePtr().IsNil() {
+					kDim := b.Wk.Shape().Dims()[0]
+					b.matMulTransposedWithBias(normOutPtr, b.Wk, b.WkBias, kPtr, seqLen, kDim, hiddenSize)
 				}
-				b.matMulTransposedWithBias(normOutPtr, b.Wv, b.WvBias, vPtr, seqLen, vDim, hiddenSize)
-				// Force sync after matmul
-				if debugThisLayer && seqLen > 1 && layerIdx == 0 {
-					b.backend.Sync()
-				}
-				// Debug: print V output
-				if debugThisLayer && seqLen > 1 && layerIdx == 0 {
-					b.backend.Sync()
-					b.debugBlockTensorAtOffset("L0 V[0] after Wv", vPtr, 0, 4)
-					b.debugBlockTensorAtOffset("L0 V[1] after Wv", vPtr, numKVHeads*headDim, 4)
+				if !b.Wv.DevicePtr().IsNil() {
+					vDim := b.Wv.Shape().Dims()[0]
+					b.matMulTransposedWithBias(normOutPtr, b.Wv, b.WvBias, vPtr, seqLen, vDim, hiddenSize)
 				}
 			}
 		})

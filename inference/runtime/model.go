@@ -227,7 +227,7 @@ func (m *ModelRuntime) outputHeadMatMul(statePtr, logitsPtr tensor.DevicePtr, ba
 			})
 
 			// For batch operations, process one position at a time
-			if batchSize > 1 && (profile == tensor.Q6_K || profile == tensor.Q4_0 || profile == tensor.Q4_K) {
+			if batchSize > 1 && (profile == tensor.Q6_K || profile == tensor.Q4_0 || profile == tensor.Q4_K || profile == tensor.Q5_K) {
 				stateRowBytes := uintptr(hiddenSize * 4)
 				logitsRowBytes := uintptr(vocabSize * 4)
 
@@ -238,6 +238,8 @@ func (m *ModelRuntime) outputHeadMatMul(statePtr, logitsPtr tensor.DevicePtr, ba
 					switch profile {
 					case tensor.Q6_K:
 						quantBackend.MatMulQ6_K(rowStatePtr, m.OutputHead.DevicePtr(), rowLogitsPtr, 1, vocabSize, hiddenSize)
+					case tensor.Q5_K:
+						quantBackend.MatMulQ5_K(rowStatePtr, m.OutputHead.DevicePtr(), rowLogitsPtr, 1, vocabSize, hiddenSize)
 					case tensor.Q4_0:
 						quantBackend.MatMulQ4_0(rowStatePtr, m.OutputHead.DevicePtr(), rowLogitsPtr, 1, vocabSize, hiddenSize)
 					case tensor.Q4_K:
@@ -251,6 +253,9 @@ func (m *ModelRuntime) outputHeadMatMul(statePtr, logitsPtr tensor.DevicePtr, ba
 			switch profile {
 			case tensor.Q6_K:
 				quantBackend.MatMulQ6_K(statePtr, m.OutputHead.DevicePtr(), logitsPtr, batchSize, vocabSize, hiddenSize)
+				return
+			case tensor.Q5_K:
+				quantBackend.MatMulQ5_K(statePtr, m.OutputHead.DevicePtr(), logitsPtr, batchSize, vocabSize, hiddenSize)
 				return
 			case tensor.Q4_0:
 				quantBackend.MatMulQ4_0(statePtr, m.OutputHead.DevicePtr(), logitsPtr, batchSize, vocabSize, hiddenSize)
@@ -291,6 +296,10 @@ func (m *ModelRuntime) GetOutputHeadWeightsF32() []float32 {
 			// Q4_K: 144 bytes per 256 elements
 			numBlocks := (numElements + 255) / 256
 			dataSize = numBlocks * 144
+		case tensor.Q5_K:
+			// Q5_K: 176 bytes per 256 elements
+			numBlocks := (numElements + 255) / 256
+			dataSize = numBlocks * 176
 		case tensor.Q4_0:
 			// Q4_0: 18 bytes per 32 elements
 			numBlocks := (numElements + 31) / 32
@@ -316,6 +325,8 @@ func (m *ModelRuntime) GetOutputHeadWeightsF32() []float32 {
 			tensorType = gguf.TensorTypeQ6_K
 		case tensor.Q4_K:
 			tensorType = gguf.TensorTypeQ4_K
+		case tensor.Q5_K:
+			tensorType = gguf.TensorTypeQ5_K
 		case tensor.Q4_0:
 			tensorType = gguf.TensorTypeQ4_0
 		default:
