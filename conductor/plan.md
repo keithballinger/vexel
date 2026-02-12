@@ -4,7 +4,7 @@ This plan tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: PagedAttention Support: Implement paging lookup tables in the KV cache.**
+- [x] **Track: PagedAttention Support: Implement paging lookup tables in the KV cache.**
 *Link: [./tracks/kv_cache_paged_20260211/](./tracks/kv_cache_paged_20260211/)*
 
 - [ ] **Track: Fused MLP Kernels: Implement fused W1/W3 projection kernel for MLP block.**

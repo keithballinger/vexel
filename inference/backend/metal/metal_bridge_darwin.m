@@ -2884,6 +2884,78 @@ kernel void scatter_kv_f32_to_f16(
     dst[dstOffset] = half(src[gid]);
 }
 
+// Reshape KV cache for paged attention
+// Copies data from src [numTokens, numKVHeads, headDim] to paged blocks.
+// blockIndices: [numTokens] int32, physical block index for each token
+// blockOffsets: [numTokens] int32, token index within the block for each token
+// dstBase: Base pointer to the block pool
+// blockSize: number of tokens per block
+// Layout of one block: K [blockSize, numKVHeads, headDim], then V [blockSize, numKVHeads, headDim]
+// Total block size in elements: 2 * blockSize * numKVHeads * headDim
+kernel void reshape_paged_kv_f32(
+    device const float* src [[buffer(0)]],      // Input: [newTokens, numKVHeads, headDim] (K then V? No, usually interleaved or separate. Let's assume src is K then V concatenated? No, usually src is [numTokens, 2, numKVHeads, headDim] or we launch twice? Let's assume src contains K only for now, and we call it twice for V?)
+                                                // Actually, standard is to pass K and V src pointers separately? Or src has K and V?
+                                                // Let's look at `AppendKV`: it takes kPtr and vPtr.
+                                                // So we should have `reshape_paged_kv_f32` take `src` and write to `dstBase` which is EITHER K or V part of the block?
+                                                // Block layout: K data... V data...
+                                                // If we call this for K, we write to K part. If for V, we write to V part.
+                                                // So we need a `dstOffsetBytes` or similar?
+                                                // Let's assume `src` is [newTokens, numKVHeads, headDim].
+                                                // `dstBase` is the start of the block pool.
+                                                // We need to know if we are writing K or V.
+                                                // Let's add `isV` flag or `dstBlockOffset`?
+                                                // Better: `dstBase` is adjusted by caller to point to start of K or V section in the pool?
+                                                // No, blocks are interleaved. Block 0 [K...V...], Block 1 [K...V...]
+                                                // So `dstBase` is start of pool.
+                                                // We need `isValue` boolean?
+    device float* dstBase [[buffer(1)]],        // Base of block pool
+    device const int* blockIndices [[buffer(2)]], // [newTokens]
+    device const int* blockOffsets [[buffer(3)]], // [newTokens]
+    constant int& newTokens [[buffer(4)]],
+    constant int& numKVHeads [[buffer(5)]],
+    constant int& headDim [[buffer(6)]],
+    constant int& blockSize [[buffer(7)]],
+    constant int& isValue [[buffer(8)]],        // 0 for K, 1 for V
+    uint gid [[thread_position_in_grid]]
+) {
+    // Total threads: newTokens * numKVHeads * headDim
+    int totalElements = newTokens * numKVHeads * headDim;
+    if (gid >= (uint)totalElements) return;
+
+    // Decode source indices
+    int srcHeadStride = numKVHeads * headDim;
+    int t = gid / srcHeadStride;
+    int remainder = gid % srcHeadStride;
+    int h = remainder / headDim;
+    int d = remainder % headDim;
+
+    // Get block info for token t
+    int blockIdx = blockIndices[t];
+    int tokenInBlock = blockOffsets[t];
+
+    // Block layout:
+    // K part: [blockSize, numKVHeads, headDim]
+    // V part: [blockSize, numKVHeads, headDim]
+    // Elements per part: blockSize * numKVHeads * headDim
+    int elementsPerBlockPart = blockSize * numKVHeads * headDim;
+    int elementsPerBlock = 2 * elementsPerBlockPart;
+
+    // Calculate destination offset in elements
+    // Block base
+    long dstIdx = (long)blockIdx * elementsPerBlock;
+    
+    // Add V offset if needed
+    if (isValue) {
+        dstIdx += elementsPerBlockPart;
+    }
+
+    // Offset within part: token_idx * (heads * dim) + head * dim + dim_idx
+    int offsetInPart = tokenInBlock * srcHeadStride + h * headDim + d;
+    dstIdx += offsetInPart;
+
+    dstBase[dstIdx] = src[gid];
+}
+
 // =============================================================================
 // Q8_0 Quantization for KV Cache
 // Q8_0 format: 34 bytes per 32 elements (2-byte f16 scale + 32 int8 values)
@@ -5851,6 +5923,41 @@ void metal_scatter_kv_f32_to_f16(void* queuePtr, void* pipelinePtr,
     MTLSize gridSize = MTLSizeMake(totalElements, 1, 1);
     MTLSize tgSize = MTLSizeMake(threadgroupSize, 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
+
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_reshape_paged_kv_f32(void* queuePtr, void* pipelinePtr,
+                                void* src, void* dstBase,
+                                void* pageTable,
+                                void* blockOffsets,
+                                int numTokens, int numKVHeads, int headDim, int blockSize, int isValue) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)src offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)dstBase offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)pageTable offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)blockOffsets offset:0 atIndex:3];
+    [encoder setBytes:&numTokens length:sizeof(numTokens) atIndex:4];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:5];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:6];
+    [encoder setBytes:&blockSize length:sizeof(blockSize) atIndex:7];
+    [encoder setBytes:&isValue length:sizeof(isValue) atIndex:8];
+
+    int totalElements = numTokens * numKVHeads * headDim;
+    int threadgroupSize = 256;
+    int numThreadgroups = (totalElements + threadgroupSize - 1) / threadgroupSize;
+    MTLSize gridSize = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize tgSize = MTLSizeMake(threadgroupSize, 1, 1);
+    
+    // dispatchThreads is preferred for non-uniform grids
+    [encoder dispatchThreads:MTLSizeMake(totalElements, 1, 1) threadsPerThreadgroup:tgSize];
 
     finish_encode(encoder, cmdBuffer, shouldCommit);
 }

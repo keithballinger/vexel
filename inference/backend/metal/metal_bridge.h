@@ -329,6 +329,36 @@ void metal_scatter_kv_f16(void* queue, void* pipeline, void* src, void* dst, int
 void metal_scatter_kv_f32(void* queue, void* pipeline, void* src, void* dst, int newTokens, int numKVHeads, int headDim, int maxSeqLen, int seqPos);
 void metal_scatter_kv_f32_to_f16(void* queue, void* pipeline, void* src, void* dst, int newTokens, int numKVHeads, int headDim, int maxSeqLen, int seqPos);
 
+// Reshape KV cache for paged attention
+// Copies data from src [numTokens, numKVHeads, headDim] to paged blocks.
+// pageTable: [numTokens] mapping each logical token to (blockID, offsetInBlock)
+// But pageTable usually maps block_index -> block_pointer.
+// Let's assume the kernel takes a list of block pointers for the sequence?
+// Or a flat page table buffer?
+// Standard approach (vLLM):
+// Kernel takes `block_table` [max_num_blocks_per_seq] which maps logical_block_idx -> physical_block_idx.
+// We are storing ONE token or a BATCH of tokens.
+// If batch, we need to know which block each token goes to.
+// Let's implement `metal_reshape_paged_kv` which takes:
+// - src: [numTokens, numKVHeads, headDim]
+// - pageTable: [numTokens] int32, where each entry is the physical block index for that token.
+// - blockOffsets: [numTokens] int32, offset within the block for that token.
+// - blocks: The base pointer to the block pool (or we pass array of pointers? Metal prefers one big buffer).
+// Our current `KVCache` allocates one big buffer `basePtr`.
+// So `blocks` is just `basePtr`.
+// `pageTable` could just be `physical_block_index`.
+//
+// void metal_reshape_paged_kv(void* queue, void* pipeline,
+//                             void* src, void* dstBase,
+//                             void* pageTable, // [numTokens] int32: physical block index
+//                             void* blockOffsets, // [numTokens] int32: token index within block
+//                             int numTokens, int numKVHeads, int headDim, int blockSize);
+void metal_reshape_paged_kv_f32(void* queue, void* pipeline,
+                                void* src, void* dstBase,
+                                void* pageTable,
+                                void* blockOffsets,
+                                int numTokens, int numKVHeads, int headDim, int blockSize, int isValue);
+
 
 // =============================================================================
 // Q8_0 Quantization for KV Cache

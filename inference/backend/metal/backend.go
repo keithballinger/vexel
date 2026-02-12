@@ -122,6 +122,7 @@ type Backend struct {
 
 	// Utility pipelines
 	memcpyComputePipeline unsafe.Pointer // Compute-based memory copy (avoids blit encoder)
+	reshapePagedKVPipeline unsafe.Pointer
 }
 
 var (
@@ -242,6 +243,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 
 	// Utility pipelines
 	b.memcpyComputePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("memcpy_compute"))
+	b.reshapePagedKVPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("reshape_paged_kv_f32"))
 
 	return b, nil
 }
@@ -1045,4 +1047,21 @@ func (b *Backend) SDPAQ8_0(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numK
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
 		C.float(scale))
+}
+
+// ReshapePagedKV copies and reshapes data into a paged KV cache.
+func (b *Backend) ReshapePagedKV(src, dstBase, pageTable, blockOffsets tensor.DevicePtr, numTokens, numKVHeads, headDim, blockSize int, isValue bool) {
+	if b.reshapePagedKVPipeline == nil {
+		panic("ReshapePagedKV called but pipeline unavailable")
+	}
+	
+	valFlag := 0
+	if isValue {
+		valFlag = 1
+	}
+
+	C.metal_reshape_paged_kv_f32(b.queue, b.reshapePagedKVPipeline,
+		unsafe.Pointer(src.Addr()), unsafe.Pointer(dstBase.Addr()),
+		unsafe.Pointer(pageTable.Addr()), unsafe.Pointer(blockOffsets.Addr()),
+		C.int(numTokens), C.int(numKVHeads), C.int(headDim), C.int(blockSize), C.int(valFlag))
 }

@@ -56,6 +56,37 @@ func (c *KVCache) FreeBlocks() int {
 	return len(c.freeStack)
 }
 
+// AllocateBlocks reserves blocks for a sequence of a given length.
+func (c *KVCache) AllocateBlocks(numTokens int) ([]int, error) {
+	numRequired := (numTokens + c.config.BlockLen - 1) / c.config.BlockLen
+	if numRequired > len(c.freeStack) {
+		return nil, fmt.Errorf("out of KV cache blocks: requested %d, available %d", numRequired, len(c.freeStack))
+	}
+
+	blocks := make([]int, numRequired)
+	for i := 0; i < numRequired; i++ {
+		// Pop from stack
+		idx := c.freeStack[len(c.freeStack)-1]
+		c.freeStack = c.freeStack[:len(c.freeStack)-1]
+		blocks[i] = idx
+	}
+	return blocks, nil
+}
+
+// FreeBlocksList returns blocks to the free pool.
+func (c *KVCache) FreeBlocksList(blocks []int) {
+	c.freeStack = append(c.freeStack, blocks...)
+}
+
+// GetBlockPtr returns the device pointer to the start of a specific block.
+func (c *KVCache) GetBlockPtr(blockIdx int) tensor.DevicePtr {
+	if blockIdx < 0 || blockIdx >= c.maxBlocks {
+		return tensor.DevicePtr{}
+	}
+	offset := uintptr(blockIdx) * uintptr(c.config.BlockBytes())
+	return tensor.DevicePtrOffset(c.basePtr, offset)
+}
+
 // GetView returns a pointer to the KV storage for a given layer.
 // Simplified: Assumes contiguous for MVP.
 // Returns K and V pointers.

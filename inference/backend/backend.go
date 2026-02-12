@@ -299,3 +299,16 @@ func (t DeviceTensor) NumElements() int {
 func (t DeviceTensor) Bytes() int {
 	return t.NumElements() * t.DType.SizeBytes()
 }
+
+// PagedKVOps is an optional interface for backends that support paged KV cache.
+type PagedKVOps interface {
+	// ReshapePagedKV copies and reshapes data into a paged KV cache.
+	// src: [numTokens, numKVHeads, headDim] (source K or V data)
+	// dstBase: Base pointer to the block pool
+	// pageTable: [numTokens] int32 (physical block indices)
+	// blockOffsets: [numTokens] int32 (token indices within blocks)
+	// numTokens, numKVHeads, headDim: dimensions
+	// blockSize: tokens per block
+	// isValue: true if writing V, false for K
+	ReshapePagedKV(src, dstBase, pageTable, blockOffsets tensor.DevicePtr, numTokens, numKVHeads, headDim, blockSize int, isValue bool)
+}
