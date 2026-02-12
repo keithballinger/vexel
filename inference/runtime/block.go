@@ -220,6 +220,7 @@ type BlockRuntime struct {
 	RoPETheta         float64
 	RoPEDim           int  // Dimensions to rotate (0 = full headDim). For partial RoPE like Phi-2.
 	RoPENeox          bool // NEOX-style RoPE (split pairs: i, i+dim/2) vs LLaMA-style (interleaved: 2i, 2i+1)
+	SlidingWindow     int  // Window size for sliding window attention (0 = infinite/full context)
 	RMSNormEPS        float64
 
 	// Architecture-specific config
@@ -294,6 +295,7 @@ func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 		RoPETheta:         config.RoPETheta,
 		RoPEDim:           config.RoPEDim,  // 0 = full headDim (LLaMA), otherwise partial (Phi-2)
 		RoPENeox:          config.RoPENeox, // NEOX-style (Phi) vs LLaMA-style RoPE
+		SlidingWindow:     config.SlidingWindow,
 		RMSNormEPS:        config.RMSNormEPS,
 		NormType:          config.NormType,
 		MLPType:           config.MLPType,
@@ -661,7 +663,14 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 
 		// Get full K/V sequence from cache for attention
 		currentPos := startPos + seqLen - 1
-		fullK, fullV := pagedCache.GetKVSlice(seqID, layerIdx, currentPos)
+		
+		// Sliding window: determine start position for attention
+		attnStartPos := 0
+		if b.SlidingWindow > 0 && currentPos >= b.SlidingWindow {
+			attnStartPos = currentPos - b.SlidingWindow + 1
+		}
+
+		fullK, fullV := pagedCache.GetKVSlice(seqID, layerIdx, attnStartPos, currentPos)
 		fullSeqLen = len(fullK) / (numKVHeads * headDim)
 
 		// Allocate GPU buffers for full K/V and copy

@@ -93,7 +93,7 @@ func TestPagedKVCacheWithSDPA(t *testing.T) {
 		}
 
 		// Get cached K,V for positions [0, 2]
-		cachedK, cachedV := cache.GetKVSlice(seqID, layer, 2)
+		cachedK, cachedV := cache.GetKVSlice(seqID, layer, 0, 2)
 		kvLen := 3
 
 		cachedK = toHeadMajor(cachedK, kvLen, numKVHeads, headDim)
@@ -154,7 +154,7 @@ func TestPagedKVCacheWithSDPA(t *testing.T) {
 		for i := range q {
 			q[i] = 0.1
 		}
-		cachedK, cachedV := cache2.GetKVSlice(seqID2, layer, 0)
+		cachedK, cachedV := cache2.GetKVSlice(seqID2, layer, 0, 0)
 		cachedK = toHeadMajor(cachedK, 1, numKVHeads, headDim)
 		cachedV = toHeadMajor(cachedV, 1, numKVHeads, headDim)
 		kvHeadStride := 1 * headDim
@@ -182,7 +182,7 @@ func TestPagedKVCacheWithSDPA(t *testing.T) {
 		cache2.StoreKV(seqID2, layer, 1, k, v)
 
 		// Query at position 1 (attends to positions 0 and 1)
-		cachedK, cachedV = cache2.GetKVSlice(seqID2, layer, 1)
+		cachedK, cachedV = cache2.GetKVSlice(seqID2, layer, 0, 1)
 		cachedK = toHeadMajor(cachedK, 2, numKVHeads, headDim)
 		cachedV = toHeadMajor(cachedV, 2, numKVHeads, headDim)
 		kvHeadStride = 2 * headDim
@@ -223,7 +223,7 @@ func TestPagedKVCacheWithSDPA(t *testing.T) {
 			q[i] = 1.0 // Uniform query
 		}
 
-		cachedK, cachedV := cache3.GetKVSlice(seqID3, layer, 4)
+		cachedK, cachedV := cache3.GetKVSlice(seqID3, layer, 0, 4)
 		cachedK = toHeadMajor(cachedK, 5, numKVHeads, headDim)
 		cachedV = toHeadMajor(cachedV, 5, numKVHeads, headDim)
 		kvHeadStride := 5 * headDim

@@ -73,6 +73,7 @@ type ModelConfig struct {
 	RoPEDim          int      // Dimensions to apply RoPE to (0 = full headDim for LLaMA-style)
 	                          // Phi-2 uses partial RoPE where only first 32 dims of 80 are rotated
 	RoPENeox         bool     // Use NEOX-style RoPE (split pairs: i, i+dim/2) vs LLaMA-style (interleaved: 2i, 2i+1)
+	SlidingWindow    int      // Sliding window size for attention (0 = infinite/full context)
 }
 
 // MemoryPlan holds the estimated memory usage breakdown.
@@ -306,5 +307,6 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		ParallelResidual:  parallelResidual,
 		RoPEDim:           g.RoPEDimCount, // 0 = full headDim, otherwise partial RoPE
 		RoPENeox:          ropeNeox,       // NEOX-style (split) vs LLaMA-style (interleaved) RoPE
+		SlidingWindow:     g.SlidingWindow,
 	}
 }

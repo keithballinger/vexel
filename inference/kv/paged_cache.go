@@ -170,10 +170,10 @@ func (c *PagedKVCache) StoreKVBatch(seqID int64, layer, startPos int, k, v []flo
 	return nil
 }
 
-// GetKVSlice returns K and V data for positions [0, endPos] for a layer.
+// GetKVSlice returns K and V data for positions [startPos, endPos] for a layer.
 // Returns slices pointing into block memory (zero-copy when possible).
 // For paged memory, this gathers from multiple blocks.
-func (c *PagedKVCache) GetKVSlice(seqID int64, layer, endPos int) (k, v []float32) {
+func (c *PagedKVCache) GetKVSlice(seqID int64, layer, startPos, endPos int) (k, v []float32) {
 	c.mu.RLock()
 	table := c.sequences[seqID]
 	c.mu.RUnlock()
@@ -182,7 +182,11 @@ func (c *PagedKVCache) GetKVSlice(seqID int64, layer, endPos int) (k, v []float3
 		return nil, nil
 	}
 
-	numTokens := endPos + 1
+	numTokens := endPos - startPos + 1
+	if numTokens <= 0 {
+		return nil, nil
+	}
+
 	kvSize := c.config.NumKVHeads * c.config.HeadDim
 	totalSize := numTokens * kvSize
 
@@ -193,7 +197,8 @@ func (c *PagedKVCache) GetKVSlice(seqID int64, layer, endPos int) (k, v []float3
 	blockSize := c.config.BlockSize
 	blockKVSize := c.config.KVSizeFloats()
 
-	for pos := 0; pos < numTokens; pos++ {
+	for i := 0; i < numTokens; i++ {
+		pos := startPos + i
 		blockIdx := pos / blockSize
 		offsetInBlock := pos % blockSize
 
@@ -209,7 +214,7 @@ func (c *PagedKVCache) GetKVSlice(seqID int64, layer, endPos int) (k, v []float3
 
 		srcKOffset := offsetInBlock * kvSize
 		srcVOffset := blockKVSize + offsetInBlock*kvSize
-		dstOffset := pos * kvSize
+		dstOffset := i * kvSize
 
 		copy(k[dstOffset:dstOffset+kvSize], block.Data[srcKOffset:srcKOffset+kvSize])
 		copy(v[dstOffset:dstOffset+kvSize], block.Data[srcVOffset:srcVOffset+kvSize])
@@ -230,7 +235,7 @@ func (c *PagedKVCache) GetKVSliceForAttention(
 	applyShift func(k []float32, headDim, numKVHeads, numTokens, shift int, theta float32),
 ) (k, v []float32) {
 	// Get raw K,V data
-	k, v = c.GetKVSlice(seqID, layer, endPos)
+	k, v = c.GetKVSlice(seqID, layer, 0, endPos)
 	if k == nil || v == nil {
 		return nil, nil
 	}

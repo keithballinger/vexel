@@ -226,7 +226,7 @@ type File struct {
 	ContextLength   int
 	RoPETheta       float32
 	RoPEDimCount    int // Dimensions for RoPE (0 = full headDim). For partial RoPE like Phi-2.
-
+	SlidingWindow   int // Sliding window size
 	file *os.File // Underlying file for mmap access
 }
 
@@ -530,6 +530,9 @@ func (f *File) extractModelConfig() {
 	if v, ok := f.Metadata[prefix+"rope.dimension_count"]; ok {
 		f.RoPEDimCount = int(v.AsUint32())
 	}
+	if v, ok := f.Metadata[prefix+"attention.sliding_window"]; ok {
+		f.SlidingWindow = int(v.AsUint32())
+	}
 
 	// Vocab size from tokenizer
 	if v, ok := f.Metadata["tokenizer.ggml.tokens"]; ok && v.Type == MetaTypeArray {
@@ -603,6 +606,7 @@ type ModelConfigValues struct {
 	ContextLength    int
 	RoPETheta        float32
 	RoPEDimCount     int // Dimensions for RoPE (0 = full headDim)
+	SlidingWindow    int // Sliding window size
 }
 
 // GetModelConfig returns the extracted model configuration.
@@ -618,5 +622,6 @@ func (f *File) GetModelConfig() ModelConfigValues {
 		ContextLength:    f.ContextLength,
 		RoPETheta:        f.RoPETheta,
 		RoPEDimCount:     f.RoPEDimCount,
+		SlidingWindow:    f.SlidingWindow,
 	}
 }

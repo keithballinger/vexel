@@ -551,86 +551,104 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 
 func (m *ModelRuntime) mapTensor(name string, t tensor.Tensor) {
 	// Global
-	if name == "model.embed_tokens.weight" {
+	if name == "model.embed_tokens.weight" || name == "token_embd.weight" {
 		m.Embedding = t
 		return
 	}
-	if name == "model.norm.weight" {
+	if name == "model.norm.weight" || name == "output_norm.weight" {
 		m.FinalNorm = t
 		return
 	}
-	if name == "model.norm.bias" {
+	if name == "model.norm.bias" || name == "output_norm.bias" {
 		m.FinalNormBias = t
 		return
 	}
-	if name == "lm_head.weight" {
+	if name == "lm_head.weight" || name == "output.weight" {
 		m.OutputHead = t
 		return
 	}
 
-	// Layers: model.layers.{i}.X
+	// Layers: model.layers.{i}.X or blk.{i}.X
+	var idx int
+	var suffix string
+
 	if strings.HasPrefix(name, "model.layers.") {
 		parts := strings.Split(name, ".")
 		// parts[2] is index
-		idx, err := strconv.Atoi(parts[2])
+		var err error
+		idx, err = strconv.Atoi(parts[2])
 		if err != nil || idx >= len(m.layers) {
 			return
 		}
-
-		layer := m.layers[idx]
-		suffix := strings.Join(parts[3:], ".")
-
-		switch suffix {
-		// LLaMA-style separate Q/K/V projections
-		case "self_attn.q_proj.weight":
-			layer.Wq = t
-		case "self_attn.k_proj.weight":
-			layer.Wk = t
-		case "self_attn.v_proj.weight":
-			layer.Wv = t
-
-		// Phi-style combined QKV projection (needs splitting)
-		case "self_attn.qkv_proj.weight":
-			layer.Wqkv = t
-			m.splitQKVWeight(layer, t)
-		case "self_attn.qkv_proj.bias":
-			layer.WqkvBias = t
-			m.splitQKVBias(layer, t)
-
-		// Output projection
-		case "self_attn.o_proj.weight":
-			layer.Wo = t
-		case "self_attn.o_proj.bias":
-			layer.WoBias = t
-
-		// LLaMA-style MLP (SwiGLU)
-		case "mlp.gate_proj.weight":
-			layer.W1 = t
-		case "mlp.up_proj.weight":
-			layer.W3 = t
-		case "mlp.down_proj.weight":
-			layer.W2 = t
-
-		// Phi-style MLP (GELU)
-		case "mlp.fc1.weight":
-			layer.W1 = t
-		case "mlp.fc1.bias":
-			layer.W1Bias = t
-		case "mlp.fc2.weight":
-			layer.W2 = t
-		case "mlp.fc2.bias":
-			layer.W2Bias = t
-
-		// Normalization layers
-		case "input_layernorm.weight":
-			layer.AttnNorm = t
-		case "input_layernorm.bias":
-			layer.AttnNormBias = t
-		case "post_attention_layernorm.weight":
-			layer.FFNNorm = t
-		case "post_attention_layernorm.bias":
-			layer.FFNNormBias = t
+		suffix = strings.Join(parts[3:], ".")
+	} else if strings.HasPrefix(name, "blk.") {
+		parts := strings.Split(name, ".")
+		// parts[1] is index
+		var err error
+		idx, err = strconv.Atoi(parts[1])
+		if err != nil || idx >= len(m.layers) {
+			return
 		}
+		suffix = strings.Join(parts[2:], ".")
+	} else {
+		return
+	}
+
+	layer := m.layers[idx]
+
+	switch suffix {
+	// LLaMA-style separate Q/K/V projections
+	case "self_attn.q_proj.weight":
+		layer.Wq = t
+	case "self_attn.k_proj.weight":
+		layer.Wk = t
+	case "self_attn.v_proj.weight":
+		layer.Wv = t
+
+	// Phi-style combined QKV projection (needs splitting)
+	// Also handling Phi-2 legacy names
+	case "self_attn.qkv_proj.weight", "attn_qkv.weight":
+		layer.Wqkv = t
+		m.splitQKVWeight(layer, t)
+	case "self_attn.qkv_proj.bias", "attn_qkv.bias":
+		layer.WqkvBias = t
+		m.splitQKVBias(layer, t)
+
+	// Output projection
+	case "self_attn.o_proj.weight", "attn_output.weight":
+		layer.Wo = t
+	case "self_attn.o_proj.bias", "attn_output.bias":
+		layer.WoBias = t
+
+	// LLaMA-style MLP (SwiGLU)
+	case "mlp.gate_proj.weight":
+		layer.W1 = t
+	case "mlp.up_proj.weight":
+		layer.W3 = t
+	case "mlp.down_proj.weight":
+		layer.W2 = t
+
+	// Phi-style MLP (GELU)
+	// fc1 is up/gate combined (or just up/gate depending on impl)
+	// For Phi-2: fc1 is "ffn_up", fc2 is "ffn_down"
+	case "mlp.fc1.weight", "ffn_up.weight":
+		layer.W1 = t
+	case "mlp.fc1.bias", "ffn_up.bias":
+		layer.W1Bias = t
+	case "mlp.fc2.weight", "ffn_down.weight":
+		layer.W2 = t
+	case "mlp.fc2.bias", "ffn_down.bias":
+		layer.W2Bias = t
+
+	// Normalization layers
+	case "input_layernorm.weight", "attn_norm.weight":
+		layer.AttnNorm = t
+	case "input_layernorm.bias", "attn_norm.bias":
+		layer.AttnNormBias = t
+	case "post_attention_layernorm.weight", "ffn_norm.weight":
+		layer.FFNNorm = t
+	case "post_attention_layernorm.bias", "ffn_norm.bias":
+		layer.FFNNormBias = t
 	}
 }
 
