@@ -162,11 +162,8 @@ func (sd *SpeculativeDecoder) VerifyDraftTokens(
 	copy(verifyTokens[1:], draftTokens)
 
 	// Run target model on all tokens at once
-	cache := sd.targetModel.GPUKVCache()
-	if cache != nil {
-		cache.Reset() // TODO: Handle incremental KV cache properly
-	}
-
+	// No reset needed - we append to the existing cache context
+	
 	logits, err := sd.targetModel.DecodeWithGPUKV(verifyTokens, startPos)
 	if err != nil {
 		return 0, 0, nil, err
