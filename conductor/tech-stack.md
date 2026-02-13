@@ -4,6 +4,8 @@
 - **Go:** The primary language for the inference engine's control plane, API bindings, and the performance harness.
 - **Metal:** Used for high-performance GPU-accelerated LLM kernels on Apple Silicon.
 - **Fused Kernels:** Optimized Metal compute kernels combining multiple operations (e.g., MLP projection + activation) to reduce memory bandwidth.
+- **Async Scheduling:** Native Go inference scheduler for managing multiple concurrent requests and continuous batching.
+- **Real-time Streaming:** SSE and gRPC streaming support for low-latency token generation.
 
 ## Supported Architectures
 - **LLaMA Family:** Support for RMSNorm and SwiGLU architectures (LLaMA 2/3, Mistral).
