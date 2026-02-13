@@ -4,6 +4,7 @@
 - **Go:** The primary language for the inference engine's control plane, API bindings, and the performance harness.
 - **Metal:** Used for high-performance GPU-accelerated LLM kernels on Apple Silicon.
 - **Fused Kernels:** Optimized Metal compute kernels combining multiple operations (e.g., MLP projection + activation) to reduce memory bandwidth.
+- **Client Library:** Native Go client (`vexel/client`) for simplified interaction with the inference server.
 - **Async Scheduling:** Native Go inference scheduler for managing multiple concurrent requests and continuous batching.
 - **Real-time Streaming:** SSE and gRPC streaming support for low-latency token generation.
 
