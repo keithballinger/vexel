@@ -1,6 +1,6 @@
 # Track Plan: Go Client Library
 
-## Phase 1: Implementation
+## Phase 1: Implementation [checkpoint: f4c2bf0]
 - [x] Task: Create Client Package
     - Initialize `vexel/client` package.
     - Implement `Client` struct and configuration (e.g., baseURL, timeout).
@@ -9,7 +9,7 @@
 - [x] Task: Stream Method
     - Implement `Stream(ctx, prompt, options)` for streaming token responses via SSE.
 
-## Phase 2: Verification
+## Phase 2: Verification [checkpoint: f4c2bf0]
 - [x] Task: Unit Tests
     - Write unit tests for `Client` methods, mocking the server responses.
 - [x] Task: Integration Tests
