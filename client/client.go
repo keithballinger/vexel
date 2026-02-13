@@ -1,0 +1,168 @@
+package client
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// Config defines the configuration for the Vexel client.
+type Config struct {
+	BaseURL string
+	Timeout time.Duration
+}
+
+// Client is a high-level Go client for Vexel inference.
+type Client struct {
+	baseURL    string
+	timeout    time.Duration
+	httpClient *http.Client
+}
+
+// New creates a new Vexel client with the given configuration.
+func New(cfg Config) *Client {
+	if cfg.BaseURL == "" {
+		cfg.BaseURL = "http://localhost:8080"
+	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = 30 * time.Second
+	}
+
+	return &Client{
+		baseURL: cfg.BaseURL,
+		timeout: cfg.Timeout,
+		httpClient: &http.Client{
+			// Timeout: cfg.Timeout, // Don't set timeout on client for streaming
+		},
+	}
+}
+
+// BaseURL returns the client's base URL.
+func (c *Client) BaseURL() string {
+	return c.baseURL
+}
+
+// Timeout returns the client's timeout.
+func (c *Client) Timeout() time.Duration {
+	return c.timeout
+}
+
+// GenerateOptions defines options for text generation.
+type GenerateOptions struct {
+	Temperature float32
+	MaxTokens   int
+}
+
+// Generate performs a simple text completion request.
+func (c *Client) Generate(ctx context.Context, prompt string, opts *GenerateOptions) (string, error) {
+	reqBody := map[string]interface{}{
+		"prompt": prompt,
+	}
+	if opts != nil {
+		if opts.Temperature != 0 {
+			reqBody["temperature"] = opts.Temperature
+		}
+		if opts.MaxTokens != 0 {
+			reqBody["max_tokens"] = opts.MaxTokens
+		}
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/generate", c.baseURL)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Create a local client with timeout for non-streaming
+	client := &http.Client{Timeout: c.timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("server returned status %d", resp.StatusCode)
+	}
+
+	var respData struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&respData); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return respData.Text, nil
+}
+
+// Stream performs a streaming text generation request.
+func (c *Client) Stream(ctx context.Context, prompt string, opts *GenerateOptions) (<-chan string, error) {
+	reqBody := map[string]interface{}{
+		"prompt": prompt,
+	}
+	if opts != nil {
+		if opts.Temperature != 0 {
+			reqBody["temperature"] = opts.Temperature
+		}
+		if opts.MaxTokens != 0 {
+			reqBody["max_tokens"] = opts.MaxTokens
+		}
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/stream", c.baseURL)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("server returned status %d", resp.StatusCode)
+	}
+
+	tokenChan := make(chan string, 100)
+
+	go func() {
+		defer resp.Body.Close()
+		defer close(tokenChan)
+
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+				var tokenData struct {
+					Token string `json:"token"`
+				}
+				if err := json.Unmarshal([]byte(data), &tokenData); err == nil {
+					tokenChan <- tokenData.Token
+				}
+			}
+		}
+	}()
+
+	return tokenChan, nil
+}
