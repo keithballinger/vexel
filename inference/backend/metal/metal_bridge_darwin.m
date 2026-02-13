@@ -2300,6 +2300,120 @@ kernel void matvec_q4_0_fused_rmsnorm_f16_out(
     }
 }
 
+// Fused MLP Kernel: Gate(x) * Up(x) -> SiLU(x @ W1) * (x @ W3)
+// Weights are Q4_0. Only for decode (seqLen=1).
+// This runs TWO matvecs in parallel (interleaved) and fuses the SiLU/Mul.
+// W1: [Intermediate, Hidden], W3: [Intermediate, Hidden]
+// Output: [Intermediate]
+kernel void matvec_q4_0_fused_mlp_f32(
+    device const float* x [[buffer(0)]],      // [Hidden] input
+    device const uchar* W1 [[buffer(1)]],     // [Inter, Hidden] Q4_0 Gate
+    device const uchar* W3 [[buffer(2)]],     // [Inter, Hidden] Q4_0 Up
+    device float* out [[buffer(3)]],          // [Inter] output
+    constant int& N [[buffer(4)]],            // Intermediate size
+    constant int& K [[buffer(5)]],            // Hidden size
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    // Each threadgroup handles 32 output elements (rows of W1/W3)
+    // 4 outputs per simdgroup (8 simdgroups = 32 outputs)
+    // Similar logic to matvec_q4_0_optimized_f32 but computing TWO values per row
+    
+    int base_output = gid * 32 + simd_group * 4;
+    
+    // Accumulators for W1 (Gate) and W3 (Up)
+    float sumGate0 = 0.0f, sumGate1 = 0.0f, sumGate2 = 0.0f, sumGate3 = 0.0f;
+    float sumUp0 = 0.0f, sumUp1 = 0.0f, sumUp2 = 0.0f, sumUp3 = 0.0f;
+    
+    int numBlocks = (K + 32 - 1) / 32; // Q4_0 blocks (32 elements)
+    
+    // W1 rows
+    device const uchar* w1_row0 = (base_output + 0 < N) ? W1 + (base_output + 0) * numBlocks * 18 : nullptr;
+    device const uchar* w1_row1 = (base_output + 1 < N) ? W1 + (base_output + 1) * numBlocks * 18 : nullptr;
+    device const uchar* w1_row2 = (base_output + 2 < N) ? W1 + (base_output + 2) * numBlocks * 18 : nullptr;
+    device const uchar* w1_row3 = (base_output + 3 < N) ? W1 + (base_output + 3) * numBlocks * 18 : nullptr;
+
+    // W3 rows
+    device const uchar* w3_row0 = (base_output + 0 < N) ? W3 + (base_output + 0) * numBlocks * 18 : nullptr;
+    device const uchar* w3_row1 = (base_output + 1 < N) ? W3 + (base_output + 1) * numBlocks * 18 : nullptr;
+    device const uchar* w3_row2 = (base_output + 2 < N) ? W3 + (base_output + 2) * numBlocks * 18 : nullptr;
+    device const uchar* w3_row3 = (base_output + 3 < N) ? W3 + (base_output + 3) * numBlocks * 18 : nullptr;
+
+    // Iterate over K (hidden dim)
+    for (int block = simd_lane; block < numBlocks; block += 32) {
+        int base_k = block * 32;
+        if (base_k >= K) break; // Should be guarded by block count anyway
+
+        // Load 32 activations (FP32)
+        device const float4* x_ptr = (device const float4*)(x + base_k);
+        float4 x0 = x_ptr[0], x1 = x_ptr[1], x2 = x_ptr[2], x3 = x_ptr[3];
+        float4 x4 = x_ptr[4], x5 = x_ptr[5], x6 = x_ptr[6], x7 = x_ptr[7];
+
+        // Process W1 (Gate)
+        #define PROCESS_ROW(row_ptr, sum_var) \
+        if (row_ptr) { \
+            device const uchar* blockPtr = row_ptr + block * 18; \
+            float scale = as_type<half>(*((device const ushort*)blockPtr)); \
+            device const uchar* qs = blockPtr + 2; \
+            /* Dequantize 32 nibbles */ \
+            float4 q_lo_0 = float4(qs[0] & 0xF, qs[1] & 0xF, qs[2] & 0xF, qs[3] & 0xF) - 8.0f; \
+            float4 q_hi_0 = float4(qs[0] >> 4, qs[1] >> 4, qs[2] >> 4, qs[3] >> 4) - 8.0f; \
+            float4 q_lo_1 = float4(qs[4] & 0xF, qs[5] & 0xF, qs[6] & 0xF, qs[7] & 0xF) - 8.0f; \
+            float4 q_hi_1 = float4(qs[4] >> 4, qs[5] >> 4, qs[6] >> 4, qs[7] >> 4) - 8.0f; \
+            float4 q_lo_2 = float4(qs[8] & 0xF, qs[9] & 0xF, qs[10] & 0xF, qs[11] & 0xF) - 8.0f; \
+            float4 q_hi_2 = float4(qs[8] >> 4, qs[9] >> 4, qs[10] >> 4, qs[11] >> 4) - 8.0f; \
+            float4 q_lo_3 = float4(qs[12] & 0xF, qs[13] & 0xF, qs[14] & 0xF, qs[15] & 0xF) - 8.0f; \
+            float4 q_hi_3 = float4(qs[12] >> 4, qs[13] >> 4, qs[14] >> 4, qs[15] >> 4) - 8.0f; \
+            sum_var += scale * (dot(x0, q_lo_0) + dot(x4, q_hi_0) + \
+                                dot(x1, q_lo_1) + dot(x5, q_hi_1) + \
+                                dot(x2, q_lo_2) + dot(x6, q_hi_2) + \
+                                dot(x3, q_lo_3) + dot(x7, q_hi_3)); \
+        }
+
+        PROCESS_ROW(w1_row0, sumGate0);
+        PROCESS_ROW(w1_row1, sumGate1);
+        PROCESS_ROW(w1_row2, sumGate2);
+        PROCESS_ROW(w1_row3, sumGate3);
+
+        // Process W3 (Up)
+        PROCESS_ROW(w3_row0, sumUp0);
+        PROCESS_ROW(w3_row1, sumUp1);
+        PROCESS_ROW(w3_row2, sumUp2);
+        PROCESS_ROW(w3_row3, sumUp3);
+        
+        #undef PROCESS_ROW
+    }
+
+    // Reduce
+    sumGate0 = simd_sum(sumGate0); sumUp0 = simd_sum(sumUp0);
+    sumGate1 = simd_sum(sumGate1); sumUp1 = simd_sum(sumUp1);
+    sumGate2 = simd_sum(sumGate2); sumUp2 = simd_sum(sumUp2);
+    sumGate3 = simd_sum(sumGate3); sumUp3 = simd_sum(sumUp3);
+
+    // Apply SiLU and Multiply: out = (x * sigmoid(x)) * y
+    // SiLU(g) * u
+    if (simd_lane == 0) {
+        if (base_output + 0 < N) {
+            float sigmoid = 1.0f / (1.0f + exp(-sumGate0));
+            out[base_output + 0] = (sumGate0 * sigmoid) * sumUp0;
+        }
+        if (base_output + 1 < N) {
+            float sigmoid = 1.0f / (1.0f + exp(-sumGate1));
+            out[base_output + 1] = (sumGate1 * sigmoid) * sumUp1;
+        }
+        if (base_output + 2 < N) {
+            float sigmoid = 1.0f / (1.0f + exp(-sumGate2));
+            out[base_output + 2] = (sumGate2 * sigmoid) * sumUp2;
+        }
+        if (base_output + 3 < N) {
+            float sigmoid = 1.0f / (1.0f + exp(-sumGate3));
+            out[base_output + 3] = (sumGate3 * sigmoid) * sumUp3;
+        }
+    }
+}
+
 // =============================================================================
 // FUSED ADD + RMSNORM KERNEL
 // =============================================================================
@@ -6530,4 +6644,32 @@ void metal_scaled_dot_product_attention(void* queuePtr,
                                         int batchSize, int numHeads, int seqLen, int headDim,
                                         float scale, int causal) {
     // Deprecated - use metal_sdpa_decode_f32 or metal_sdpa_prefill_f32 instead
+}
+
+void metal_matvec_q4_0_fused_mlp_f32(void* queuePtr, void* pipelinePtr,
+                                     void* x, void* W1, void* W3, void* out,
+                                     int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)x offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)W1 offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)W3 offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBytes:&N length:sizeof(N) atIndex:4];
+    [encoder setBytes:&K length:sizeof(K) atIndex:5];
+
+    // 32 outputs per threadgroup (8 simdgroups * 4 per group)
+    int outputsPerTG = 32;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
 }

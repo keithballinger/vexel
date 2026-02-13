@@ -61,6 +61,7 @@ type Backend struct {
 	matvecQ4OptimizedPipeline   unsafe.Pointer
 	matvecQ4FusedRMSNormPipeline    unsafe.Pointer
 	matvecQ4FusedRMSNormF16Pipeline unsafe.Pointer // FP16 output version
+	matvecQ4FusedMLPPipeline        unsafe.Pointer
 	softmaxPipeline                 unsafe.Pointer
 	rmsnormPipeline                 unsafe.Pointer
 	layernormPipeline               unsafe.Pointer
@@ -183,6 +184,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matvecQ4OptimizedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_optimized_f32"))
 	b.matvecQ4FusedRMSNormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_fused_rmsnorm_f32"))
 	b.matvecQ4FusedRMSNormF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_fused_rmsnorm_f16_out"))
+	b.matvecQ4FusedMLPPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_fused_mlp_f32"))
 	b.softmaxPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("softmax_f32"))
 	b.rmsnormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_f32"))
 	b.layernormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("layernorm_f32"))
@@ -651,6 +653,21 @@ func (b *Backend) MatMulQ4_0_FusedRMSNormF16(x, normWeight, wMat, out tensor.Dev
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(normWeight.Addr()),
 		unsafe.Pointer(wMat.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(n), C.int(k), C.float(eps))
+}
+
+// MatMulQ4_0_FusedMLP performs fused MLP: SiLU(x @ W1) * (x @ W3).
+// Only supports M=1 (decode) currently.
+func (b *Backend) MatMulQ4_0_FusedMLP(x, w1, w3, out tensor.DevicePtr, m, n, k int) {
+	if m != 1 {
+		panic("MatMulQ4_0_FusedMLP only supports M=1")
+	}
+	if b.matvecQ4FusedMLPPipeline == nil {
+		panic("MatMulQ4_0_FusedMLP called but pipeline unavailable")
+	}
+	C.metal_matvec_q4_0_fused_mlp_f32(b.queue, b.matvecQ4FusedMLPPipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(w1.Addr()),
+		unsafe.Pointer(w3.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(n), C.int(k))
 }
 
 // RMSNorm performs RMS normalization.

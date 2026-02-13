@@ -113,6 +113,12 @@ type FusedOps interface {
 	// This eliminates FP32->FP16 conversion for QKV projections when using FP16 KV cache.
 	// x: [1, K] in FP32, normWeight: [K], wMat: [N, K] Q4_0, out: [1, N] in FP16
 	MatMulQ4_0_FusedRMSNormF16(x, normWeight, wMat, out tensor.DevicePtr, m, n, k int, eps float32)
+
+	// MatMulQ4_0_FusedMLP performs fused MLP: SiLU(x @ W1) * (x @ W3).
+	// x: [1, K] (or [M, K] in future)
+	// w1, w3: [N, K] Q4_0 (Gate, Up)
+	// out: [1, N]
+	MatMulQ4_0_FusedMLP(x, w1, w3, out tensor.DevicePtr, m, n, k int)
 }
 
 // Q8_0Ops is an optional interface for backends that support Q8_0 quantized KV cache.
