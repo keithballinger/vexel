@@ -3,7 +3,7 @@
 This file links to all active and completed tracks.
 
 ## Active Tracks
-- [~] **Track: CLI Tool: Transform 'inference/cmd/vexel' into a polished CLI with subcommands.**
+- [x] **Track: CLI Tool: Transform 'inference/cmd/vexel' into a polished CLI with subcommands.**
 *Link: [./tracks/cli_tool_20260212/](./tracks/cli_tool_20260212/)*
 
 ## Pending Tracks
