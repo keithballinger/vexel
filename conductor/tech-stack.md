@@ -12,6 +12,7 @@
 - **Phi Family:** Support for LayerNorm, GELU, and parallel residual architectures (Phi-2, Phi-3).
 
 ## Development & Infrastructure
+- **CLI Tool:** Unified `vexel` binary with subcommands for running models, serving APIs, and benchmarking.
 - **llama.cpp:** Used as the reference implementation for correctness verification and performance benchmarking.
 - **Makefile:** Orchestrates the build process for both the Go components and any native dependencies.
 - **Shell Scripts:** Used for automated performance and correctness regression testing.
