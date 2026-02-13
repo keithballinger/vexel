@@ -1,7 +1,13 @@
 package scheduler
 
+import "fmt"
+
 // SequenceID uniquely identifies a sequence.
 type SequenceID int64
+
+func (id SequenceID) String() string {
+	return fmt.Sprintf("%d", id)
+}
 
 // SequenceState represents the current lifecycle state of a sequence.
 type SequenceState int

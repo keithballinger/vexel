@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 	"vexel/inference/runtime"
 	"vexel/inference/scheduler"
 	"vexel/inference/serve"
@@ -28,6 +29,19 @@ func TestGenerateEndpoint(t *testing.T) {
 	req := httptest.NewRequest("POST", "/generate", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
+
+	// Push token in background
+	go func() {
+		for {
+			seqs := sched.GetSequences()
+			if len(seqs) > 0 {
+				seqs[0].PushToken("Response")
+				seqs[0].Close()
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
 
 	// Handler
 	server.ServeHTTP(w, req)

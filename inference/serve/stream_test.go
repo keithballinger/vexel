@@ -8,11 +8,15 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+	"vexel/inference/runtime"
+	"vexel/inference/scheduler"
 	"vexel/inference/serve"
 )
 
 func TestStreamEndpoint(t *testing.T) {
-	server := serve.NewServer(nil)
+	sched, _ := scheduler.NewScheduler(&runtime.ModelRuntime{}, nil, scheduler.Config{})
+	server := serve.NewServer(sched)
 
 	payload := map[string]string{
 		"prompt": "Hello world",
@@ -22,6 +26,19 @@ func TestStreamEndpoint(t *testing.T) {
 	req := httptest.NewRequest("POST", "/stream", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
+
+	// Push token in background
+	go func() {
+		for {
+			seqs := sched.GetSequences()
+			if len(seqs) > 0 {
+				seqs[0].PushToken("Response")
+				seqs[0].Close()
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
 
 	server.ServeHTTP(w, req)
 

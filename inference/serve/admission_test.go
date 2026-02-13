@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 	"vexel/inference/runtime"
 	"vexel/inference/scheduler"
 	"vexel/inference/serve"
@@ -29,25 +30,36 @@ func TestAdmissionControl(t *testing.T) {
 		return w.Code
 	}
 
-	// 1. Send first request. It should be accepted (200 OK)
-	// Note: Currently handler is mocked to return 200 immediately.
-	// We want to verify that it *registers* with the scheduler.
-	// Since we can't inspect scheduler state easily from outside without helper,
-	// we will rely on integration behavior or add a helper to Scheduler to count sequences.
-	
-	// However, if we implement admission control, maybe we return 503 if full?
-	// But our scheduler is queue-based. It should accept until MaxSequences is hit?
-	
-	// Let's test that the handler actually calls AddSequence.
-	// We can check this by verifying the Scheduler has the sequence after the call.
-	
-	code1 := sendRequest("Request 1")
-	if code1 != http.StatusOK {
-		t.Errorf("Expected first request to succeed, got %d", code1)
+	// 1. Send first request.
+	// Since handleGenerate blocks until close, we run it in a goroutine
+	// so we can check the scheduler state while it's active.
+	respCodeChan := make(chan int, 1)
+	go func() {
+		respCodeChan <- sendRequest("Request 1")
+	}()
+
+	// Wait for sequence to appear in scheduler
+	for i := 0; i < 100; i++ {
+		if sched.SequenceCount() == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
 	}
 
 	// Verify scheduler has 1 sequence
 	if sched.SequenceCount() != 1 {
 		t.Errorf("Expected scheduler to have 1 sequence, got %d", sched.SequenceCount())
+	}
+
+	// Now close the sequence so handleGenerate can finish
+	seqs := sched.GetSequences()
+	if len(seqs) > 0 {
+		seqs[0].PushToken("OK")
+		seqs[0].Close()
+	}
+
+	code1 := <-respCodeChan
+	if code1 != http.StatusOK {
+		t.Errorf("Expected first request to succeed, got %d", code1)
 	}
 }

@@ -1,9 +1,11 @@
 package serve
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 	"vexel/inference/scheduler"
 )
@@ -61,19 +63,23 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mock Streaming loop
-	// TODO: Subscribe to Scheduler updates
-	tokens := []string{"Mock", " ", "streaming", " ", "response", " ", "for: ", req.Prompt}
+	// 1. Create Sequence
+	seqID := scheduler.SequenceID(time.Now().UnixNano())
+	seq := scheduler.NewSequence(seqID, req.Prompt)
 
-	for _, token := range tokens {
-		data := map[string]string{"token": token}
-		buf, _ := json.Marshal(data)
-		
-		fmt.Fprintf(w, "data: %s\n\n", buf)
-		flusher.Flush()
+		// 2. Add to Scheduler
+		s.scheduler.AddSequence(seq)
+		defer s.scheduler.RemoveSequence(seqID)
+	
+		// Stream from Scheduler
+		for token := range seq.TokenChan() {
+			data := map[string]string{"token": token}
+			buf, _ := json.Marshal(data)
+	
+			fmt.Fprintf(w, "data: %s\n\n", buf)
+			flusher.Flush()
+		}
 	}
-}
-
 // handleGenerate handles non-streaming generation requests.
 func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -96,16 +102,33 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	seqID := scheduler.SequenceID(time.Now().UnixNano())
 	seq := scheduler.NewSequence(seqID, req.Prompt)
 	
-	// 2. Add to Scheduler
-	s.scheduler.AddSequence(seq)
+		// 2. Add to Scheduler
+		s.scheduler.AddSequence(seq)
+		defer s.scheduler.RemoveSequence(seqID)
 	
-	// 3. Wait for completion (stubbed: we just return immediately for non-streaming check)
-	// In a real system, we'd wait for a channel inside seq.
-	
-	resp := map[string]string{
-		"text": "Mock response for: " + req.Prompt,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
+			// 3. Wait for completion and collect tokens
+			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+			defer cancel()
+		
+			var tokens []string
+			done := false
+			for !done {
+				select {
+				case token, ok := <-seq.TokenChan():
+					if !ok {
+						done = true
+					} else {
+						tokens = append(tokens, token)
+					}
+				case <-ctx.Done():
+					http.Error(w, "Request timed out", http.StatusRequestTimeout)
+					return
+				}
+			}
+		
+					resp := map[string]string{
+						"text": strings.Join(tokens, ""),
+					}
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(resp)
+			}

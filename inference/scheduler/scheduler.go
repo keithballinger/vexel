@@ -632,6 +632,17 @@ func (s *Scheduler) SequenceCount() int {
 	return len(s.sequences)
 }
 
+// GetSequences returns all active sequences. Used for testing.
+func (s *Scheduler) GetSequences() []*Sequence {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	seqs := make([]*Sequence, 0, len(s.sequences))
+	for _, seq := range s.sequences {
+		seqs = append(seqs, seq)
+	}
+	return seqs
+}
+
 // Metrics returns the current performance metrics.
 func (s *Scheduler) Metrics() SchedulerMetrics {
 	s.mu.RLock()
