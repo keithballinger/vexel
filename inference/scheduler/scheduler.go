@@ -53,6 +53,12 @@ func (m SchedulerMetrics) PrefillTokensPerSecond() float64 {
 }
 
 // Scheduler manages the execution of sequences.
+// It handles:
+//   - Batching of sequences for efficient GPU execution.
+//   - Prefilling of prompt tokens.
+//   - Decoding steps for token generation.
+//   - KV cache management (via PagedKVCache or simple GPU cache).
+//   - Metrics tracking (throughput, latency).
 type Scheduler struct {
 	mu        sync.RWMutex
 	runtime   *runtime.ModelRuntime
@@ -61,9 +67,18 @@ type Scheduler struct {
 	config    Config
 	sequences map[SequenceID]*Sequence
 	metrics   SchedulerMetrics
+	signal    chan struct{} // Event channel to wake up the scheduler loop
 }
 
 // NewScheduler creates a new Scheduler instance.
+//
+// Parameters:
+//   - rt: The initialized model runtime (must not be nil).
+//   - tok: The tokenizer for encoding/decoding text.
+//   - config: Configuration for batch size, limits, and sampling.
+//
+// Returns:
+//   - A new *Scheduler instance, or error if runtime is nil.
 func NewScheduler(rt *runtime.ModelRuntime, tok *tokenizer.Tokenizer, config Config) (*Scheduler, error) {
 	if rt == nil {
 		return nil, fmt.Errorf("runtime cannot be nil")
@@ -78,23 +93,50 @@ func NewScheduler(rt *runtime.ModelRuntime, tok *tokenizer.Tokenizer, config Con
 		sampler:   s,
 		config:    config,
 		sequences: make(map[SequenceID]*Sequence),
+		signal:    make(chan struct{}, 1), // Buffered channel for non-blocking signals
 	}, nil
 }
 
+// wakeUp triggers the scheduler loop to run a step immediately.
+func (s *Scheduler) wakeUp() {
+	select {
+	case s.signal <- struct{}{}:
+	default:
+		// Signal already pending
+	}
+}
+
 // Run starts the scheduler's main loop.
+// It continuously polls for work (sequences in Pending/Decoding/Prefill states) and executes steps.
 // It blocks until the context is canceled or a fatal error occurs.
+//
+// The loop runs a "step" which:
+//  1. Collects ready sequences.
+//  2. Forms a batch up to MaxBatchSize.
+//  3. Runs a decode step (prefill or generate token).
 func (s *Scheduler) Run(ctx context.Context) error {
-	// Simple ticker for now, maybe event-driven later
-	ticker := time.NewTicker(1 * time.Millisecond) // aggressive poll
+	// Ticker for periodic checks (e.g., timeouts, stalled sequences), but main driver is signal
+	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-ticker.C:
+		case <-s.signal:
 			if err := s.step(ctx); err != nil {
 				return err
+			}
+			// If there are still active sequences, signal again to keep processing
+			if s.SequenceCount() > 0 {
+				s.wakeUp()
+			}
+		case <-ticker.C:
+			// Periodic check just in case
+			if s.SequenceCount() > 0 {
+				if err := s.step(ctx); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -126,7 +168,14 @@ func (s *Scheduler) step(ctx context.Context) error {
 
 // collectReady identifies sequences that are eligible for execution.
 func (s *Scheduler) collectReady() []*Sequence {
-	ready := make([]*Sequence, 0)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
+	if len(s.sequences) == 0 {
+		return nil
+	}
+
+	ready := make([]*Sequence, 0, len(s.sequences))
 	for _, seq := range s.sequences {
 		switch seq.State() {
 		case StatePending, StatePrefill, StateDecoding:
@@ -142,6 +191,11 @@ func (s *Scheduler) formBatches(ready []*Sequence) []*Sequence {
 		return nil
 	}
 	
+	// Prioritize: 
+	// 1. Sequences that need prefill (StatePending with prompt)
+	// 2. Decoding sequences
+	
+	// Simple FIFO/Round-robin for now
 	if len(ready) <= s.config.MaxBatchSize {
 		return ready
 	}
@@ -606,25 +660,30 @@ func (s *Scheduler) AddSequence(seq *Sequence) {
 		seq.SetKVSeqID(kvSeqID)
 	}
 
+	s.mu.Lock()
 	s.sequences[seq.ID()] = seq
+	s.mu.Unlock()
+	
+	// Notify scheduler loop
+	s.wakeUp()
 }
 
 // RemoveSequence removes a sequence and cleans up its KV cache.
 func (s *Scheduler) RemoveSequence(id SequenceID) {
+	s.mu.Lock()
 	seq, ok := s.sequences[id]
 	if !ok {
+		s.mu.Unlock()
 		return
 	}
+	delete(s.sequences, id)
+	s.metrics.CompletedSequences++
+	s.mu.Unlock()
 
 	// Clean up KV cache
 	if cache := s.runtime.PagedKVCache(); cache != nil && seq.KVSeqID() != 0 {
 		cache.DeleteSequence(seq.KVSeqID())
 	}
-
-	delete(s.sequences, id)
-	s.mu.Lock()
-	s.metrics.CompletedSequences++
-	s.mu.Unlock()
 }
 
 // SequenceCount returns the number of active sequences.

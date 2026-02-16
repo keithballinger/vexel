@@ -4278,6 +4278,7 @@ kernel void flash_attention_2_f32(
     float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
     // Process K/V in tiles
+    // Process K/V in tiles
     for (int tileStart = 0; tileStart < maxKLen; tileStart += FA2_TILE_KV) {
         int tileEnd = min(tileStart + FA2_TILE_KV, maxKLen);
         int tileSize = tileEnd - tileStart;
@@ -4530,6 +4531,7 @@ kernel void flash_attention_2_f16(
 
         runningSum += tileSum;
         runningMax = newMax;
+        
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 

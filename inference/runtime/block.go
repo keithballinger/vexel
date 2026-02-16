@@ -1090,9 +1090,13 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			// AppendKV uses CopyBufferBatched which integrates with command batching
 			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kF16Ptr, vF16Ptr, tensor.Float16, seqLen)
 		} else if useFP16KVCache {
-			// Use optimized F32->F16 scatter kernel (single dispatch)
-			// No explicit conversion needed
-			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kPtr, vPtr, tensor.Float32, seqLen)
+			// Explicitly convert F32->F16 here so we have dense F16 buffers for SDPAPrefillF16
+			// This is required because SDPAPrefillF16 needs [seqLen, numKVHeads, headDim] in F16
+			b.fp16Ops.ConvertF32ToF16(kPtr, kF16Ptr, kvSize)
+			b.fp16Ops.ConvertF32ToF16(vPtr, vF16Ptr, kvSize)
+			
+			// Use F16 scatter (since we now have F16 source)
+			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kF16Ptr, vF16Ptr, tensor.Float16, seqLen)
 		} else if useQ8KVCache {
 			// Quantize FP32 K/V to Q8_0 before storing in cache
 			b.q8Ops.QuantizeF32ToQ8_0(kPtr, kQ8Ptr, kvSize)
