@@ -36,9 +36,14 @@ adds batched quantized matmul for prefill, and benchmarks accuracy/performance t
     - Added to `Dequantize()` switch for automatic format dispatch.
     - 6 unit tests pass covering zero values, scaling, min offset, and split halves.
     - Metal kernels deferred: Q5_0/Q5_1 rarely used; loader CPU dequant→F32 handles them.
-- [ ] Task: Q8_0 GPU kernel
-    - Add `MatMulQ8_0` Metal kernel (simpler than Q4 — straight int8 with scale).
-    - Q8_0 is used internally for KV cache quantization; a dedicated kernel avoids dequant overhead.
+- [x] Task: Q8_0 GPU kernel
+    - Added `matvec_q8_0_nr2_f32` (M=1) and `matmul_q8_0_batched_f32` (M>1) Metal kernels.
+    - NR2 pattern: 16 outputs per threadgroup, simd_lane striding through 32-element blocks.
+    - Q8_0 format: 34 bytes per 32 elements (f16 scale + 32 int8 values). Simple d*int8 dequant.
+    - Wired into runtime dispatch (`matMulTransposed`) and loader (raw Q8_0 on GPU).
+    - M=1: 55 GFLOPS, M=32: 371 GFLOPS, M=128: 402 GFLOPS at 4096×4096.
+    - All 7 production-size correctness tests pass with max_diff < 0.000006.
+    - Created `q8_0_matmul_test.go` with basic, batched, prefill, and throughput tests.
 - [ ] Task: BF16 support
     - Add `MatMulBF16` Metal kernel leveraging hardware BF16 on M3/M4.
     - Fallback to F16 conversion on M1/M2.
