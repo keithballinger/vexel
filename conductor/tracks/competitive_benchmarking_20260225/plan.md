@@ -53,9 +53,9 @@ Sources:
     - Vexel: blocked by OOM on single-token generation.
 
 ## Phase 3: Batched Throughput Benchmarks
-- [~] Task: Blocked — Vexel OOMs prevent batched benchmarks
-    - Cannot run concurrent request throughput until scratch arena OOM is fixed.
-    - vllm-mlx server tested and available for comparison once Vexel stabilizes.
+- [ ] Task: Unblocked — re-run batched benchmarks after P0 fix
+    - P0 OOM fix landed (2966edd). Vexel can now handle long prompts.
+    - vllm-mlx server tested and available for comparison.
     - Harness (`run_batched.sh`) is ready.
 
 ## Phase 4: Analysis & Reporting [checkpoint: ec60491]
@@ -72,3 +72,18 @@ Sources:
     - Estimated total: 34-50% recovery, closing gap to within 15-20% of llama.cpp.
 - [ ] Task: Update README with competitive positioning
     - Deferred until P0-P2 fixes land and benchmarks can be re-run.
+
+## Phase 5: P0 Fix & Re-benchmark [checkpoint: 2966edd]
+- [x] Task: Fix scratch arena OOM (P0)
+    - Root cause: arena budget formula in initModel did not account for token ID and
+      hidden-state allocations that DecodeWithGPUKV makes from the arena.
+    - Fix: Added TotalArenaBytes(maxBatchSize) to ModelConfig that budgets all 4
+      arena allocations (tokens + hidden state + layer scratch + logits) + 10% headroom.
+    - Updated all 7 arena creation sites (CLI, tests, debug tools).
+    - TDD regression tests confirm old formula deficient, new formula sufficient.
+    - E2E verified: ~70-token prompt with --max-tokens 20 completes successfully.
+- [ ] Task: Re-run single-stream benchmarks (decode, prefill, load time)
+    - Measure impact of P0 fix on all metrics.
+    - Prefill should now work at 128/512 tokens.
+- [ ] Task: Run batched throughput benchmarks (Phase 3)
+    - Now unblocked by P0 fix.
