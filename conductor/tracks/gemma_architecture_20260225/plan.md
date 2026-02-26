@@ -53,10 +53,15 @@ work. The main gaps are GeGLU, architecture detection, and Gemma 2's attention v
     - Architecture detection test verifies gemma2 → HasPostNorms=true.
 
 ## Phase 3: Learnable RoPE & Verification
-- [~] Task: Learnable RoPE scaling
-    - Add `RoPEFreqScales []float32` field to `ModelConfig` for per-dimension learned frequencies.
-    - Parse from GGUF if present (Gemma 2 stores learned inv_freq values).
-    - Modify RoPE Metal kernel to accept frequency array buffer instead of computing from theta.
+- [x] Task: Learnable RoPE scaling
+    - Added `RoPEFreqScales []float32` field to `ModelConfig` for per-dimension learned frequencies.
+    - Added `ScaledRoPEOps` interface to `backend.go` with `RoPEWithFreqs` method.
+    - Implemented `rope_gqa_scaled_f32` Metal kernel (reads freqs from buffer, not theta).
+    - Added CPU backend `RoPEWithFreqs` implementation.
+    - Added Metal C dispatch and Go binding with pipeline initialization.
+    - Added `applyRoPE` helper to block.go — dispatches scaled vs standard based on freq buffer presence.
+    - Added `SetupRoPEFreqs` to ModelRuntime for device-side frequency upload.
+    - GPU kernel tests: 4 subtests (theta equivalence, custom freqs, NEOX, production), maxDiff < 5e-7.
     - Fallback to standard theta-based computation when scales are not provided.
 - [ ] Task: Gemma 2 correctness tests
     - Load Gemma 2 2B and Gemma 2 9B GGUF models.
