@@ -44,7 +44,7 @@ Checkpoint: 786dc4d
     - Implement Medusa head: small MLP that predicts K future tokens from a hidden state.
     - Architecture: `hidden -> Linear(hidden, hidden) -> SiLU -> Linear(hidden, vocab)` per head.
     - Support 2-4 Medusa heads (predicting positions +1, +2, +3, +4).
-- [~] Task: Online training integration
+- [x] Task: Online training integration (e29ba04)
     - Wire MedusaScheduler's ring buffer collection to GPU trainer.
     - After each decode step, store (hidden_state, next_token) pairs.
     - Periodically train Medusa heads on collected pairs (background goroutine).
