@@ -342,6 +342,32 @@ func (c *PagedKVCache) CacheContent(name string, seqID int64) (*CachedFragment, 
 	return c.fragments.CacheContent(name, table.SeqLen(), blocks)
 }
 
+// TruncateSequence rolls back a sequence to newSeqLen tokens.
+// Blocks beyond the new length are freed. If newSeqLen >= current length, this is a no-op.
+// This is used for speculative decoding when draft tokens are rejected.
+func (c *PagedKVCache) TruncateSequence(seqID int64, newSeqLen int) {
+	c.mu.Lock()
+	table := c.sequences[seqID]
+	c.mu.Unlock()
+
+	if table == nil {
+		return
+	}
+
+	if newSeqLen >= table.SeqLen() {
+		return // Nothing to truncate
+	}
+
+	freed := table.TruncateBlocks(newSeqLen, c.config.BlockSize)
+
+	// Free the excess blocks
+	for layer, blockIDs := range freed {
+		for _, blockID := range blockIDs {
+			c.allocator.Free(layer, blockID)
+		}
+	}
+}
+
 // FreeBlocks returns the number of free blocks per layer (uses layer 0 as representative).
 func (c *PagedKVCache) FreeBlocks() int {
 	return c.allocator.FreeCount(0)

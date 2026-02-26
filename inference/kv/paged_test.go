@@ -210,7 +210,7 @@ func TestPagedKVCache(t *testing.T) {
 		}
 
 		// Retrieve
-		gotK, gotV := cache.GetKVSlice(seqID, 0, 0)
+		gotK, gotV := cache.GetKVSlice(seqID, 0, 0, 0)
 		if len(gotK) != kvSize || len(gotV) != kvSize {
 			t.Errorf("expected k,v size %d, got k=%d v=%d", kvSize, len(gotK), len(gotV))
 		}
@@ -252,7 +252,7 @@ func TestPagedKVCache(t *testing.T) {
 		}
 
 		// Retrieve all positions
-		gotK, gotV := cache.GetKVSlice(seqID, 0, 4) // endPos=4 means positions 0-4
+		gotK, gotV := cache.GetKVSlice(seqID, 0, 0, 4) // endPos=4 means positions 0-4
 		expectedSize := 5 * kvSize
 		if len(gotK) != expectedSize {
 			t.Errorf("expected k size %d, got %d", expectedSize, len(gotK))
@@ -294,6 +294,152 @@ func TestPagedKVCache(t *testing.T) {
 		cache.DeleteSequence(seqID)
 		if cache.FreeBlocks() != initialFree {
 			t.Errorf("expected %d free blocks after delete, got %d", initialFree, cache.FreeBlocks())
+		}
+	})
+}
+
+func TestTruncateSequence(t *testing.T) {
+	config := PagedKVConfig{
+		NumLayers:  2,
+		NumKVHeads: 2,
+		HeadDim:    4,
+		BlockSize:  4, // 4 tokens per block
+		MaxBlocks:  20,
+	}
+
+	t.Run("truncate_within_block", func(t *testing.T) {
+		cache := NewPagedKVCache(config)
+		seqID := cache.CreateSequence()
+		kvSize := config.NumKVHeads * config.HeadDim
+
+		// Store 3 tokens (all in first block)
+		for pos := 0; pos < 3; pos++ {
+			k := make([]float32, kvSize)
+			v := make([]float32, kvSize)
+			for i := range k {
+				k[i] = float32(pos)
+			}
+			for layer := 0; layer < config.NumLayers; layer++ {
+				cache.StoreKV(seqID, layer, pos, k, v)
+			}
+		}
+
+		// Truncate to 2 tokens (stays in same block)
+		cache.TruncateSequence(seqID, 2)
+
+		table := cache.GetSequence(seqID)
+		if table.SeqLen() != 2 {
+			t.Errorf("expected seqLen 2, got %d", table.SeqLen())
+		}
+		// Block should still be allocated (partially used)
+		if table.NumBlocks(0) != 1 {
+			t.Errorf("expected 1 block, got %d", table.NumBlocks(0))
+		}
+	})
+
+	t.Run("truncate_frees_excess_blocks", func(t *testing.T) {
+		cache := NewPagedKVCache(config)
+		seqID := cache.CreateSequence()
+		kvSize := config.NumKVHeads * config.HeadDim
+
+		initialFree := cache.FreeBlocks()
+
+		// Store 10 tokens (3 blocks per layer: 4+4+2)
+		for pos := 0; pos < 10; pos++ {
+			k := make([]float32, kvSize)
+			v := make([]float32, kvSize)
+			for layer := 0; layer < config.NumLayers; layer++ {
+				cache.StoreKV(seqID, layer, pos, k, v)
+			}
+		}
+
+		table := cache.GetSequence(seqID)
+		if table.NumBlocks(0) != 3 {
+			t.Fatalf("expected 3 blocks for 10 tokens, got %d", table.NumBlocks(0))
+		}
+
+		// Used 3 blocks per layer * 2 layers = 6 blocks
+		freeAfterStore := cache.FreeBlocks()
+		if freeAfterStore != initialFree-3 {
+			t.Errorf("expected %d free blocks after store, got %d", initialFree-3, freeAfterStore)
+		}
+
+		// Truncate to 3 tokens (only need 1 block per layer)
+		cache.TruncateSequence(seqID, 3)
+
+		if table.SeqLen() != 3 {
+			t.Errorf("expected seqLen 3, got %d", table.SeqLen())
+		}
+		if table.NumBlocks(0) != 1 {
+			t.Errorf("expected 1 block after truncate, got %d", table.NumBlocks(0))
+		}
+
+		// Should have freed 2 blocks per layer
+		freeAfterTruncate := cache.FreeBlocks()
+		if freeAfterTruncate != initialFree-1 {
+			t.Errorf("expected %d free blocks after truncate, got %d", initialFree-1, freeAfterTruncate)
+		}
+	})
+
+	t.Run("truncate_to_zero", func(t *testing.T) {
+		cache := NewPagedKVCache(config)
+		seqID := cache.CreateSequence()
+		kvSize := config.NumKVHeads * config.HeadDim
+
+		initialFree := cache.FreeBlocks()
+
+		// Store 5 tokens
+		for pos := 0; pos < 5; pos++ {
+			k := make([]float32, kvSize)
+			v := make([]float32, kvSize)
+			for layer := 0; layer < config.NumLayers; layer++ {
+				cache.StoreKV(seqID, layer, pos, k, v)
+			}
+		}
+
+		// Truncate to 0
+		cache.TruncateSequence(seqID, 0)
+
+		table := cache.GetSequence(seqID)
+		if table.SeqLen() != 0 {
+			t.Errorf("expected seqLen 0, got %d", table.SeqLen())
+		}
+		if table.NumBlocks(0) != 0 {
+			t.Errorf("expected 0 blocks, got %d", table.NumBlocks(0))
+		}
+
+		// All blocks should be freed
+		if cache.FreeBlocks() != initialFree {
+			t.Errorf("expected %d free blocks, got %d", initialFree, cache.FreeBlocks())
+		}
+	})
+
+	t.Run("truncate_nonexistent_sequence", func(t *testing.T) {
+		cache := NewPagedKVCache(config)
+		// Should not panic
+		cache.TruncateSequence(999, 5)
+	})
+
+	t.Run("truncate_beyond_current_length_is_noop", func(t *testing.T) {
+		cache := NewPagedKVCache(config)
+		seqID := cache.CreateSequence()
+		kvSize := config.NumKVHeads * config.HeadDim
+
+		// Store 3 tokens
+		for pos := 0; pos < 3; pos++ {
+			k := make([]float32, kvSize)
+			v := make([]float32, kvSize)
+			for layer := 0; layer < config.NumLayers; layer++ {
+				cache.StoreKV(seqID, layer, pos, k, v)
+			}
+		}
+
+		// Truncate to 10 (larger than current length) — should be a no-op
+		cache.TruncateSequence(seqID, 10)
+
+		table := cache.GetSequence(seqID)
+		if table.SeqLen() != 3 {
+			t.Errorf("expected seqLen 3 (unchanged), got %d", table.SeqLen())
 		}
 	})
 }

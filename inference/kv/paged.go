@@ -241,6 +241,28 @@ func (t *BlockTable) FragmentRanges() []FragmentRange {
 	return t.fragmentRanges
 }
 
+// TruncateBlocks removes blocks beyond what is needed for newSeqLen tokens.
+// Returns the list of freed block IDs per layer.
+func (t *BlockTable) TruncateBlocks(newSeqLen int, blockSize int) [][]BlockID {
+	freed := make([][]BlockID, len(t.blocks))
+
+	// How many blocks do we need?
+	neededBlocks := 0
+	if newSeqLen > 0 {
+		neededBlocks = (newSeqLen + blockSize - 1) / blockSize
+	}
+
+	for layer := range t.blocks {
+		if neededBlocks < len(t.blocks[layer]) {
+			freed[layer] = t.blocks[layer][neededBlocks:]
+			t.blocks[layer] = t.blocks[layer][:neededBlocks]
+		}
+	}
+
+	t.seqLen = newSeqLen
+	return freed
+}
+
 // GetRoPEShiftForPos returns the RoPE shift needed for a given position.
 // Returns 0 if the position is not from a fragment.
 func (t *BlockTable) GetRoPEShiftForPos(pos int) int {
