@@ -531,6 +531,108 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 	return logits, nil
 }
 
+// DecodeEarlyExit runs the model on tokens but exits after only `maxLayers` transformer
+// layers, then applies the final norm and output head to produce logits. This is used for
+// self-speculative decoding where the same model serves as both draft (fewer layers) and
+// target (all layers). The KV cache entries are written for all executed layers.
+// Note: KV cache entries for layers beyond maxLayers are NOT populated.
+func (m *ModelRuntime) DecodeEarlyExit(tokens []int, pos int, maxLayers int) (tensor.Tensor, error) {
+	if len(tokens) == 0 {
+		return tensor.Tensor{}, nil
+	}
+	if m.gpuCache == nil {
+		return tensor.Tensor{}, fmt.Errorf("GPU KV cache not initialized")
+	}
+	if maxLayers <= 0 || maxLayers > len(m.layers) {
+		maxLayers = len(m.layers)
+	}
+
+	// Reset buffer pool
+	if pooler, ok := m.backend.(interface{ ResetPool() }); ok {
+		pooler.ResetPool()
+	}
+
+	batchSize := len(tokens)
+	hiddenSize := m.config.HiddenSize
+	vocabSize := m.config.VocabSize
+
+	if m.ctx == nil {
+		return tensor.Tensor{}, fmt.Errorf("inference context not initialized")
+	}
+
+	arena := m.ctx.GetArena(memory.Scratch)
+	if arena == nil {
+		return tensor.Tensor{}, fmt.Errorf("scratch arena not initialized")
+	}
+	m.ctx.ResetScratch()
+
+	allocPtr := func(bytes int) (tensor.DevicePtr, error) {
+		return arena.Alloc(bytes)
+	}
+
+	// 1. Embedding
+	tokenBytes := int32ToBytes(tokens)
+	tokenPtr, err := allocPtr(len(tokenBytes))
+	if err != nil {
+		return tensor.Tensor{}, err
+	}
+	m.backend.ToDevice(tokenPtr, tokenBytes)
+
+	statePtr, err := allocPtr(batchSize * hiddenSize * 4)
+	if err != nil {
+		return tensor.Tensor{}, err
+	}
+	state := tensor.NewTensor(tensor.NewShape(batchSize, hiddenSize), m.config.DType, statePtr)
+
+	if !m.Embedding.DevicePtr().IsNil() {
+		m.backend.Embedding(tokenPtr, batchSize, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
+	}
+
+	// 2. Scratch
+	scratchBytes := m.config.ScratchBytes(batchSize)
+	scratchPtr, err := allocPtr(int(scratchBytes))
+	if err != nil {
+		return tensor.Tensor{}, err
+	}
+	scratch := tensor.NewTensor(tensor.NewShape(int(scratchBytes/4)), m.config.DType, scratchPtr)
+
+	// 3. Layer Loop — only run first maxLayers
+	for i := 0; i < maxLayers; i++ {
+		state, err = m.layers[i].ExecuteWithGPUKV(state, scratch, m.gpuCache, i, pos)
+		if err != nil {
+			return tensor.Tensor{}, fmt.Errorf("layer %d: %w", i, err)
+		}
+	}
+
+	// 4. Extract last token for decode
+	var lastStatePtr tensor.DevicePtr
+	if batchSize == 1 {
+		lastStatePtr = statePtr
+	} else {
+		lastStatePtr = m.backend.Alloc(hiddenSize * 4)
+		if copier, ok := m.backend.(backend.BufferCopier); ok {
+			srcOffset := (batchSize - 1) * hiddenSize * 4
+			copier.CopyBuffer(statePtr, srcOffset, lastStatePtr, 0, hiddenSize*4)
+		} else {
+			return tensor.Tensor{}, fmt.Errorf("backend doesn't support BufferCopier interface")
+		}
+	}
+
+	// 5. Final Norm + Output Head
+	m.applyFinalNorm(lastStatePtr, lastStatePtr, 1, hiddenSize)
+
+	logitsPtr, err := allocPtr(vocabSize * 4)
+	if err != nil {
+		return tensor.Tensor{}, err
+	}
+	logits := tensor.NewTensor(tensor.NewShape(1, vocabSize), m.config.DType, logitsPtr)
+	m.outputHeadMatMul(lastStatePtr, logitsPtr, 1, vocabSize, hiddenSize)
+
+	m.backend.Sync()
+
+	return logits, nil
+}
+
 // PrefillWithPagedKV processes multiple tokens in a single forward pass.
 // This version uses DevicePtr operations for GPU execution.
 // Returns logits only for the LAST token.
