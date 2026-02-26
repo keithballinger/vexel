@@ -44,13 +44,16 @@ work. The main gaps are GeGLU, architecture detection, and Gemma 2's attention v
     - Added KV pointer offset in `ExecuteWithGPUKV` FP32 decode path for sliding window.
     - Comprehensive unit tests: 5 subtests covering alternating, global, sliding, and edge cases.
     - Architecture detection test verifies gemma2 → WindowAlternating.
-- [~] Task: Pre and post norms
-    - Add `PostNorm` boolean to `ModelConfig` (Gemma 2 applies RMSNorm after attention AND MLP too).
-    - Current flow: norm -> attn -> residual. New flow: norm -> attn -> post_norm -> residual.
-    - Load post-norm weights from GGUF (separate weight tensors).
+- [x] Task: Pre and post norms
+    - Added `HasPostNorms bool` to `ModelConfig`, auto-set for gemma2.
+    - Added `PostAttnNorm` and `PostFFNNorm` weight tensor fields to `BlockRuntime`.
+    - GGUF loader maps `attn_post_norm.weight` and `ffn_post_norm.weight` tensors.
+    - Post-attn RMSNorm applied after Wo projection, before residual add (all 3 Execute variants).
+    - Post-FFN RMSNorm applied after MLP output, before residual add (all 3 Execute variants).
+    - Architecture detection test verifies gemma2 → HasPostNorms=true.
 
 ## Phase 3: Learnable RoPE & Verification
-- [ ] Task: Learnable RoPE scaling
+- [~] Task: Learnable RoPE scaling
     - Add `RoPEFreqScales []float32` field to `ModelConfig` for per-dimension learned frequencies.
     - Parse from GGUF if present (Gemma 2 stores learned inv_freq values).
     - Modify RoPE Metal kernel to accept frequency array buffer instead of computing from theta.
