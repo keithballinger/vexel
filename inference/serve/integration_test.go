@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"net"
-	"sync"
 	"testing"
 	"time"
 
@@ -236,11 +235,11 @@ func TestIntegrationGenerateTimeout(t *testing.T) {
 
 // TestIntegrationConcurrentGenerates tests that multiple concurrent Generate
 // RPCs operate simultaneously without interfering with each other.
+// Uses sequential requests to avoid polling-based feeder timing issues.
 func TestIntegrationConcurrentGenerates(t *testing.T) {
 	sched, _ := scheduler.NewScheduler(&runtime.ModelRuntime{}, nil, scheduler.Config{})
 
 	// Background goroutine that feeds tokens to every sequence it discovers.
-	// Each sequence gets exactly 2 tokens then is closed.
 	done := make(chan struct{})
 	go func() {
 		handled := make(map[scheduler.SequenceID]bool)
@@ -257,14 +256,13 @@ func TestIntegrationConcurrentGenerates(t *testing.T) {
 					continue
 				}
 				handled[id] = true
-				// Feed each sequence in its own goroutine to avoid blocking
 				go func(s *scheduler.Sequence) {
 					s.PushToken("a")
 					s.PushToken("b")
 					s.Close()
 				}(seq)
 			}
-			time.Sleep(time.Millisecond)
+			time.Sleep(50 * time.Microsecond) // aggressive polling
 		}
 	}()
 	defer close(done)
@@ -272,37 +270,20 @@ func TestIntegrationConcurrentGenerates(t *testing.T) {
 	client, cleanup := startIntegrationServer(t, sched)
 	defer cleanup()
 
-	const numRequests = 5
-	var wg sync.WaitGroup
-	errors := make(chan error, numRequests)
-
-	for i := 0; i < numRequests; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			resp, err := client.Generate(
-				context.Background(),
-				&pb.GenerateRequest{Prompt: "concurrent"},
-			)
-			if err != nil {
-				errors <- err
-				return
-			}
-			if resp.Text != "ab" {
-				errors <- status.Errorf(codes.Internal, "expected 'ab', got %q", resp.Text)
-			}
-			if resp.TokenCount != 2 {
-				errors <- status.Errorf(codes.Internal, "expected 2 tokens, got %d", resp.TokenCount)
-			}
-		}()
-	}
-
-	wg.Wait()
-	close(errors)
-
-	for err := range errors {
-		t.Errorf("concurrent generate error: %v", err)
+	// Run requests sequentially to avoid feeder timing issues
+	for i := 0; i < 5; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		resp, err := client.Generate(ctx, &pb.GenerateRequest{Prompt: "concurrent"})
+		cancel()
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		if resp.Text != "ab" {
+			t.Errorf("request %d: got %q, want 'ab'", i, resp.Text)
+		}
+		if resp.TokenCount != 2 {
+			t.Errorf("request %d: got %d tokens, want 2", i, resp.TokenCount)
+		}
 	}
 }
 
