@@ -7,11 +7,11 @@ base scheduler with Medusa head support and online training infrastructure. Howe
 This track completes the integration and enables speculative decoding for production use.
 
 ## Phase 1: Core Integration
-- [ ] Task: Implement `getLogitsSlice`
+- [x] Task: Implement `getLogitsSlice` (472d2e1)
     - Replace the nil stub in `speculative.go` with actual tensor-to-CPU extraction.
     - Read GPU logits via `backend.Sync()` + `backend.ToHost()`, convert to `[]float32`.
     - Handle vocabulary dimension correctly (slice to vocabSize).
-- [ ] Task: Wire SpeculativeDecoder into scheduler
+- [~] Task: Wire SpeculativeDecoder into scheduler
     - Add `SpeculativeConfig` field to `scheduler.Config`.
     - When a draft model is provided, scheduler uses `GenerateDraftTokens` + `VerifyDraftTokens`
       instead of single-token decode.
