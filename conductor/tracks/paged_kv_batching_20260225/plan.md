@@ -5,7 +5,7 @@ reference counting, and fragment caching. The scheduler can route to either Page
 simple GPUKVCache. However, batched decode with paged KV is stubbed (TODO in scheduler line
 ~326). This track completes the integration to enable true multi-sequence concurrent generation.
 
-## Phase 1: Investigation & Profiling [checkpoint: pending]
+## Phase 1: Investigation & Profiling [checkpoint: 5969018]
 - [x] Task: Profile current paged KV path
     - Created `paged_kv_profile_test.go` with TestPagedKVRoundtripProfile.
     - Measured GPU↔CPU transfer overhead at kvLen = 64, 256, 512, 1024, 2048.
