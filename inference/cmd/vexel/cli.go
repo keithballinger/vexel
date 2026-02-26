@@ -8,8 +8,9 @@ import (
 
 // GlobalFlags holds flags shared across all subcommands.
 type GlobalFlags struct {
-	Model   string
-	Verbose bool
+	Model      string
+	DraftModel string // Optional: path to draft model for speculative decoding
+	Verbose    bool
 }
 
 // validSubcommands lists the recognized subcommand names.
@@ -42,6 +43,12 @@ func parseArgs(args []string) (string, GlobalFlags, error) {
 				return "", GlobalFlags{}, fmt.Errorf("--model requires a value")
 			}
 			globals.Model = args[i+1]
+			i += 2
+		case "--draft-model":
+			if i+1 >= len(args) {
+				return "", GlobalFlags{}, fmt.Errorf("--draft-model requires a value")
+			}
+			globals.DraftModel = args[i+1]
 			i += 2
 		case "--verbose":
 			globals.Verbose = true
@@ -183,11 +190,13 @@ Subcommands:
   tokenize   Tokenize text to token IDs
 
 Global flags:
-  --model    Path to GGUF model file (required for serve/generate/chat)
-  --verbose  Enable verbose logging
+  --model        Path to GGUF model file (required for serve/generate/chat)
+  --draft-model  Path to draft model for speculative decoding (optional)
+  --verbose      Enable verbose logging
 
 Examples:
   vexel --model model.gguf serve --port 8080
   vexel --model model.gguf generate --prompt "Hello!"
+  vexel --model model.gguf --draft-model draft.gguf generate --prompt "Hello!"
   vexel --model model.gguf chat`)
 }

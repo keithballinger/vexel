@@ -212,6 +212,40 @@ func TestSubcommandArgs(t *testing.T) {
 	}
 }
 
+func TestDraftModelFlag(t *testing.T) {
+	args := []string{"vexel", "--model", "/target.gguf", "--draft-model", "/draft.gguf", "generate"}
+	cmd, globals, err := parseArgs(args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd != "generate" {
+		t.Errorf("got cmd=%q, want generate", cmd)
+	}
+	if globals.Model != "/target.gguf" {
+		t.Errorf("got model=%q, want /target.gguf", globals.Model)
+	}
+	if globals.DraftModel != "/draft.gguf" {
+		t.Errorf("got draft-model=%q, want /draft.gguf", globals.DraftModel)
+	}
+}
+
+func TestDraftModelFlagMissingValue(t *testing.T) {
+	args := []string{"vexel", "--draft-model"}
+	_, _, err := parseArgs(args)
+	if err == nil {
+		t.Error("expected error for --draft-model without value")
+	}
+}
+
+func TestUsageContainsDraftModel(t *testing.T) {
+	var buf bytes.Buffer
+	printUsage(&buf)
+	output := buf.String()
+	if !strings.Contains(output, "--draft-model") {
+		t.Error("usage output missing --draft-model flag")
+	}
+}
+
 func TestSubcommandArgsNoSubcmd(t *testing.T) {
 	args := []string{"vexel", "--model", "m.gguf"}
 	sub := subcommandArgs(args)

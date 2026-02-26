@@ -82,6 +82,42 @@ func initModel(modelPath string, maxTokens int, verbose bool) (*runtime.ModelRun
 	return model, tok, gpuBackend, nil
 }
 
+// loadDraftModel loads a separate draft model for speculative decoding.
+// It shares the same GPU backend as the target model for efficient memory use.
+func loadDraftModel(draftPath string, gpuBackend *metal.Backend, maxTokens int, verbose bool) (*runtime.ModelRuntime, error) {
+	gf, err := gguf.Open(draftPath)
+	if err != nil {
+		return nil, fmt.Errorf("open draft GGUF: %w", err)
+	}
+	draftCfg := runtime.ModelConfigFromGGUF(gf.GetModelConfig())
+	gf.Close()
+
+	memCtx := memory.NewInferenceContext(tensor.Metal)
+	scratchSize := draftCfg.ScratchBytes(maxTokens)
+	logitsSize := int64(draftCfg.VocabSize) * 4
+	attnSize := int64(maxTokens * maxTokens * 4)
+	totalScratch := scratchSize + logitsSize*2 + attnSize
+	memCtx.AddArenaWithBackend(memory.Scratch, int(totalScratch), gpuBackend.Alloc)
+
+	draft, err := runtime.NewModelRuntime(gpuBackend, memCtx, nil, draftCfg)
+	if err != nil {
+		return nil, fmt.Errorf("create draft runtime: %w", err)
+	}
+
+	if verbose {
+		log.Printf("Loading draft model from %s...", draftPath)
+	}
+	if err := draft.LoadWeights(draftPath); err != nil {
+		return nil, fmt.Errorf("load draft weights: %w", err)
+	}
+	if err := draft.CopyWeightsToDevice(); err != nil {
+		return nil, fmt.Errorf("copy draft weights: %w", err)
+	}
+	draft.CreateGPUKVCache(2048)
+
+	return draft, nil
+}
+
 // runServe starts the HTTP inference server.
 func runServe(globals GlobalFlags, args []string) error {
 	sf, err := parseServeFlags(subcommandArgs(args))
@@ -95,26 +131,49 @@ func runServe(globals GlobalFlags, args []string) error {
 	}
 	defer gpuBackend.Close()
 
-	sched, err := scheduler.NewScheduler(model, tok, scheduler.Config{
+	schedConfig := scheduler.Config{
 		MaxBatchSize:  sf.MaxBatchSize,
 		MaxSequences:  64,
 		MaxTokens:     sf.MaxTokens,
 		SamplerConfig: sampler.DefaultConfig(),
-	})
-	if err != nil {
-		return fmt.Errorf("create scheduler: %w", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	var baseSched *scheduler.Scheduler
+	var runFunc func(context.Context) error
+
+	// Use speculative scheduling if a draft model is provided
+	if globals.DraftModel != "" {
+		draft, err := loadDraftModel(globals.DraftModel, gpuBackend, sf.MaxTokens, globals.Verbose)
+		if err != nil {
+			return fmt.Errorf("load draft model: %w", err)
+		}
+		specConfig := scheduler.DefaultSpeculativeConfig()
+		ss, err := scheduler.NewSpeculativeScheduler(model, draft, tok, schedConfig, specConfig)
+		if err != nil {
+			return fmt.Errorf("create speculative scheduler: %w", err)
+		}
+		log.Printf("Using speculative decoding with draft model: %s", globals.DraftModel)
+		baseSched = ss.Scheduler
+		runFunc = ss.Run
+	} else {
+		sched, err := scheduler.NewScheduler(model, tok, schedConfig)
+		if err != nil {
+			return fmt.Errorf("create scheduler: %w", err)
+		}
+		baseSched = sched
+		runFunc = sched.Run
+	}
+
 	go func() {
-		if err := sched.Run(ctx); err != nil {
+		if err := runFunc(ctx); err != nil {
 			log.Printf("Scheduler stopped: %v", err)
 		}
 	}()
 
-	srv := serve.NewServer(sched)
+	srv := serve.NewServer(baseSched)
 	addr := fmt.Sprintf(":%d", sf.Port)
 	httpServer := &http.Server{Addr: addr, Handler: srv}
 
@@ -155,28 +214,52 @@ func runGenerate(globals GlobalFlags, args []string) error {
 	samplerCfg := sampler.DefaultConfig()
 	samplerCfg.Temperature = float32(gf.Temperature)
 
-	sched, err := scheduler.NewScheduler(model, tok, scheduler.Config{
+	schedConfig := scheduler.Config{
 		MaxBatchSize:  1,
 		MaxSequences:  1,
 		MaxTokens:     gf.MaxTokens,
 		SamplerConfig: samplerCfg,
-	})
-	if err != nil {
-		return fmt.Errorf("create scheduler: %w", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	var baseSched *scheduler.Scheduler
+	var runFunc func(context.Context) error
+	var specSched *scheduler.SpeculativeScheduler
+
+	if globals.DraftModel != "" {
+		draft, err := loadDraftModel(globals.DraftModel, gpuBackend, gf.MaxTokens, globals.Verbose)
+		if err != nil {
+			return fmt.Errorf("load draft model: %w", err)
+		}
+		specConfig := scheduler.DefaultSpeculativeConfig()
+		ss, err := scheduler.NewSpeculativeScheduler(model, draft, tok, schedConfig, specConfig)
+		if err != nil {
+			return fmt.Errorf("create speculative scheduler: %w", err)
+		}
+		log.Printf("Using speculative decoding with draft model: %s", globals.DraftModel)
+		baseSched = ss.Scheduler
+		runFunc = ss.Run
+		specSched = ss
+	} else {
+		sched, err := scheduler.NewScheduler(model, tok, schedConfig)
+		if err != nil {
+			return fmt.Errorf("create scheduler: %w", err)
+		}
+		baseSched = sched
+		runFunc = sched.Run
+	}
+
 	go func() {
-		if err := sched.Run(ctx); err != nil && err != context.Canceled {
+		if err := runFunc(ctx); err != nil && err != context.Canceled {
 			log.Printf("Scheduler stopped: %v", err)
 		}
 	}()
 
 	seqID := scheduler.SequenceID(1)
 	seq := scheduler.NewSequence(seqID, gf.Prompt)
-	sched.AddSequence(seq)
+	baseSched.AddSequence(seq)
 
 	tokenCount := 0
 	for token := range seq.TokenChan() {
@@ -186,9 +269,14 @@ func runGenerate(globals GlobalFlags, args []string) error {
 	fmt.Println()
 
 	if globals.Verbose {
-		m := sched.Metrics()
+		m := baseSched.Metrics()
 		log.Printf("[%d tokens | prefill: %.1f tok/s | decode: %.1f tok/s]",
 			tokenCount, m.PrefillTokensPerSecond(), m.TokensPerSecond())
+		if specSched != nil {
+			sm := specSched.SpecMetrics()
+			log.Printf("[speculative: acceptance=%.1f%% speedup=%.1fx generated=%d accepted=%d]",
+				sm.AcceptanceRate()*100, sm.Speedup(), sm.DraftTokensGenerated, sm.DraftTokensAccepted)
+		}
 	}
 
 	cancel()
