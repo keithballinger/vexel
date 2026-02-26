@@ -48,7 +48,7 @@ Checkpoint: 786dc4d
     - Wire MedusaScheduler's ring buffer collection to GPU trainer.
     - After each decode step, store (hidden_state, next_token) pairs.
     - Periodically train Medusa heads on collected pairs (background goroutine).
-- [ ] Task: Tree-based verification
+- [x] Task: Tree-based verification (c2dd62a)
     - Implement tree attention for verifying multiple Medusa candidates simultaneously.
     - Build candidate tree from top-k predictions of each Medusa head.
     - Single forward pass through target model verifies all candidates.
