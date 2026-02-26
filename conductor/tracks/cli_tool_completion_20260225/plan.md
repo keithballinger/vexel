@@ -19,15 +19,17 @@ The README documents `./vexel serve` but no unified CLI binary exists. Individua
     - Graceful shutdown on SIGINT/SIGTERM.
     - Shared `initModel()` helper for model loading (reused by chat/generate).
 
-## Phase 2: Generation Subcommands
-- [ ] Task: Implement `generate` subcommand
+## Phase 2: Generation Subcommands [checkpoint: pending]
+- [x] Task: Implement `generate` subcommand
     - One-shot text generation from a prompt (no HTTP, direct runtime).
     - Flags: `--prompt`, `--max-tokens`, `--temperature`.
     - Print tokens as they are generated (streaming to stdout).
-- [ ] Task: Implement `chat` subcommand
+    - Verbose mode prints prefill/decode tok/s metrics.
+- [x] Task: Implement `chat` subcommand
     - Wire up existing REPL from `cmd/vexel/internal/repl.go`.
     - Flags: `--system-prompt`, `--no-chat-template`.
-    - Uses scheduler for inference, displays tok/s metrics per turn.
+    - Uses scheduler for inference via `internal.RunChatLoopWithConfig`.
+    - Moved `printUsage` from Metal-tagged main.go to cli.go for testability.
 
 ## Phase 3: Utility Subcommands
 - [ ] Task: Integrate `bench` subcommand

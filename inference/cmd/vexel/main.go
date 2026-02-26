@@ -28,7 +28,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"os"
 )
 
@@ -69,23 +68,3 @@ func main() {
 	}
 }
 
-// printUsage writes the top-level usage message to w.
-func printUsage(w io.Writer) {
-	fmt.Fprintln(w, `Usage: vexel [global flags] <subcommand> [flags]
-
-Subcommands:
-  serve      Start the HTTP inference server
-  generate   One-shot text generation from a prompt
-  chat       Interactive chat REPL
-  bench      Run scheduling benchmarks
-  tokenize   Tokenize text to token IDs
-
-Global flags:
-  --model    Path to GGUF model file (required for serve/generate/chat)
-  --verbose  Enable verbose logging
-
-Examples:
-  vexel --model model.gguf serve --port 8080
-  vexel --model model.gguf generate --prompt "Hello!"
-  vexel --model model.gguf chat`)
-}

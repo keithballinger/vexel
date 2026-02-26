@@ -135,13 +135,63 @@ func runServe(globals GlobalFlags, args []string) error {
 	return nil
 }
 
-// runGenerate runs one-shot text generation. Implemented in Phase 2.
+// runGenerate runs one-shot text generation, streaming tokens to stdout.
 func runGenerate(globals GlobalFlags, args []string) error {
-	_, err := parseGenerateFlags(subcommandArgs(args))
+	gf, err := parseGenerateFlags(subcommandArgs(args))
 	if err != nil {
 		return err
 	}
-	return fmt.Errorf("generate subcommand not yet implemented (Phase 2)")
+	if gf.Prompt == "" {
+		return fmt.Errorf("--prompt is required")
+	}
+
+	model, tok, gpuBackend, err := initModel(globals.Model, gf.MaxTokens, globals.Verbose)
+	if err != nil {
+		return err
+	}
+	defer gpuBackend.Close()
+
+	samplerCfg := sampler.DefaultConfig()
+	samplerCfg.Temperature = float32(gf.Temperature)
+
+	sched, err := scheduler.NewScheduler(model, tok, scheduler.Config{
+		MaxBatchSize:  1,
+		MaxSequences:  1,
+		MaxTokens:     gf.MaxTokens,
+		SamplerConfig: samplerCfg,
+	})
+	if err != nil {
+		return fmt.Errorf("create scheduler: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		if err := sched.Run(ctx); err != nil && err != context.Canceled {
+			log.Printf("Scheduler stopped: %v", err)
+		}
+	}()
+
+	seqID := scheduler.SequenceID(1)
+	seq := scheduler.NewSequence(seqID, gf.Prompt)
+	sched.AddSequence(seq)
+
+	tokenCount := 0
+	for token := range seq.TokenChan() {
+		fmt.Print(token)
+		tokenCount++
+	}
+	fmt.Println()
+
+	if globals.Verbose {
+		m := sched.Metrics()
+		log.Printf("[%d tokens | prefill: %.1f tok/s | decode: %.1f tok/s]",
+			tokenCount, m.PrefillTokensPerSecond(), m.TokensPerSecond())
+	}
+
+	cancel()
+	return nil
 }
 
 // runChat starts the interactive chat REPL. Implemented in Phase 2.
