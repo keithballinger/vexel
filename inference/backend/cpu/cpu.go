@@ -698,6 +698,12 @@ func (b *CPUBackend) MatMulQ5_K(a, bQ5K, out tensor.DevicePtr, m, n, k int) {
 	panic("MatMulQ5_K not implemented for CPU backend - use GPU backend or dequantize to F32")
 }
 
+// MatMulQ8_0 performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q8_0 format.
+func (b *CPUBackend) MatMulQ8_0(a, bQ8, out tensor.DevicePtr, m, n, k int) {
+	// Q8_0 should be handled by GPU kernel.
+	panic("MatMulQ8_0 not implemented for CPU backend - use GPU backend or dequantize to F32")
+}
+
 // ptrToByteSlice converts a DevicePtr to a byte slice.
 func ptrToByteSlice(ptr tensor.DevicePtr, n int) []byte {
 	if ptr.IsNil() {

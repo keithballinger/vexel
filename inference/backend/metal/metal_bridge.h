@@ -446,6 +446,20 @@ void metal_sdpa_decode_f16_hd64_simd(void* queue, void* pipeline,
                                       int kvLen, int numQHeads, int numKVHeads,
                                       float scale, int kvHeadStride);
 
+// Q8_0 NR2 matvec: C = A @ B^T where A is [1,K] F32, B is [N,K] Q8_0
+void metal_matvec_q8_0_nr2_f32(void* queue, void* pipeline,
+                                void* A, uint64_t aOff,
+                                void* B, uint64_t bOff,
+                                void* C, uint64_t cOff,
+                                int N, int K);
+
+// Q8_0 batched matmul: C = A @ B^T where A is [M,K] F32, B is [N,K] Q8_0, C is [M,N]
+void metal_matmul_q8_0_batched_f32(void* queue, void* pipeline,
+                                    void* A, uint64_t aOff,
+                                    void* B, uint64_t bOff,
+                                    void* C, uint64_t cOff,
+                                    int M, int N, int K);
+
 #ifdef __cplusplus
 }
 #endif
