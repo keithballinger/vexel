@@ -61,22 +61,35 @@ Target: reach 70-80% bandwidth utilization (~78-89 tok/s), competitive with llam
     - Confirms Phase 1 finding: allocation is not the bottleneck.
     - Kernel dispatch count (451) remains the primary optimization target for Phase 3.
 
-## Phase 3: Fused Transformer Block Kernels
-- [ ] Task: Fused RMSNorm + MatMul kernel
-    - Single Metal kernel: read input, compute RMSNorm in threadgroup shared memory,
-      immediately use normalized output as matmul input.
-    - Saves: 1 kernel launch + 1 intermediate buffer write/read (hidden_size * 4 bytes).
-    - Apply to all 4 attention projections (Q, K, V, O) and MLP projections.
-    - For quantized weights: fused RMSNorm + dequant matvec.
-- [ ] Task: Fused Gate-Up + SiLU×Mul kernel
-    - Current: gate_proj → up_proj → SiLU(gate) × up → down_proj (4 kernels).
-    - Fused: single kernel computes gate_proj and up_proj in parallel, applies SiLU×Mul
-      inline, outputs directly to down_proj input buffer.
-    - Saves: 3 kernel launches + 2 intermediate buffers.
-- [ ] Task: Fused RoPE + KV scatter kernel
-    - Current: RoPE rotation → separate KV cache scatter (2 kernels per K and V).
-    - Fused: rotate Q/K and scatter K/V into cache in a single kernel.
-    - Saves: 2 kernel launches.
+## Phase 3: Fused Transformer Block Kernels [checkpoint: pending]
+- [x] Task: Wire up FusedMLP kernel
+    - MatMulQ4_0_FusedMLP already existed as Metal shader but was UNUSED.
+    - Wired into block.go SwiGLU FFN: RMSNorm + FusedMLP replaces
+      FusedRMSNorm+MatMul(W1) + FusedRMSNorm+MatMul(W3) + SiLUMul.
+    - Saves 2 dispatches/layer × 32 = 64 dispatches (decode path).
+    - Only activates for decode (seqLen=1) with RMSNorm + Q4_0 weights.
+- [x] Task: Wire up AddRMSNorm kernel
+    - AddRMSNorm kernel already existed but was UNUSED.
+    - Wired into block.go: replaces separate Add1 + RMSNorm2 with single dispatch.
+    - Applies to both decode AND prefill paths (SwiGLU + RMSNorm + fusedOps).
+    - Saves 1 dispatch/layer × 32 = 32 dispatches per pass.
+    - Decode path: 14→12 dispatches/layer (451→387 total, 14% reduction).
+    - Prefill path: 16→15 dispatches/layer (515→483 total, 6% reduction).
+- [x] Task: Analyze RoPE + ScatterKV fusion feasibility
+    - RESULT: NOT RECOMMENDED. Detailed analysis found:
+      - Incompatible grid geometries: RoPE uses 2D grid [seqLen × heads],
+        ScatterKV uses 1D grid [totalElements].
+      - Work imbalance: RoPE performs heavy trig ops, ScatterKV is lightweight copy.
+      - K buffer is ~4KB in decode mode — memory bandwidth not the bottleneck.
+      - Both already batched in same command buffer (low dispatch overhead).
+      - Engineering complexity not justified by minimal performance gain.
+- [x] Task: Update fusion analysis tests
+    - Updated TestFusionCandidateAnalysis: 12 dispatches/layer (387 total decode).
+    - Updated TestPrefillKernelSequence: 15 dispatches/layer (483 total prefill).
+    - Documented completed fusions and remaining optimization targets:
+      - Target 1: RoPE+ScatterKV → analyzed, NOT recommended (grid incompatibility)
+      - Target 2: W2+Add2 → future optimization (saves 32 dispatches)
+      - Target 3: Wo+AddRMSNorm → future optimization (saves 32 dispatches)
 
 ## Phase 4: Attention Fusion
 - [ ] Task: Fused attention pre-processing
