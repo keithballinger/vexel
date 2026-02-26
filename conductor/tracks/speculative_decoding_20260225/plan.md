@@ -24,11 +24,11 @@ This track completes the integration and enables speculative decoding for produc
 Checkpoint: d6d13eb
 
 ## Phase 2: Self-Speculative Decoding
-- [~] Task: Implement early-exit drafting
+- [x] Task: Implement early-exit drafting (4f3cd7a)
     - Use `SelfSpeculativeConfig` (already defined): run only the first N layers as the draft model.
     - Share weights between draft and target (no separate model needed).
     - Add early-exit projection head: take hidden state at layer N, project to vocab logits.
-- [ ] Task: Draft model loading
+- [~] Task: Draft model loading
     - Support loading a separate small draft model (e.g., TinyLlama as draft for LLaMA 2 7B).
     - Both models share the same tokenizer.
     - Draft model uses its own KV cache but shared Metal backend.
