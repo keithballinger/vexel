@@ -56,11 +56,11 @@ Checkpoint: 786dc4d
 Checkpoint: d69055a
 
 ## Phase 4: Verification
-- [ ] Task: Correctness tests
+- [x] Task: Correctness tests (c4eb1c1)
     - Verify speculative decoding produces identical output to standard decoding (temp=0).
     - Test draft rejection and rollback: force rejection by using a very different draft model.
     - Test adaptive draft length convergence.
-- [ ] Task: Speedup benchmarks
+- [x] Task: Speedup benchmarks (6e5aa68)
     - Measure tokens/second with and without speculative decoding.
     - Report acceptance rate, average accepted tokens per step, and effective speedup.
     - Benchmark self-speculative vs separate draft model approaches.
