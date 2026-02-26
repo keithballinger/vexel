@@ -37,7 +37,7 @@ Target: reach 70-80% bandwidth utilization (~78-89 tok/s), competitive with llam
     - Conclusion: allocation overhead is minor vs compute time; kernel dispatch
       count is the primary optimization target.
 
-## Phase 2: GPU Memory Pool
+## Phase 2: GPU Memory Pool [checkpoint: bd6f856]
 - [x] Task: Implement sub-allocating scratch buffer
     - Created `scratch_allocator.go` with ScratchAllocator (bump allocator from single MTLBuffer).
     - 256-byte alignment for Metal optimal access.
