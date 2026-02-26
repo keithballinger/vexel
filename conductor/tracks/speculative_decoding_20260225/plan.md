@@ -28,11 +28,11 @@ Checkpoint: d6d13eb
     - Use `SelfSpeculativeConfig` (already defined): run only the first N layers as the draft model.
     - Share weights between draft and target (no separate model needed).
     - Add early-exit projection head: take hidden state at layer N, project to vocab logits.
-- [~] Task: Draft model loading
+- [x] Task: Draft model loading (4f65427)
     - Support loading a separate small draft model (e.g., TinyLlama as draft for LLaMA 2 7B).
     - Both models share the same tokenizer.
     - Draft model uses its own KV cache but shared Metal backend.
-- [ ] Task: Adaptive draft length
+- [~] Task: Adaptive draft length
     - Track acceptance rate over a rolling window.
     - Increase `NumDraftTokens` when acceptance is high (>80%), decrease when low (<40%).
     - Clamp to [1, 8] range.
