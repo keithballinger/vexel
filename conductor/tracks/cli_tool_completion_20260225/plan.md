@@ -5,7 +5,7 @@ The README documents `./vexel serve` but no unified CLI binary exists. Individua
 `cmd/vexel/internal/repl.go` but has no main entry point. This track creates a single
 `vexel` binary with subcommands.
 
-## Phase 1: Core CLI Framework
+## Phase 1: Core CLI Framework [checkpoint: a930e71]
 - [x] Task: Create `cmd/vexel/main.go`
     - Implement subcommand dispatcher using `flag` (no external deps per product-guidelines).
     - Subcommands: `serve`, `generate`, `chat`, `bench`, `tokenize`.
