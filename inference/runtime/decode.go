@@ -289,6 +289,23 @@ func (m *ModelRuntime) DecodeWithPagedKV(tokens []int, seqID int64, pos int) (te
 		fmt.Printf("[DECODE-PAGED] tokens=%v seqID=%d pos=%d\n", tokens, seqID, pos)
 	}
 
+	// Lazily create GPU block pool if backend supports paged KV ops
+	if m.gpuPool == nil {
+		if _, ok := m.backend.(backend.PagedKVOps); ok {
+			blockSize := 16
+			maxSeq := m.config.MaxSeqLen
+			if maxSeq == 0 {
+				maxSeq = 4096
+			}
+			maxBlocksPerLayer := (maxSeq + blockSize - 1) / blockSize
+			m.CreateGPUBlockPool(maxBlocksPerLayer)
+		}
+	}
+	// Ensure GPU pool sequence exists
+	if m.gpuPool != nil && !m.gpuPool.HasSequence(seqID) {
+		m.gpuPool.CreateSequence(seqID)
+	}
+
 	// Reset buffer pool if the backend supports it
 	if pooler, ok := m.backend.(interface{ ResetPool() }); ok {
 		pooler.ResetPool()
@@ -348,7 +365,7 @@ func (m *ModelRuntime) DecodeWithPagedKV(tokens []int, seqID int64, pos int) (te
 
 	// 5. Layer Loop using ExecuteWithPagedKV
 	for i, layer := range m.layers {
-		state, err = layer.ExecuteWithPagedKV(state, scratch, m.pagedCache, seqID, i, pos)
+		state, err = layer.ExecuteWithPagedKV(state, scratch, m.pagedCache, m.gpuPool, seqID, i, pos)
 		if err != nil {
 			return tensor.Tensor{}, fmt.Errorf("layer %d: %w", i, err)
 		}
@@ -527,6 +544,23 @@ func (m *ModelRuntime) PrefillWithPagedKV(tokens []int, seqID int64, startPos in
 		fmt.Printf("[PREFILL] tokens=%v seqLen=%d seqID=%d startPos=%d\n", tokens, seqLen, seqID, startPos)
 	}
 
+	// Lazily create GPU block pool if backend supports paged KV ops
+	if m.gpuPool == nil {
+		if _, ok := m.backend.(backend.PagedKVOps); ok {
+			blockSize := 16
+			maxSeq := m.config.MaxSeqLen
+			if maxSeq == 0 {
+				maxSeq = 4096
+			}
+			maxBlocksPerLayer := (maxSeq + blockSize - 1) / blockSize
+			m.CreateGPUBlockPool(maxBlocksPerLayer)
+		}
+	}
+	// Ensure GPU pool sequence exists
+	if m.gpuPool != nil && !m.gpuPool.HasSequence(seqID) {
+		m.gpuPool.CreateSequence(seqID)
+	}
+
 	// Reset buffer pool if the backend supports it (reduces allocation overhead)
 	if pooler, ok := m.backend.(interface{ ResetPool() }); ok {
 		pooler.ResetPool()
@@ -583,7 +617,7 @@ func (m *ModelRuntime) PrefillWithPagedKV(tokens []int, seqID int64, startPos in
 
 	// 5. Layer Loop
 	for i, layer := range m.layers {
-		state, err = layer.ExecuteWithPagedKV(state, scratch, m.pagedCache, seqID, i, startPos)
+		state, err = layer.ExecuteWithPagedKV(state, scratch, m.pagedCache, m.gpuPool, seqID, i, startPos)
 		if err != nil {
 			return tensor.Tensor{}, fmt.Errorf("layer %d: %w", i, err)
 		}

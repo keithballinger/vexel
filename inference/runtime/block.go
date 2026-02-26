@@ -546,8 +546,11 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 		return x, nil
 	}
 	
-	// ExecuteWithPagedKV performs the forward pass using paged KV cache.// This version stores K/V during prefill and retrieves them during decode.
-func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *kv.PagedKVCache, seqID int64, layerIdx, startPos int) (tensor.Tensor, error) {
+	// ExecuteWithPagedKV performs the forward pass using paged KV cache.
+// This version stores K/V during prefill and retrieves them during decode.
+// When gpuPool is non-nil and seqLen==1 (decode), K/V operations stay entirely
+// on GPU using paged attention. Falls back to CPU path otherwise.
+func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *kv.PagedKVCache, gpuPool *GPUBlockPool, seqID int64, layerIdx, startPos int) (tensor.Tensor, error) {
 	xPtr := x.DevicePtr()
 	scratchPtr := scratch.DevicePtr()
 
@@ -631,11 +634,31 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 	b.backend.RoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, startPos, b.RoPEDim, float32(b.RoPETheta), b.RoPENeox)
 
 	// 4. Store current K/V in cache and compute attention
-	var fullKPtr, fullVPtr tensor.DevicePtr
-	var fullSeqLen int
+	scale := float32(1.0 / sqrt(float64(headDim)))
 
-	if pagedCache != nil {
-		// Copy K/V from device to CPU for cache storage
+	// GPU-native paged path: scatter K/V into GPU block pool and run paged SDPA.
+	// Only used for decode (seqLen==1) where paged SDPA is available.
+	if gpuPool != nil && seqLen == 1 {
+		// Store K/V directly in GPU block pool (no CPU roundtrip)
+		if err := gpuPool.StoreKV(layerIdx, seqID, startPos, kPtr, vPtr, seqLen); err != nil {
+			return x, fmt.Errorf("gpu pool store: %w", err)
+		}
+		// Paged attention: reads K/V from block pool via block table
+		if err := gpuPool.Attention(layerIdx, seqID, qPtr, attnOutPtr, numHeads, headDim, scale); err != nil {
+			return x, fmt.Errorf("gpu pool attention: %w", err)
+		}
+	} else if gpuPool != nil && seqLen > 1 {
+		// Prefill with GPU pool: store K/V for future decode, use contiguous for attention
+		if err := gpuPool.StoreKV(layerIdx, seqID, startPos, kPtr, vPtr, seqLen); err != nil {
+			return x, fmt.Errorf("gpu pool store prefill: %w", err)
+		}
+		// Self-attention over current tokens (contiguous, no cache needed)
+		b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+	} else if pagedCache != nil {
+		// CPU paged path: GPU→CPU→GPU roundtrip (fallback)
+		var fullKPtr, fullVPtr tensor.DevicePtr
+		var fullSeqLen int
+
 		kData := make([]float32, kvSize)
 		vData := make([]float32, kvSize)
 
@@ -647,7 +670,7 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 		} else {
 			kBytes := make([]byte, kvSize*4)
 			vBytes := make([]byte, kvSize*4)
-			b.backend.Sync() // Ensure RoPE/projections complete before reading
+			b.backend.Sync()
 			b.backend.ToHost(kBytes, kPtr)
 			b.backend.ToHost(vBytes, vPtr)
 			b.backend.Sync()
@@ -655,16 +678,12 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 			vData = bytesToFloat32(vBytes)
 		}
 
-		// Store in cache
 		err := pagedCache.StoreKVBatch(seqID, layerIdx, startPos, kData, vData, seqLen)
 		if err != nil {
 			return x, fmt.Errorf("failed to store KV: %w", err)
 		}
 
-		// Get full K/V sequence from cache for attention
 		currentPos := startPos + seqLen - 1
-		
-		// Sliding window: determine start position for attention
 		attnStartPos := 0
 		if b.SlidingWindow > 0 && currentPos >= b.SlidingWindow {
 			attnStartPos = currentPos - b.SlidingWindow + 1
@@ -673,7 +692,6 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 		fullK, fullV := pagedCache.GetKVSlice(seqID, layerIdx, attnStartPos, currentPos)
 		fullSeqLen = len(fullK) / (numKVHeads * headDim)
 
-		// Allocate GPU buffers for full K/V and copy
 		fullKBytes := len(fullK) * 4
 		fullVBytes := len(fullV) * 4
 
@@ -687,26 +705,15 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 			b.backend.ToDevice(fullVPtr, float32ToBytes(fullV))
 			b.backend.Sync()
 		}
+
+		if seqLen == 1 {
+			b.backend.SDPA(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale, numKVHeads*headDim)
+		} else {
+			b.backend.SDPAPrefill(qPtr, fullKPtr, fullVPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+		}
 	} else {
 		// No cache - use current K/V only (for prefill self-attention)
-		fullKPtr = kPtr
-		fullVPtr = vPtr
-		fullSeqLen = seqLen
-	}
-
-	// 5. Attention: Q @ K^T -> softmax -> @ V
-	scale := float32(1.0 / sqrt(float64(headDim)))
-
-	if seqLen == 1 {
-		// Decode: single query against full KV sequence
-		// SDPA expects kvLen as the KV sequence length
-		// NOTE: Paged cache uses sequence-major layout [seqLen, numKVHeads, headDim].
-		// For decode (seqLen=1), pass numKVHeads*headDim as stride to iterate positions correctly.
-		// TODO: This is a compatibility workaround - paged cache should use head-major layout.
-		b.backend.SDPA(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale, numKVHeads*headDim)
-	} else {
-		// Prefill: use causal SDPAPrefill (FA2 threshold handled in backend)
-		b.backend.SDPAPrefill(qPtr, fullKPtr, fullVPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+		b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
 	}
 	// No sync - SDPA must complete before Wo can read attnOut (serialized in queue)
 

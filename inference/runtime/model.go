@@ -20,6 +20,7 @@ type ModelRuntime struct {
 	cache      *kv.KVCache      // Legacy simple cache
 	pagedCache *kv.PagedKVCache // Production paged cache
 	gpuCache   *GPUKVCache      // GPU-resident KV cache for Metal/CUDA
+	gpuPool    *GPUBlockPool    // GPU-resident paged block pool (Track 3)
 	config     ModelConfig
 	layers     []*BlockRuntime
 	plan       *ExecutionPlan // Model-aware execution plan
@@ -206,6 +207,31 @@ func (m *ModelRuntime) CreateGPUKVCache(maxSeqLen int) *GPUKVCache {
 // GPUKVCache returns the GPU KV cache if available.
 func (m *ModelRuntime) GPUKVCache() *GPUKVCache {
 	return m.gpuCache
+}
+
+// CreateGPUBlockPool creates a GPU-resident paged block pool for paged KV batching.
+// This eliminates CPU roundtrips in the paged KV path by keeping blocks on the GPU.
+func (m *ModelRuntime) CreateGPUBlockPool(maxBlocksPerLayer int) *GPUBlockPool {
+	pagedOps, ok := m.backend.(backend.PagedKVOps)
+	if !ok {
+		return nil
+	}
+	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	pool := NewGPUBlockPool(
+		m.backend, pagedOps,
+		m.config.NumHiddenLayers,
+		m.config.NumKeyValueHeads,
+		headDim,
+		16, // standard block size
+		maxBlocksPerLayer,
+	)
+	m.gpuPool = pool
+	return pool
+}
+
+// GPUBlockPool returns the GPU block pool if available.
+func (m *ModelRuntime) GetGPUBlockPool() *GPUBlockPool {
+	return m.gpuPool
 }
 
 var outputHeadDebugOnce sync.Once
