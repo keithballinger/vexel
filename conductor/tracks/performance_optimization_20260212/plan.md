@@ -27,10 +27,24 @@
     - **Verification:** All 3 prefill regression tests pass (TestPrefillVsSequentialDecode, TestPrefillMinimal, TestPrefillFP32VsFP16). Max logit diff between sequential and prefill: 0.005643.
 
 ## Phase 3: Verification
-- [ ] Task: Throughput Benchmark
+- [x] Task: Throughput Benchmark
     - Measure `tokens/second` improvements for various sequence lengths/batches.
-    - **Results:**
+    - **Original results (TinyLlama 1.1B, no longer on disk):**
         - Prefill: 627.6 -> 785.3 tok/s -> ~~Regression to ~160 tok/s~~ → **Fixed (regression resolved)**
         - Decode: 90.9 -> 125.1 tok/s -> **138 tok/s (+51%)**
-- [ ] Task: Latency Benchmark
+    - **New benchmark results (LLaMA 2 7B Q4_0, ~3.7GB weights):**
+        - Prefill throughput (tok/s): 5tok=83.2, 32tok=176.4, 128tok=202.7
+        - Prefill latency: 60ms (5tok), 181ms (32tok), 631ms (128tok)
+        - Decode throughput: **44.2 tok/s** (22.3ms/token median)
+        - Decode scaling: stable across context lengths 16-128 (~43-44 tok/s)
+        - Prefill regression **confirmed fixed**: throughput scales with seqLen (83→176→203 tok/s)
+    - **Test file:** `inference/runtime/throughput_bench_test.go` (4 tests, all pass)
+- [x] Task: Latency Benchmark
     - Measure `time-to-first-token` improvements.
+    - **Results (LLaMA 2 7B Q4_0):**
+        - TTFT (5 token prompt): **79.3 ms** (prefill=58ms + decode=21ms)
+        - TTFT (32 token prompt): **205.0 ms** (prefill=182ms + decode=23ms)
+        - TTFT (128 token prompt): **655.6 ms** (prefill=632ms + decode=24ms)
+        - Per-token decode: p50=22.9ms, p99=25.2ms, jitter ratio=1.10
+        - First decode latency **consistent** across prompt lengths (~21-24ms)
+    - **Test file:** `inference/runtime/latency_bench_test.go` (2 tests, all pass)
