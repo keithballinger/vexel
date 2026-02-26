@@ -64,3 +64,5 @@ Checkpoint: d69055a
     - Measure tokens/second with and without speculative decoding.
     - Report acceptance rate, average accepted tokens per step, and effective speedup.
     - Benchmark self-speculative vs separate draft model approaches.
+
+Checkpoint: 236dec4
