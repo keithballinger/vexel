@@ -36,6 +36,8 @@ Checkpoint: 33b398c
     - HTTP on `--port` (default 8080), gRPC on `--grpc-port` (default 9090).
     - Shared scheduler instance between both servers.
 
+Checkpoint: bb7fd3a
+
 ## Phase 3: Testing
 - [ ] Task: Integration tests
     - Test `Generate` RPC end-to-end with a mock scheduler.
