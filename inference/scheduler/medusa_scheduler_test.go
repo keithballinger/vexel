@@ -369,6 +369,160 @@ func TestMedusaArgmaxFloat32(t *testing.T) {
 	}
 }
 
+// TestMedusaSchedulerDefaultConfigTree verifies tree-related config defaults.
+func TestMedusaSchedulerDefaultConfigTree(t *testing.T) {
+	cfg := DefaultMedusaConfig()
+
+	if !cfg.UseTreeVerification {
+		t.Error("UseTreeVerification should default to true")
+	}
+	if cfg.TreeTopK != 3 {
+		t.Errorf("TreeTopK = %d, want 3", cfg.TreeTopK)
+	}
+	if cfg.TreeMaxNodes != 64 {
+		t.Errorf("TreeMaxNodes = %d, want 64", cfg.TreeMaxNodes)
+	}
+}
+
+// TestSelectBestTreePathFullAccept verifies path selection when the best path
+// is fully accepted by the target model.
+func TestSelectBestTreePathFullAccept(t *testing.T) {
+	vocabSize := 8
+
+	// Create 3 candidate paths sorted by confidence
+	paths := []medusa.CandidatePath{
+		{Tokens: []int{3, 1}, Confidence: 9.0},  // best
+		{Tokens: []int{3, 5}, Confidence: 7.0},  // shares prefix
+		{Tokens: []int{7, 1}, Confidence: 5.0},  // different start
+	}
+
+	// Verification logits: target confirms [3, 1] + bonus token 6
+	// Position 0 logits confirm token 3, position 1 confirms token 1,
+	// position 2 (bonus) predicts token 6.
+	verifyLogits := make([]float32, 3*vocabSize)
+	verifyLogits[0*vocabSize+3] = 10.0 // position 0 -> token 3
+	verifyLogits[1*vocabSize+1] = 10.0 // position 1 -> token 1
+	verifyLogits[2*vocabSize+6] = 10.0 // position 2 -> token 6 (bonus)
+
+	bestIdx, accepted, finalToken := selectBestTreePath(paths, verifyLogits, vocabSize)
+
+	if bestIdx != 0 {
+		t.Errorf("bestIdx = %d, want 0", bestIdx)
+	}
+	if accepted != 2 {
+		t.Errorf("accepted = %d, want 2", accepted)
+	}
+	if finalToken != 6 {
+		t.Errorf("finalToken = %d, want 6 (bonus)", finalToken)
+	}
+}
+
+// TestSelectBestTreePathFallback verifies that when the best path is rejected,
+// an alternate path with the target's preferred token is selected.
+func TestSelectBestTreePathFallback(t *testing.T) {
+	vocabSize := 8
+
+	// Best path is [3, 1], but target wants [7, ...] at position 0
+	paths := []medusa.CandidatePath{
+		{Tokens: []int{3, 1}, Confidence: 9.0}, // best confidence
+		{Tokens: []int{7, 1}, Confidence: 5.0}, // alternate with token 7
+		{Tokens: []int{7, 5}, Confidence: 4.0}, // another alternate with token 7
+	}
+
+	// Target prefers token 7 at position 0 (rejects 3)
+	verifyLogits := make([]float32, 3*vocabSize)
+	verifyLogits[0*vocabSize+7] = 10.0 // position 0 -> token 7 (not 3!)
+	verifyLogits[1*vocabSize+1] = 10.0 // position 1 -> token 1
+	verifyLogits[2*vocabSize+4] = 10.0 // bonus
+
+	bestIdx, accepted, finalToken := selectBestTreePath(paths, verifyLogits, vocabSize)
+
+	// Best path [3, 1] gets 0 accepted. Alternate [7, 1] should match position 0.
+	// Note: verifyLogits at position 1 are conditioned on token 3 (not 7),
+	// so we can only guarantee acceptance at the divergence point.
+	// selectBestTreePath should pick the path with most accepted tokens.
+	if accepted < 1 {
+		t.Errorf("accepted = %d, want >= 1 (alternate should match at position 0)", accepted)
+	}
+	if bestIdx == 0 {
+		t.Error("should not select path 0 (it was rejected at position 0)")
+	}
+	_ = finalToken
+}
+
+// TestSelectBestTreePathAllRejected verifies behavior when no path matches
+// the target at position 0.
+func TestSelectBestTreePathAllRejected(t *testing.T) {
+	vocabSize := 8
+
+	paths := []medusa.CandidatePath{
+		{Tokens: []int{3, 1}, Confidence: 9.0},
+		{Tokens: []int{7, 5}, Confidence: 5.0},
+	}
+
+	// Target wants token 2 at position 0 - no path has this
+	verifyLogits := make([]float32, 2*vocabSize)
+	verifyLogits[0*vocabSize+2] = 10.0 // token 2 at position 0
+
+	bestIdx, accepted, finalToken := selectBestTreePath(paths, verifyLogits, vocabSize)
+
+	if accepted != 0 {
+		t.Errorf("accepted = %d, want 0 (no path matches)", accepted)
+	}
+	// When no tokens accepted, finalToken should be the target's preferred token
+	if finalToken != 2 {
+		t.Errorf("finalToken = %d, want 2 (target correction)", finalToken)
+	}
+	_ = bestIdx
+}
+
+// TestSelectBestTreePathEmpty verifies edge case with no paths.
+func TestSelectBestTreePathEmpty(t *testing.T) {
+	bestIdx, accepted, finalToken := selectBestTreePath(nil, nil, 8)
+	if accepted != 0 {
+		t.Errorf("accepted = %d, want 0", accepted)
+	}
+	if bestIdx != 0 {
+		t.Errorf("bestIdx = %d, want 0", bestIdx)
+	}
+	_ = finalToken
+}
+
+// TestSelectBestTreePathPartialAccept verifies that when the best path is
+// partially accepted and an alternate shares the accepted prefix but diverges
+// later, the path with the most accepted tokens wins.
+func TestSelectBestTreePathPartialAccept(t *testing.T) {
+	vocabSize := 8
+
+	// 3-token paths
+	paths := []medusa.CandidatePath{
+		{Tokens: []int{3, 1, 5}, Confidence: 12.0}, // best
+		{Tokens: []int{3, 1, 2}, Confidence: 10.0}, // same prefix, different last
+		{Tokens: []int{3, 4, 2}, Confidence: 8.0},  // diverges at position 1
+	}
+
+	// Target accepts [3, 1] but rejects 5, prefers 2 at position 2
+	verifyLogits := make([]float32, 4*vocabSize)
+	verifyLogits[0*vocabSize+3] = 10.0 // position 0 -> 3
+	verifyLogits[1*vocabSize+1] = 10.0 // position 1 -> 1
+	verifyLogits[2*vocabSize+2] = 10.0 // position 2 -> 2 (rejects 5)
+	verifyLogits[3*vocabSize+0] = 10.0 // bonus
+
+	bestIdx, accepted, finalToken := selectBestTreePath(paths, verifyLogits, vocabSize)
+
+	// Path 1 [3, 1, 2] should be fully accepted (3 tokens)
+	// since it shares prefix [3, 1] and has the target's preferred token 2
+	if bestIdx != 1 {
+		t.Errorf("bestIdx = %d, want 1 (path with token 2 at position 2)", bestIdx)
+	}
+	if accepted != 3 {
+		t.Errorf("accepted = %d, want 3 (full path accepted)", accepted)
+	}
+	if finalToken != 0 {
+		t.Errorf("finalToken = %d, want 0 (bonus token)", finalToken)
+	}
+}
+
 // TestOnlineTrainerWithMedusaConfig verifies that the OnlineTrainer
 // properly progresses through training phases.
 func TestOnlineTrainerWithMedusaConfig(t *testing.T) {

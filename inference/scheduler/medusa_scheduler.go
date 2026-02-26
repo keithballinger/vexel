@@ -27,6 +27,19 @@ type MedusaConfig struct {
 	// Number of Medusa heads (future token predictions)
 	NumHeads int
 
+	// UseTreeVerification enables tree-based candidate verification.
+	// When enabled, top-k candidates per head form a candidate tree,
+	// and multiple paths are evaluated to maximize accepted tokens.
+	UseTreeVerification bool
+
+	// TreeTopK is the branching factor for the candidate tree.
+	// Each head contributes its top-k predictions as children at that level.
+	TreeTopK int
+
+	// TreeMaxNodes limits the total number of nodes in the candidate tree
+	// to prevent combinatorial explosion with many heads and high top-k.
+	TreeMaxNodes int
+
 	// Training configuration
 	TrainingConfig medusa.OnlineConfig
 }
@@ -36,6 +49,9 @@ func DefaultMedusaConfig() MedusaConfig {
 	return MedusaConfig{
 		EnableOnlineTraining: true,
 		NumHeads:             4,
+		UseTreeVerification:  true,
+		TreeTopK:             3,
+		TreeMaxNodes:         64,
 		TrainingConfig:       medusa.DefaultOnlineConfig(),
 	}
 }
@@ -190,6 +206,9 @@ func (ms *MedusaScheduler) step(ctx context.Context) error {
 	// Check if we should use Medusa speculation
 	useMedusa := ms.trainer != nil && ms.trainer.IsHot()
 
+	if useMedusa && ms.medusaConfig.UseTreeVerification {
+		return ms.runTreeMedusaDecodeStep(ctx, batch)
+	}
 	if useMedusa {
 		return ms.runMedusaDecodeStep(ctx, batch)
 	}
@@ -611,6 +630,293 @@ func (ms *MedusaScheduler) runMedusaDecodeStep(ctx context.Context, batch []*Seq
 	}
 
 	return nil
+}
+
+// runTreeMedusaDecodeStep uses tree-based candidate verification.
+// It builds a candidate tree from top-k Medusa head predictions,
+// extracts all paths sorted by confidence, and verifies the best
+// path against the target model. On partial rejection, alternate
+// paths are evaluated to maximize accepted tokens.
+func (ms *MedusaScheduler) runTreeMedusaDecodeStep(ctx context.Context, batch []*Sequence) error {
+	if len(batch) == 0 {
+		return nil
+	}
+
+	// Only support single sequence for speculation
+	if len(batch) > 1 {
+		return ms.runDecodeStepWithTraining(ctx, batch)
+	}
+
+	seq := batch[0]
+	useGPUCache := ms.runtime.GPUKVCache() != nil
+
+	// Handle prefill first
+	if seq.State() == StatePending && len(seq.PromptTokens()) > 0 && !seq.IsPrefillComplete() {
+		if useGPUCache {
+			if err := ms.runGPUPrefill(seq); err != nil {
+				return err
+			}
+		}
+		return ms.runDecodeStepWithTraining(ctx, batch)
+	}
+
+	if seq.State() != StateDecoding && !(seq.State() == StatePending && seq.IsPrefillComplete()) {
+		return nil
+	}
+
+	if ms.lastHidden == nil {
+		return ms.runDecodeStepWithTraining(ctx, batch)
+	}
+
+	inputToken, pos, hasMore := seq.NextInputToken()
+	if !hasMore {
+		inputToken = 1
+		pos = 0
+	}
+
+	// Step 1: Get logits from all heads
+	heads := ms.trainer.Heads()
+	headLogits := heads.ForwardAll(ms.lastHidden)
+
+	// Step 2: Build candidate tree
+	tree := medusa.BuildCandidateTree(headLogits, ms.medusaConfig.TreeTopK, ms.medusaConfig.TreeMaxNodes)
+	if tree == nil {
+		return ms.runDecodeStepWithTraining(ctx, batch)
+	}
+
+	// Step 3: Extract all paths sorted by confidence
+	paths := tree.Paths()
+	if len(paths) == 0 {
+		return ms.runDecodeStepWithTraining(ctx, batch)
+	}
+
+	// Step 4: Use the best path as draft sequence for verification
+	bestPath := paths[0]
+	numDraft := len(bestPath.Tokens)
+	ms.specMetrics.DraftTokensGenerated += numDraft
+
+	// Build verification sequence: [input_token, draft_0, draft_1, ...]
+	verifyTokens := make([]int, 1+numDraft)
+	verifyTokens[0] = inputToken
+	copy(verifyTokens[1:], bestPath.Tokens)
+
+	// Step 5: Run target model verification
+	cache := ms.runtime.GPUKVCache()
+	startPos := pos
+	if cache != nil {
+		startPos = cache.SeqLen()
+	}
+
+	startTime := time.Now()
+	allLogits, hiddenStates, err := ms.runtime.VerifySpeculativeWithHidden(verifyTokens, startPos)
+	verifyTime := time.Since(startTime)
+
+	if err != nil {
+		return ms.runDecodeStepWithTraining(ctx, batch)
+	}
+
+	ms.specMetrics.VerificationSteps++
+	ms.specMetrics.VerifyTime += verifyTime
+
+	// Step 6: Extract verification logits
+	vocabSize := ms.runtime.Config().VocabSize
+	allLogitsData := ms.getLogitsOnCPU(allLogits, (1+numDraft)*vocabSize)
+	if allLogitsData == nil {
+		return ms.runDecodeStepWithTraining(ctx, batch)
+	}
+
+	// Step 7: Evaluate all tree paths against verification logits to find
+	// the path with the most accepted tokens.
+	bestIdx, numAccepted, finalToken := selectBestTreePath(paths, allLogitsData, vocabSize)
+
+	ms.specMetrics.DraftTokensAccepted += numAccepted
+
+	debugSpec := os.Getenv("MEDUSA_DEBUG") != ""
+	if debugSpec {
+		fmt.Printf("[TreeSpec] best_path=%v, selected_path=%v, accepted=%d, final=%d, total_paths=%d\n",
+			bestPath.Tokens, paths[bestIdx].Tokens, numAccepted, finalToken, len(paths))
+	}
+
+	// Step 8: Truncate KV cache
+	if cache != nil {
+		newCacheLen := startPos + 1 + numAccepted
+		cache.Truncate(newCacheLen)
+	}
+
+	// Step 9: Output accepted tokens + final token
+	selectedPath := paths[bestIdx]
+	acceptedTokens := make([]int, 0, numAccepted+1)
+	for i := 0; i < numAccepted && i < len(selectedPath.Tokens); i++ {
+		acceptedTokens = append(acceptedTokens, selectedPath.Tokens[i])
+	}
+	acceptedTokens = append(acceptedTokens, finalToken)
+
+	ms.metrics.TotalTokens += len(acceptedTokens)
+	ms.metrics.DecodeTokens += len(acceptedTokens)
+
+	eosToken := 2
+	if ms.tokenizer != nil {
+		eosToken = ms.tokenizer.EOS()
+	}
+
+	for _, tokenID := range acceptedTokens {
+		seq.AdvancePosition()
+		if seq.State() == StatePending {
+			seq.SetState(StateDecoding)
+		}
+
+		seq.AddGeneratedToken(tokenID)
+
+		if tokenID == eosToken {
+			seq.SetState(StateFinished)
+			seq.Close()
+			ms.lastHidden = nil
+			return nil
+		}
+
+		if ms.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= ms.config.MaxTokens {
+			seq.SetState(StateFinished)
+			seq.Close()
+			ms.lastHidden = nil
+			return nil
+		}
+
+		var text string
+		if ms.tokenizer != nil {
+			text, _ = ms.tokenizer.Decode([]int{tokenID})
+		} else {
+			text = fmt.Sprintf(" %d", tokenID)
+		}
+		seq.PushToken(text)
+	}
+
+	// Step 10: Update hidden state for next speculation
+	if len(hiddenStates) > numAccepted && hiddenStates[numAccepted] != nil {
+		ms.lastHidden = hiddenStates[numAccepted]
+
+		if ms.trainer != nil {
+			for i := 0; i < len(hiddenStates) && i < len(verifyTokens); i++ {
+				futureStart := i + 1
+				if futureStart < len(verifyTokens) {
+					actualToken := verifyTokens[futureStart]
+					ms.collectTrainingSample(hiddenStates[i], actualToken)
+				}
+			}
+		}
+	} else {
+		ms.lastHidden = nil
+	}
+
+	return nil
+}
+
+// selectBestTreePath evaluates candidate paths against verification logits
+// from the target model. It returns the index of the path with the most
+// accepted tokens, the acceptance count, and the final (correction or bonus) token.
+//
+// The verifyLogits are produced by running the best path through the target model,
+// so at each position, the logits are conditioned on the prefix of the best path.
+// For paths that share a common prefix with the best path up to the divergence point,
+// the logits at positions within the shared prefix are still valid.
+func selectBestTreePath(paths []medusa.CandidatePath, verifyLogits []float32, vocabSize int) (bestIdx int, accepted int, finalToken int) {
+	if len(paths) == 0 || len(verifyLogits) == 0 || vocabSize <= 0 {
+		return 0, 0, 0
+	}
+
+	numPositions := len(verifyLogits) / vocabSize
+
+	// First, evaluate the best path (index 0) - this is the path we actually verified
+	bestAccepted := 0
+	bestFinal := 0
+
+	if len(paths[0].Tokens) > 0 {
+		for i, draftToken := range paths[0].Tokens {
+			if i >= numPositions {
+				break
+			}
+			posLogits := verifyLogits[i*vocabSize : (i+1)*vocabSize]
+			targetToken := argmaxFloat32(posLogits)
+			if draftToken == targetToken {
+				bestAccepted++
+			} else {
+				bestFinal = targetToken
+				break
+			}
+		}
+
+		// If all tokens accepted, sample bonus token
+		if bestAccepted == len(paths[0].Tokens) && bestAccepted < numPositions {
+			posLogits := verifyLogits[bestAccepted*vocabSize : (bestAccepted+1)*vocabSize]
+			bestFinal = argmaxFloat32(posLogits)
+		}
+	}
+
+	accepted = bestAccepted
+	finalToken = bestFinal
+	bestIdx = 0
+
+	// Now check alternate paths for better acceptance.
+	// An alternate path can only be validly checked at positions where it shares
+	// a prefix with the best path (since the verification logits are conditioned
+	// on the best path's tokens).
+	for pi := 1; pi < len(paths); pi++ {
+		altPath := paths[pi]
+		if len(altPath.Tokens) == 0 {
+			continue
+		}
+
+		altAccepted := 0
+		altFinal := 0
+
+		for i, draftToken := range altPath.Tokens {
+			if i >= numPositions {
+				break
+			}
+
+			// Check if this position's logits are valid for this alternate path.
+			// The logits at position i are conditioned on the best path's tokens
+			// at positions 0..i-1. So the alternate path must share the same prefix.
+			if i > 0 && i-1 < len(paths[0].Tokens) && i-1 < len(altPath.Tokens) {
+				// The verification logits at position i were generated with
+				// paths[0].Tokens[i-1] as input. For the alternate path to use
+				// these logits, it must have the same token at position i-1.
+				if altPath.Tokens[i-1] != paths[0].Tokens[i-1] {
+					// Prefix diverged - logits no longer valid for this path
+					break
+				}
+			}
+
+			posLogits := verifyLogits[i*vocabSize : (i+1)*vocabSize]
+			targetToken := argmaxFloat32(posLogits)
+			if draftToken == targetToken {
+				altAccepted++
+			} else {
+				altFinal = targetToken
+				break
+			}
+		}
+
+		// If all tokens accepted, sample bonus token
+		if altAccepted == len(altPath.Tokens) && altAccepted < numPositions {
+			posLogits := verifyLogits[altAccepted*vocabSize : (altAccepted+1)*vocabSize]
+			altFinal = argmaxFloat32(posLogits)
+		}
+
+		// Select the path with more accepted tokens
+		if altAccepted > accepted {
+			accepted = altAccepted
+			finalToken = altFinal
+			bestIdx = pi
+		}
+	}
+
+	// If no tokens accepted from any path, use the target's correction at position 0
+	if accepted == 0 && numPositions > 0 && finalToken == 0 {
+		posLogits := verifyLogits[0:vocabSize]
+		finalToken = argmaxFloat32(posLogits)
+	}
+
+	return bestIdx, accepted, finalToken
 }
 
 // argmaxFloat32 returns the index of the maximum value in the slice.
