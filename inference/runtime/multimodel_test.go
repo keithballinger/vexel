@@ -109,60 +109,61 @@ func TestModelConfigFromGGUF_ArchitectureDetection(t *testing.T) {
 		wantBias         bool
 		wantParallel     bool
 		wantRoPENeox     bool
+		wantSoftCap      float32
 	}{
 		{
 			name:     "llama",
 			arch:     "llama",
 			wantNorm: NormRMSNorm, wantMLP: MLPSwiGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false,
+			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0,
 		},
 		{
 			name:     "mistral",
 			arch:     "mistral",
 			wantNorm: NormRMSNorm, wantMLP: MLPSwiGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false,
+			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0,
 		},
 		{
 			name:     "qwen2",
 			arch:     "qwen2",
 			wantNorm: NormRMSNorm, wantMLP: MLPSwiGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false,
+			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0,
 		},
 		{
 			name:     "phi2",
 			arch:     "phi2",
 			wantNorm: NormLayerNorm, wantMLP: MLPGELU,
-			wantBias: true, wantParallel: true, wantRoPENeox: true,
+			wantBias: true, wantParallel: true, wantRoPENeox: true, wantSoftCap: 0,
 		},
 		{
 			name:     "phi3",
 			arch:     "phi3",
 			wantNorm: NormLayerNorm, wantMLP: MLPGELU,
-			wantBias: true, wantParallel: true, wantRoPENeox: true,
+			wantBias: true, wantParallel: true, wantRoPENeox: true, wantSoftCap: 0,
 		},
 		{
 			name:     "gpt2",
 			arch:     "gpt2",
 			wantNorm: NormLayerNorm, wantMLP: MLPGELU,
-			wantBias: true, wantParallel: false, wantRoPENeox: true,
+			wantBias: true, wantParallel: false, wantRoPENeox: true, wantSoftCap: 0,
 		},
 		{
 			name:     "gptneox",
 			arch:     "gptneox",
 			wantNorm: NormLayerNorm, wantMLP: MLPGELU,
-			wantBias: true, wantParallel: false, wantRoPENeox: true,
+			wantBias: true, wantParallel: false, wantRoPENeox: true, wantSoftCap: 0,
 		},
 		{
 			name:     "gemma",
 			arch:     "gemma",
 			wantNorm: NormRMSNorm, wantMLP: MLPGeGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false,
+			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0,
 		},
 		{
 			name:     "gemma2",
 			arch:     "gemma2",
 			wantNorm: NormRMSNorm, wantMLP: MLPGeGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false,
+			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 30.0,
 		},
 	}
 
@@ -196,6 +197,9 @@ func TestModelConfigFromGGUF_ArchitectureDetection(t *testing.T) {
 			}
 			if cfg.RoPENeox != tt.wantRoPENeox {
 				t.Errorf("RoPENeox: got %v, want %v", cfg.RoPENeox, tt.wantRoPENeox)
+			}
+			if cfg.AttentionLogitSoftCap != tt.wantSoftCap {
+				t.Errorf("AttentionLogitSoftCap: got %v, want %v", cfg.AttentionLogitSoftCap, tt.wantSoftCap)
 			}
 		})
 	}

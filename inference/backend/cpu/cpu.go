@@ -18,6 +18,7 @@ var _ backend.QuantizedMatMul = (*CPUBackend)(nil)
 var _ backend.LayerNormOps = (*CPUBackend)(nil)
 var _ backend.GELUOps = (*CPUBackend)(nil)
 var _ backend.BiasOps = (*CPUBackend)(nil)
+var _ backend.SoftCapAttentionOps = (*CPUBackend)(nil)
 
 // CPUBackend implements the Backend interface using CPU execution.
 type CPUBackend struct{}
@@ -609,6 +610,140 @@ func (b *CPUBackend) SDPAPrefill(q, k, v, out tensor.DevicePtr, seqLen, numQHead
 				vOffset := kPos*numKVHeads*headDim + kvHead*headDim
 				vVec := vData[vOffset : vOffset+headDim]
 
+				weight := scores[kPos]
+				for d := 0; d < headDim; d++ {
+					outHead[d] += weight * vVec[d]
+				}
+			}
+		}
+	}
+}
+
+// SDPASoftCap performs SDPA with logit soft-capping applied before softmax.
+// Gemma 2 uses softcap = cap * tanh(scores / cap).
+func (b *CPUBackend) SDPASoftCap(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale, softcap float32, kvHeadStride int) {
+	qData := ptrToFloat32Slice(q, numQHeads*headDim)
+	kData := ptrToFloat32Slice(k, numKVHeads*kvHeadStride)
+	vData := ptrToFloat32Slice(v, numKVHeads*kvHeadStride)
+	outData := ptrToFloat32Slice(out, numQHeads*headDim)
+
+	headsPerKV := numQHeads / numKVHeads
+	scores := make([]float32, kvLen)
+
+	for h := 0; h < numQHeads; h++ {
+		kvHead := h / headsPerKV
+		qOffset := h * headDim
+		qHead := qData[qOffset : qOffset+headDim]
+		outOffset := h * headDim
+		outHead := outData[outOffset : outOffset+headDim]
+		kvHeadBase := kvHead * kvHeadStride
+
+		for pos := 0; pos < kvLen; pos++ {
+			kOffset := kvHeadBase + pos*headDim
+			kVec := kData[kOffset : kOffset+headDim]
+			var dot float32
+			for d := 0; d < headDim; d++ {
+				dot += qHead[d] * kVec[d]
+			}
+			score := dot * scale
+			if softcap > 0 {
+				score = softcap * float32(math.Tanh(float64(score/softcap)))
+			}
+			scores[pos] = score
+		}
+
+		maxScore := scores[0]
+		for _, s := range scores {
+			if s > maxScore {
+				maxScore = s
+			}
+		}
+
+		var sumExp float32
+		for i := range scores {
+			scores[i] = float32(math.Exp(float64(scores[i] - maxScore)))
+			sumExp += scores[i]
+		}
+
+		invSum := 1.0 / sumExp
+		for i := range scores {
+			scores[i] *= invSum
+		}
+
+		for d := 0; d < headDim; d++ {
+			outHead[d] = 0
+		}
+
+		for pos := 0; pos < kvLen; pos++ {
+			vOffset := kvHeadBase + pos*headDim
+			vVec := vData[vOffset : vOffset+headDim]
+			weight := scores[pos]
+			for d := 0; d < headDim; d++ {
+				outHead[d] += weight * vVec[d]
+			}
+		}
+	}
+}
+
+// SDPAPrefillSoftCap performs prefill SDPA with logit soft-capping and causal masking.
+func (b *CPUBackend) SDPAPrefillSoftCap(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale, softcap float32) {
+	qData := ptrToFloat32Slice(q, seqLen*numQHeads*headDim)
+	kData := ptrToFloat32Slice(k, seqLen*numKVHeads*headDim)
+	vData := ptrToFloat32Slice(v, seqLen*numKVHeads*headDim)
+	outData := ptrToFloat32Slice(out, seqLen*numQHeads*headDim)
+
+	headsPerKV := numQHeads / numKVHeads
+
+	for qPos := 0; qPos < seqLen; qPos++ {
+		for h := 0; h < numQHeads; h++ {
+			kvHead := h / headsPerKV
+			qOffset := qPos*numQHeads*headDim + h*headDim
+			qHead := qData[qOffset : qOffset+headDim]
+			outOffset := qPos*numQHeads*headDim + h*headDim
+			outHead := outData[outOffset : outOffset+headDim]
+
+			maxKLen := qPos + 1
+			scores := make([]float32, maxKLen)
+
+			for kPos := 0; kPos < maxKLen; kPos++ {
+				kOffset := kPos*numKVHeads*headDim + kvHead*headDim
+				kVec := kData[kOffset : kOffset+headDim]
+				var dot float32
+				for d := 0; d < headDim; d++ {
+					dot += qHead[d] * kVec[d]
+				}
+				score := dot * scale
+				if softcap > 0 {
+					score = softcap * float32(math.Tanh(float64(score/softcap)))
+				}
+				scores[kPos] = score
+			}
+
+			maxScore := scores[0]
+			for _, s := range scores {
+				if s > maxScore {
+					maxScore = s
+				}
+			}
+
+			var sumExp float32
+			for i := range scores {
+				scores[i] = float32(math.Exp(float64(scores[i] - maxScore)))
+				sumExp += scores[i]
+			}
+
+			invSum := 1.0 / sumExp
+			for i := range scores {
+				scores[i] *= invSum
+			}
+
+			for d := 0; d < headDim; d++ {
+				outHead[d] = 0
+			}
+
+			for kPos := 0; kPos < maxKLen; kPos++ {
+				vOffset := kPos*numKVHeads*headDim + kvHead*headDim
+				vVec := vData[vOffset : vOffset+headDim]
 				weight := scores[kPos]
 				for d := 0; d < headDim; d++ {
 					outHead[d] += weight * vVec[d]

@@ -318,6 +318,19 @@ void metal_sdpa_flash_decode_f32(void* queue, void* pipeline,
                                   int kvLen, int numQHeads, int numKVHeads, int headDim,
                                   float scale, int kvHeadStride);
 
+// SDPA decode with logit soft-capping (Gemma 2)
+// Applies cap * tanh(score / cap) before softmax
+void metal_sdpa_softcap_decode_f32(void* queue, void* pipeline,
+                                    void* Q, void* K, void* V, void* out,
+                                    int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                    float scale, int kvHeadStride, float softcap);
+
+// SDPA prefill with logit soft-capping (Gemma 2)
+void metal_sdpa_softcap_prefill_f32(void* queue, void* pipeline,
+                                     void* Q, void* K, void* V, void* out,
+                                     int seqLen, int numQHeads, int numKVHeads, int headDim,
+                                     float scale, float softcap);
+
 // Legacy interface (deprecated)
 void metal_scaled_dot_product_attention(void* queue,
                                         void* Q, void* K, void* V, void* out,

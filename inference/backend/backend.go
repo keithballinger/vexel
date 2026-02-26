@@ -182,6 +182,20 @@ type GELUOps interface {
 	GELUMul(gate, up, out tensor.DevicePtr, n int)
 }
 
+// SoftCapAttentionOps is an optional interface for backends that support logit soft-capping
+// in attention. Gemma 2 uses softcap = cap * tanh(scores / cap) before softmax.
+// When softcap=0, the kernel behaves identically to regular SDPA (no-op).
+type SoftCapAttentionOps interface {
+	// SDPASoftCap performs SDPA with logit soft-capping applied before softmax.
+	// Same signature as SDPA but with an additional softcap parameter.
+	// softcap: cap value (typically 30.0 for Gemma 2, 0 = disabled)
+	SDPASoftCap(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale, softcap float32, kvHeadStride int)
+
+	// SDPAPrefillSoftCap performs prefill SDPA with logit soft-capping and causal masking.
+	// softcap: cap value (typically 30.0 for Gemma 2, 0 = disabled)
+	SDPAPrefillSoftCap(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale, softcap float32)
+}
+
 // BiasOps is an optional interface for backends that support bias addition.
 // Required for architectures with bias terms in linear projections (Phi, GPT-2).
 type BiasOps interface {

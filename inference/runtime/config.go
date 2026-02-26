@@ -79,6 +79,9 @@ type ModelConfig struct {
 	                          // Phi-2 uses partial RoPE where only first 32 dims of 80 are rotated
 	RoPENeox         bool     // Use NEOX-style RoPE (split pairs: i, i+dim/2) vs LLaMA-style (interleaved: 2i, 2i+1)
 	SlidingWindow    int      // Sliding window size for attention (0 = infinite/full context)
+
+	// Gemma 2-specific settings
+	AttentionLogitSoftCap float32 // Logit soft-capping value (0 = disabled, typically 30.0 for Gemma 2)
 }
 
 // MemoryPlan holds the estimated memory usage breakdown.
@@ -307,7 +310,8 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 	mlpType := MLPSwiGLU
 	hasBias := false
 	parallelResidual := false
-	ropeNeox := false // Default to LLaMA-style (interleaved pairs)
+	ropeNeox := false         // Default to LLaMA-style (interleaved pairs)
+	attnLogitSoftCap := float32(0) // 0 = disabled, typically 30.0 for Gemma 2
 
 	switch g.Architecture {
 	case "phi", "phi2", "phi3":
@@ -322,11 +326,17 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		hasBias = true
 		ropeNeox = true // GPT-NeoX uses NEOX-style RoPE (split pairs)
 		// GPT-2/NeoX use serial residual
-	case "gemma", "gemma2":
+	case "gemma":
 		normType = NormRMSNorm
 		mlpType = MLPGeGLU
 		hasBias = false
-		// Gemma uses LLaMA-style RoPE (interleaved pairs)
+		// Gemma 1 uses LLaMA-style RoPE (interleaved pairs)
+	case "gemma2":
+		normType = NormRMSNorm
+		mlpType = MLPGeGLU
+		hasBias = false
+		attnLogitSoftCap = 30.0 // Gemma 2 uses logit soft-capping with cap=30
+		// Gemma 2 uses LLaMA-style RoPE (interleaved pairs)
 	case "llama", "mistral", "qwen2":
 		// Default LLaMA-family settings
 		normType = NormRMSNorm
@@ -354,7 +364,8 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		HasBias:           hasBias,
 		ParallelResidual:  parallelResidual,
 		RoPEDim:           g.RoPEDimCount, // 0 = full headDim, otherwise partial RoPE
-		RoPENeox:          ropeNeox,       // NEOX-style (split) vs LLaMA-style (interleaved) RoPE
-		SlidingWindow:     g.SlidingWindow,
+		RoPENeox:              ropeNeox,       // NEOX-style (split) vs LLaMA-style (interleaved) RoPE
+		SlidingWindow:         g.SlidingWindow,
+		AttentionLogitSoftCap: attnLogitSoftCap,
 	}
 }

@@ -74,6 +74,8 @@ type Backend struct {
 	layernormPipeline               unsafe.Pointer
 	geluPipeline                    unsafe.Pointer
 	geluMulPipeline                 unsafe.Pointer
+	sdpaSoftCapDecodePipeline       unsafe.Pointer // SDPA decode with logit soft-capping (Gemma 2)
+	sdpaSoftCapPrefillPipeline      unsafe.Pointer // SDPA prefill with logit soft-capping (Gemma 2)
 	addBiasPipeline                 unsafe.Pointer
 	addRMSNormPipeline              unsafe.Pointer
 	ropePipeline                    unsafe.Pointer
@@ -208,6 +210,8 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.layernormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("layernorm_f32"))
 	b.geluPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("gelu_f32"))
 	b.geluMulPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("gelu_mul_f32"))
+	b.sdpaSoftCapDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_softcap_decode_f32"))
+	b.sdpaSoftCapPrefillPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_softcap_prefill_f32"))
 	b.addBiasPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_bias_f32"))
 	b.addRMSNormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_rmsnorm_f32"))
 	b.ropePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_f32"))
@@ -1103,6 +1107,29 @@ func (b *Backend) SDPAPrefillStandard(q, k, v, out tensor.DevicePtr, seqLen, num
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
 		C.float(scale))
+}
+
+// SDPASoftCap performs SDPA with logit soft-capping applied before softmax.
+// Used by Gemma 2: scores = cap * tanh(scores / cap) before softmax.
+// When softcap=0, behaves identically to regular SDPA.
+func (b *Backend) SDPASoftCap(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale, softcap float32, kvHeadStride int) {
+	b.profiler.RecordDispatch("SDPASoftCap")
+	C.metal_sdpa_softcap_decode_f32(b.queue, b.sdpaSoftCapDecodePipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale), C.int(kvHeadStride), C.float(softcap))
+}
+
+// SDPAPrefillSoftCap performs prefill SDPA with logit soft-capping and causal masking.
+// Used by Gemma 2 during the prefill phase.
+func (b *Backend) SDPAPrefillSoftCap(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale, softcap float32) {
+	b.profiler.RecordDispatch("SDPAPrefillSoftCap")
+	C.metal_sdpa_softcap_prefill_f32(b.queue, b.sdpaSoftCapPrefillPipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale), C.float(softcap))
 }
 
 // FlashAttention2 performs optimized SDPA with K/V tiling in shared memory.

@@ -273,6 +273,12 @@ type BlockRuntime struct {
 	// Cached interface for bias operations
 	biasOps backend.BiasOps
 
+	// Cached interface for logit soft-capping in attention (Gemma 2)
+	softCapOps backend.SoftCapAttentionOps
+
+	// Gemma 2 attention config
+	AttentionLogitSoftCap float32 // 0 = disabled, typically 30.0 for Gemma 2
+
 	// Execution plan (set by ModelRuntime.BuildPlan)
 	plan *ExecutionPlan
 }
@@ -318,10 +324,14 @@ func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 	// Cache fused operations interface check
 	br.fusedOps, _ = b.(backend.FusedOps)
 
-	// Cache LayerNorm, GELU, and Bias operations interface checks
+	// Cache LayerNorm, GELU, Bias, and SoftCap operations interface checks
 	br.layerNormOps, _ = b.(backend.LayerNormOps)
 	br.geluOps, _ = b.(backend.GELUOps)
 	br.biasOps, _ = b.(backend.BiasOps)
+	br.softCapOps, _ = b.(backend.SoftCapAttentionOps)
+
+	// Gemma 2 attention config
+	br.AttentionLogitSoftCap = config.AttentionLogitSoftCap
 
 	return br
 }
@@ -486,9 +496,17 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 	// 4. Attention
 	scale := float32(1.0 / sqrt(float64(headDim)))
 	if seqLen == 1 {
-		b.backend.SDPA(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale, headDim)
+		if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
+			b.softCapOps.SDPASoftCap(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap, headDim)
+		} else {
+			b.backend.SDPA(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale, headDim)
+		}
 	} else {
-		b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+		if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
+			b.softCapOps.SDPAPrefillSoftCap(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap)
+		} else {
+			b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+		}
 	}
 
 	// Save normOut for parallel residual
@@ -668,7 +686,11 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 			return x, fmt.Errorf("gpu pool store prefill: %w", err)
 		}
 		// Self-attention over current tokens (contiguous, no cache needed)
-		b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+		if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
+			b.softCapOps.SDPAPrefillSoftCap(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap)
+		} else {
+			b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+		}
 	} else if pagedCache != nil {
 		// CPU paged path: GPU→CPU→GPU roundtrip (fallback)
 		var fullKPtr, fullVPtr tensor.DevicePtr
@@ -722,13 +744,25 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 		}
 
 		if seqLen == 1 {
-			b.backend.SDPA(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale, numKVHeads*headDim)
+			if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
+				b.softCapOps.SDPASoftCap(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap, numKVHeads*headDim)
+			} else {
+				b.backend.SDPA(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale, numKVHeads*headDim)
+			}
 		} else {
-			b.backend.SDPAPrefill(qPtr, fullKPtr, fullVPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+			if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
+				b.softCapOps.SDPAPrefillSoftCap(qPtr, fullKPtr, fullVPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap)
+			} else {
+				b.backend.SDPAPrefill(qPtr, fullKPtr, fullVPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+			}
 		}
 	} else {
 		// No cache - use current K/V only (for prefill self-attention)
-		b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+		if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
+			b.softCapOps.SDPAPrefillSoftCap(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap)
+		} else {
+			b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+		}
 	}
 	// No sync - SDPA must complete before Wo can read attnOut (serialized in queue)
 
@@ -1220,7 +1254,11 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				if debugDecode && layerIdx == 0 {
 					fmt.Printf("FP32 (stride=%d)\n", gpuCache.KVHeadStride())
 				}
-				b.backend.SDPA(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale, gpuCache.KVHeadStride())
+				if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
+					b.softCapOps.SDPASoftCap(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap, gpuCache.KVHeadStride())
+				} else {
+					b.backend.SDPA(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale, gpuCache.KVHeadStride())
+				}
 			}
 		} else {
 			// Prefill: use causal SDPAPrefill
@@ -1232,7 +1270,11 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				b.fp16Ops.ConvertF16ToF32(attnOutF16Ptr, attnOutPtr, qSize)
 			} else {
 				// FP32 path
-				b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+				if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
+					b.softCapOps.SDPAPrefillSoftCap(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap)
+				} else {
+					b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+				}
 			}
 		}
 	})

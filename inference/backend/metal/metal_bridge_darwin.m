@@ -4125,6 +4125,82 @@ kernel void sdpa_gqa_f32(
     }
 }
 
+// SDPA decode with logit soft-capping (Gemma 2).
+// Applies cap * tanh(score / cap) before softmax.
+// softcap: soft-cap value (typically 30.0 for Gemma 2).
+kernel void sdpa_softcap_decode_f32(
+    device const float* Q [[buffer(0)]],
+    device const float* K [[buffer(1)]],
+    device const float* V [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int& kvLen [[buffer(4)]],
+    constant int& numQHeads [[buffer(5)]],
+    constant int& numKVHeads [[buffer(6)]],
+    constant int& headDim [[buffer(7)]],
+    constant float& scale [[buffer(8)]],
+    constant int& kvHeadStride [[buffer(9)]],
+    constant float& softcap [[buffer(10)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    int qHead = gid;
+    if (qHead >= numQHeads) return;
+
+    int headsPerKV = numQHeads / numKVHeads;
+    int kvHead = qHead / headsPerKV;
+
+    int qOffset = qHead * headDim;
+    int outOffset = qHead * headDim;
+    int kvHeadBase = kvHead * kvHeadStride;
+
+    // First pass: find max score (with soft-capping)
+    float maxScore = -INFINITY;
+    for (int pos = 0; pos < kvLen; pos++) {
+        int kOffset = kvHeadBase + pos * headDim;
+        float dot = 0.0f;
+        for (int d = 0; d < headDim; d++) {
+            dot += Q[qOffset + d] * K[kOffset + d];
+        }
+        float score = dot * scale;
+        // Apply soft-capping: cap * tanh(score / cap)
+        if (softcap > 0.0f) {
+            score = softcap * tanh(score / softcap);
+        }
+        maxScore = max(maxScore, score);
+    }
+
+    // Initialize output to zero
+    for (int d = 0; d < headDim; d++) {
+        out[outOffset + d] = 0.0f;
+    }
+
+    // Second pass: compute softmax and weighted sum
+    float sumExp = 0.0f;
+    for (int pos = 0; pos < kvLen; pos++) {
+        int kOffset = kvHeadBase + pos * headDim;
+        int vOffset = kvHeadBase + pos * headDim;
+
+        float dot = 0.0f;
+        for (int d = 0; d < headDim; d++) {
+            dot += Q[qOffset + d] * K[kOffset + d];
+        }
+        float score = dot * scale;
+        if (softcap > 0.0f) {
+            score = softcap * tanh(score / softcap);
+        }
+        float weight = exp(score - maxScore);
+        sumExp += weight;
+
+        for (int d = 0; d < headDim; d++) {
+            out[outOffset + d] += weight * V[vOffset + d];
+        }
+    }
+
+    float invSum = 1.0f / sumExp;
+    for (int d = 0; d < headDim; d++) {
+        out[outOffset + d] *= invSum;
+    }
+}
+
 // Flash Decoding - parallelized SDPA for decode phase
 // Two-phase approach:
 // Phase 1: Threads cooperatively compute all scores, find global max and sum
@@ -4526,6 +4602,139 @@ kernel void sdpa_prefill_f32(
     }
 
     // Write output (each thread writes its dimensions)
+    int outOffset = qPos * numQHeads * headDim + qHead * headDim;
+    float invSum = 1.0f / runningSum;
+
+    for (int i = 0; i < 4 && (int)(tid + i * PREFILL_THREADS) < headDim; i++) {
+        int d = tid + i * PREFILL_THREADS;
+        out[outOffset + d] = acc[i] * invSum;
+    }
+}
+
+// SDPA prefill with logit soft-capping (Gemma 2).
+// Same tiled algorithm as sdpa_prefill_f32, with soft-cap applied to scores.
+kernel void sdpa_softcap_prefill_f32(
+    device const float* Q [[buffer(0)]],
+    device const float* K [[buffer(1)]],
+    device const float* V [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int& seqLen [[buffer(4)]],
+    constant int& numQHeads [[buffer(5)]],
+    constant int& numKVHeads [[buffer(6)]],
+    constant int& headDim [[buffer(7)]],
+    constant float& scale [[buffer(8)]],
+    constant float& softcap [[buffer(9)]],
+    threadgroup float* shared [[threadgroup(0)]],
+    uint2 gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int qPos = gid.x;
+    int qHead = gid.y;
+
+    if (qPos >= seqLen || qHead >= numQHeads) return;
+
+    int headsPerKV = numQHeads / numKVHeads;
+    int kvHead = qHead / headsPerKV;
+
+    int qOffset = qPos * numQHeads * headDim + qHead * headDim;
+    int maxKLen = qPos + 1;
+
+    threadgroup float* scores = shared;
+    threadgroup float* warpScratch = shared + PREFILL_TILE_K;
+
+    float runningMax = -INFINITY;
+    float runningSum = 0.0f;
+    float acc[4] = {0.0f};
+
+    for (int tileStart = 0; tileStart < maxKLen; tileStart += PREFILL_TILE_K) {
+        int tileEnd = min(tileStart + PREFILL_TILE_K, maxKLen);
+        int tileSize = tileEnd - tileStart;
+
+        float localScore = -INFINITY;
+        if ((int)tid < tileSize) {
+            int kPos = tileStart + tid;
+            int kOffset = kPos * numKVHeads * headDim + kvHead * headDim;
+
+            float dot = 0.0f;
+            for (int d = 0; d < headDim; d++) {
+                dot += Q[qOffset + d] * K[kOffset + d];
+            }
+            localScore = dot * scale;
+            // Apply soft-capping
+            if (softcap > 0.0f) {
+                localScore = softcap * tanh(localScore / softcap);
+            }
+        }
+
+        if ((int)tid < tileSize) {
+            scores[tid] = localScore;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Find tile max
+        float tileMax = -INFINITY;
+        for (int i = tid; i < tileSize; i += PREFILL_THREADS) {
+            tileMax = max(tileMax, scores[i]);
+        }
+        tileMax = simd_max(tileMax);
+        if (simd_lane == 0) {
+            warpScratch[simd_group] = tileMax;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < 2) {
+            tileMax = max(warpScratch[0], warpScratch[1]);
+            warpScratch[0] = tileMax;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        tileMax = warpScratch[0];
+
+        // Online softmax update
+        float newMax = max(runningMax, tileMax);
+        float rescale = exp(runningMax - newMax);
+
+        for (int i = 0; i < 4; i++) {
+            acc[i] *= rescale;
+        }
+        runningSum *= rescale;
+
+        float tileSum = 0.0f;
+        for (int i = tid; i < tileSize; i += PREFILL_THREADS) {
+            float expScore = exp(scores[i] - newMax);
+            scores[i] = expScore;
+            tileSum += expScore;
+        }
+
+        tileSum = simd_sum(tileSum);
+        if (simd_lane == 0) {
+            warpScratch[simd_group] = tileSum;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < 2) {
+            tileSum = warpScratch[0] + warpScratch[1];
+            warpScratch[0] = tileSum;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        tileSum = warpScratch[0];
+
+        runningSum += tileSum;
+        runningMax = newMax;
+
+        // Accumulate weighted V
+        for (int kIdx = 0; kIdx < tileSize; kIdx++) {
+            float weight = scores[kIdx];
+            int kPos = tileStart + kIdx;
+            int vOffset = kPos * numKVHeads * headDim + kvHead * headDim;
+
+            for (int i = 0; i < 4 && (int)(tid + i * PREFILL_THREADS) < headDim; i++) {
+                int d = tid + i * PREFILL_THREADS;
+                acc[i] += weight * V[vOffset + d];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
     int outOffset = qPos * numQHeads * headDim + qHead * headDim;
     float invSum = 1.0f / runningSum;
 
@@ -7056,6 +7265,75 @@ void metal_sdpa_flash_decode_f32(void* queuePtr, void* pipelinePtr,
     // One threadgroup per Q head
     MTLSize threadgroups = MTLSizeMake(numQHeads, 1, 1);
     MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// SDPA decode with logit soft-capping (Gemma 2)
+void metal_sdpa_softcap_decode_f32(void* queuePtr, void* pipelinePtr,
+                                    void* Q, void* K, void* V, void* out,
+                                    int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                    float scale, int kvHeadStride, float softcap) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBytes:&kvLen length:sizeof(kvLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+    [encoder setBytes:&kvHeadStride length:sizeof(kvHeadStride) atIndex:9];
+    [encoder setBytes:&softcap length:sizeof(softcap) atIndex:10];
+
+    MTLSize threadgroupSize = MTLSizeMake(MIN(pipeline.maxTotalThreadsPerThreadgroup, (NSUInteger)numQHeads), 1, 1);
+    MTLSize threadgroups = MTLSizeMake((numQHeads + threadgroupSize.width - 1) / threadgroupSize.width, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadgroupSize];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// SDPA prefill with logit soft-capping (Gemma 2)
+void metal_sdpa_softcap_prefill_f32(void* queuePtr, void* pipelinePtr,
+                                     void* Q, void* K, void* V, void* out,
+                                     int seqLen, int numQHeads, int numKVHeads, int headDim,
+                                     float scale, float softcap) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBytes:&seqLen length:sizeof(seqLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+    [encoder setBytes:&softcap length:sizeof(softcap) atIndex:9];
+
+    int PREFILL_THREADS_LC = 64;
+    int PREFILL_TILE_K_LC = 16;
+    int sharedMemSize = (PREFILL_TILE_K_LC + 8) * sizeof(float);
+
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    MTLSize threadgroups = MTLSizeMake(seqLen, numQHeads, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(PREFILL_THREADS_LC, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
     finish_encode(encoder, cmdBuffer, shouldCommit);
