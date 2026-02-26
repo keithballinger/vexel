@@ -28,12 +28,15 @@ work. The main gaps are GeGLU, architecture detection, and Gemma 2's attention v
     - Full forward pass correctness deferred until model file is available.
 
 ## Phase 2: Gemma 2 Attention Variants
-- [ ] Task: Logit soft-capping
-    - Add `AttentionLogitSoftCap` field to `ModelConfig` (float32, 0=disabled).
-    - Parse from GGUF metadata (typically 30.0 for Gemma 2).
-    - Implement in attention: `logits = cap * tanh(logits / cap)` applied before softmax.
-    - Can be added as a post-process step after SDPA scores or fused into the Flash Attention kernel.
-- [ ] Task: Alternating sliding window + global attention
+- [x] Task: Logit soft-capping
+    - Added `AttentionLogitSoftCap float32` to `ModelConfig` (0=disabled, 30.0 for gemma2).
+    - Created `SoftCapAttentionOps` optional interface in `backend/backend.go`.
+    - Implemented `sdpa_softcap_decode_f32` and `sdpa_softcap_prefill_f32` Metal kernels.
+    - Added Metal + CPU backend dispatch with `SDPASoftCap` and `SDPAPrefillSoftCap` methods.
+    - Wired conditional soft-cap routing in all 3 block Execute variants.
+    - GPU tests: 4 subtests (zero-cap identity, bounds, GQA typical, prefill), maxDiff < 2.1e-7.
+    - Architecture detection test verifies gemma2 → softcap=30.0.
+- [~] Task: Alternating sliding window + global attention
     - Add `AttentionWindowPattern` field to `ModelConfig`: "global", "sliding", or "alternating".
     - For alternating: even layers use full context, odd layers use sliding window.
     - Implement per-layer attention mask selection in the block execution loop.
