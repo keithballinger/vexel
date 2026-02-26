@@ -317,4 +317,12 @@ type PagedKVOps interface {
 	// blockSize: tokens per block
 	// isValue: true if writing V, false for K
 	ReshapePagedKV(src, dstBase, pageTable, blockOffsets tensor.DevicePtr, numTokens, numKVHeads, headDim, blockSize int, isValue bool)
+
+	// SDPAPagedDecode performs scaled dot-product attention for decode (single query)
+	// reading K/V from a paged block pool via block table indirection.
+	// q: [numQHeads, headDim], kvPool: base of block pool
+	// blockTable: [numBlocks] int32 mapping logical → physical block indices
+	// out: [numQHeads, headDim]
+	// tokensInLastBlock: valid tokens in the last logical block
+	SDPAPagedDecode(q, kvPool, blockTable, out tensor.DevicePtr, numBlocks, blockSize, numQHeads, numKVHeads, headDim int, scale float32, tokensInLastBlock int)
 }

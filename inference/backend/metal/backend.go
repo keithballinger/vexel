@@ -129,8 +129,9 @@ type Backend struct {
 	zeroPipeline                unsafe.Pointer
 
 	// Utility pipelines
-	memcpyComputePipeline unsafe.Pointer // Compute-based memory copy (avoids blit encoder)
-	reshapePagedKVPipeline unsafe.Pointer
+	memcpyComputePipeline      unsafe.Pointer // Compute-based memory copy (avoids blit encoder)
+	reshapePagedKVPipeline     unsafe.Pointer
+	sdpaPagedDecodePipeline    unsafe.Pointer
 }
 
 var (
@@ -254,6 +255,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	// Utility pipelines
 	b.memcpyComputePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("memcpy_compute"))
 	b.reshapePagedKVPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("reshape_paged_kv_f32"))
+	b.sdpaPagedDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_paged_decode_f32"))
 
 	return b, nil
 }
@@ -1222,4 +1224,20 @@ func (b *Backend) ReshapePagedKV(src, dstBase, pageTable, blockOffsets tensor.De
 		unsafe.Pointer(src.Addr()), unsafe.Pointer(dstBase.Addr()),
 		unsafe.Pointer(pageTable.Addr()), unsafe.Pointer(blockOffsets.Addr()),
 		C.int(numTokens), C.int(numKVHeads), C.int(headDim), C.int(blockSize), C.int(valFlag))
+}
+
+// SDPAPagedDecode performs scaled dot-product attention reading K/V from a paged block pool.
+// Q: [numQHeads, headDim], kvPool: base of block pool, blockTable: [numBlocks] int32.
+func (b *Backend) SDPAPagedDecode(q, kvPool, blockTable, out tensor.DevicePtr, numBlocks, blockSize, numQHeads, numKVHeads, headDim int, scale float32, tokensInLastBlock int) {
+	b.profiler.RecordDispatch("SDPAPagedDecode")
+	if b.sdpaPagedDecodePipeline == nil {
+		panic("SDPAPagedDecode called but pipeline unavailable")
+	}
+
+	C.metal_sdpa_paged_decode_f32(b.queue, b.sdpaPagedDecodePipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(kvPool.Addr()),
+		unsafe.Pointer(blockTable.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(numBlocks), C.int(blockSize),
+		C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale), C.int(tokensInLastBlock))
 }

@@ -385,6 +385,18 @@ void metal_reshape_paged_kv_f32(void* queue, void* pipeline,
                                 void* blockOffsets,
                                 int numTokens, int numKVHeads, int headDim, int blockSize, int isValue);
 
+// Paged SDPA decode: performs attention reading K/V from paged block pool.
+// Q: [numQHeads, headDim]
+// kvPool: base pointer to block pool
+// blockTable: [numBlocks] int32 mapping logical → physical block indices
+// out: [numQHeads, headDim]
+// tokensInLastBlock: number of valid tokens in the last logical block
+void metal_sdpa_paged_decode_f32(void* queue, void* pipeline,
+                                  void* Q, void* kvPool, void* blockTable, void* out,
+                                  int numBlocks, int blockSize,
+                                  int numQHeads, int numKVHeads, int headDim,
+                                  float scale, int tokensInLastBlock);
+
 
 // =============================================================================
 // Q8_0 Quantization for KV Cache
