@@ -16,13 +16,15 @@ This track completes the integration and enables speculative decoding for produc
     - When a draft model is provided, scheduler uses `GenerateDraftTokens` + `VerifyDraftTokens`
       instead of single-token decode.
     - Update `runDecodeStep` to handle multi-token acceptance (advance position by accepted count).
-- [~] Task: KV cache management for speculation
+- [x] Task: KV cache management for speculation (d6d13eb)
     - After verification rejects draft tokens, roll back KV cache to the last accepted position.
     - For simple GPUKVCache: overwrite entries at rejected positions on next forward pass.
     - For PagedKVCache: deallocate blocks beyond the accepted position.
 
+Checkpoint: d6d13eb
+
 ## Phase 2: Self-Speculative Decoding
-- [ ] Task: Implement early-exit drafting
+- [~] Task: Implement early-exit drafting
     - Use `SelfSpeculativeConfig` (already defined): run only the first N layers as the draft model.
     - Share weights between draft and target (no separate model needed).
     - Add early-exit projection head: take hidden state at layer N, project to vocab logits.
