@@ -52,7 +52,7 @@ work. The main gaps are GeGLU, architecture detection, and Gemma 2's attention v
     - Post-FFN RMSNorm applied after MLP output, before residual add (all 3 Execute variants).
     - Architecture detection test verifies gemma2 → HasPostNorms=true.
 
-## Phase 3: Learnable RoPE & Verification
+## Phase 3: Learnable RoPE & Verification [checkpoint: 902f947]
 - [x] Task: Learnable RoPE scaling
     - Added `RoPEFreqScales []float32` field to `ModelConfig` for per-dimension learned frequencies.
     - Added `ScaledRoPEOps` interface to `backend.go` with `RoPEWithFreqs` method.
