@@ -530,13 +530,13 @@ func (b *Backend) MatMulQ4_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(n), C.int(k))
 	} else if m >= 8 && b.matmulQ4SimdgroupPipeline != nil {
-		// Use simdgroup_matrix kernel for larger batches (prefill)
-		// simdgroup_matrix hardware units provide better compute throughput
+		// Use simdgroup_matrix kernel for prefill (M>=8)
+		// 32×64 tiled kernel with 8 simdgroups, optimized for M=32/64/128
 		C.metal_matmul_q4_0_simdgroup_f32(b.queue, b.matmulQ4SimdgroupPipeline,
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(m), C.int(n), C.int(k))
 	} else {
-		// Small batch (2-7 rows) - use simple batched kernel
+		// Fallback: simple batched kernel (one threadgroup per output element)
 		C.metal_matmul_q4_0_batched_f32(b.queue, b.matmulQ4BatchedPipeline,
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(m), C.int(n), C.int(k))

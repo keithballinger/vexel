@@ -6,13 +6,20 @@ matmul because the quantized kernels only support M=1. This track expands format
 adds batched quantized matmul for prefill, and benchmarks accuracy/performance tradeoffs.
 
 ## Phase 1: Batched Quantized MatMul
-- [ ] Task: Q4_0 batched matmul kernel
-    - Extend `MatMulQ4_0` Metal kernel to support M>1 (batch of query vectors).
-    - Input: A [M, K] float32, B [N, K] Q4_0 packed. Output: C [M, N] float32.
-    - Optimize threadgroup tiling for prefill batch sizes (32, 64, 128).
-- [ ] Task: Q4_K batched matmul kernel
-    - Extend `MatMulQ4_K` for M>1 with k-quant super-block structure.
-    - Handle the 256-element super-blocks with nested 32-element sub-blocks.
+- [x] Task: Q4_0 batched matmul kernel
+    - Simdgroup kernel already supported M>1; optimized tile layout from 32×32 to 32×64.
+    - Uses all 8 simdgroups (2×4 layout of 16×16 tiles) vs previous 4 (2×2).
+    - ~30% throughput improvement at M=32 (primary prefill batch size).
+    - Created `q4_batched_matmul_test.go` with prefill correctness tests (M=32,64,128)
+      and throughput benchmarks. All tests pass with ZERO numerical difference.
+- [x] Task: Q4_K batched matmul kernel
+    - Rewrote `matmul_q4k_batched_f32` from naive one-output-per-TG to NR2 pattern.
+    - Each simdgroup handles 2 N outputs with simd_lane striding through super-blocks.
+    - 16 outputs per threadgroup (8 simdgroups × 2). Grid: (ceil(N/16), M).
+    - Old kernel wasted 242/256 threads at K=4096; new kernel fully utilizes all threads.
+    - M=4: 196 GFLOPS, M=32: 312 GFLOPS, M=128: 333 GFLOPS.
+    - Created `q4k_batched_matmul_test.go` with prefill correctness tests (M=4,32,64,128)
+      and throughput benchmarks. All 7 tests pass with <0.001 max diff.
 - [ ] Task: Wire batched kernels into prefill path
     - Update `runtime.DecodeWithGPUKV` to use batched quantized matmul when seqLen > 1.
     - Remove CPU dequantization fallback for supported quant types during prefill.
