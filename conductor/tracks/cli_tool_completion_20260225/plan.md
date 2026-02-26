@@ -31,7 +31,7 @@ The README documents `./vexel serve` but no unified CLI binary exists. Individua
     - Uses scheduler for inference via `internal.RunChatLoopWithConfig`.
     - Moved `printUsage` from Metal-tagged main.go to cli.go for testability.
 
-## Phase 3: Utility Subcommands [checkpoint: pending]
+## Phase 3: Utility Subcommands [checkpoint: 6847c68]
 - [x] Task: Integrate `bench` subcommand
     - Wrapped existing `cmd/bench/main.go` logic as a subcommand.
     - Uses `runtime.Llama3_8B()` config and `MemoryPlan` for estimation.
