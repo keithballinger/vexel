@@ -15,23 +15,27 @@ Theoretical max on M3 Max (400 GB/s ÷ 3.6 GB weights) = ~111 tok/s.
 Target: reach 70-80% bandwidth utilization (~78-89 tok/s), competitive with llama.cpp.
 
 ## Phase 1: Profiling & Measurement
-- [ ] Task: Instrument kernel dispatch count
-    - Count exact number of Metal kernel dispatches per forward pass for LLaMA 2 7B.
-    - Measure time spent in dispatch overhead vs actual compute.
-    - Use `VEXEL_GPU_PROFILE=1` to get per-kernel timing, identify the longest and shortest ops.
-    - Profile MTLBuffer allocation: count `newBufferWithLength` calls per token.
-- [ ] Task: Identify fusion candidates
-    - Map the full forward pass kernel sequence (e.g., RMSNorm → Q_proj matmul → RoPE → ...).
-    - Identify adjacent ops that read/write the same tensor without intervening dependencies.
-    - Priority fusion targets (highest dispatch-overhead-to-compute ratio):
-      - RMSNorm + MatMul (norm output feeds directly into projection)
-      - SiLU×Mul + Down projection (fused activation output feeds into matmul)
-      - RoPE + KV cache scatter (rotated vectors go directly to cache)
-    - Estimate dispatch reduction (e.g., 40 kernels → 15 fused kernels).
-- [ ] Task: Measure memory allocation overhead
-    - Profile `backend.Alloc()` calls per forward pass: count, sizes, cumulative time.
-    - Compare: current per-allocation MTLBuffer creation vs sub-allocation from pre-allocated pool.
-    - Determine if allocation overhead is significant relative to compute time.
+- [x] Task: Instrument kernel dispatch count
+    - Created `dispatch_profiler.go` with DispatchProfiler struct and ForwardPassProfile.
+    - Instrumented all 48 kernel dispatch methods in `backend.go` with RecordDispatch calls.
+    - Instrumented `Alloc()` with allocation tracking (pool hit detection, timing).
+    - 10 unit tests in `dispatch_profiler_test.go` + integration tests for real Backend.
+- [x] Task: Identify fusion candidates
+    - Created `fusion_analysis_test.go` mapping the full decode and prefill kernel sequences.
+    - Decode: 14 dispatches/layer × 32 layers + 3 = 451 total.
+    - Prefill: 16 dispatches/layer × 32 layers + 3 = 515 total.
+    - Identified 4 fusion targets for 35% dispatch reduction (451→291):
+      - RoPE+ScatterKV (saves 64 dispatches, 14%)
+      - SiLUMul+W2 (saves 32, 7%)
+      - Wo+Add (saves 32, 7%)
+      - W2+Add (saves 32, 7%)
+- [x] Task: Measure memory allocation overhead
+    - Profiled buffer pool reuse: 100% hit rate on second pass with ResetPool.
+    - Fresh allocation: ~5.54 µs/alloc, pooled: ~0.02 µs/alloc (277× faster).
+    - 288 allocs per pass × 5.54 µs = ~1.6 ms total fresh allocation overhead.
+    - Pool reuse eliminates virtually all allocation overhead (~6 µs total).
+    - Conclusion: allocation overhead is minor vs compute time; kernel dispatch
+      count is the primary optimization target.
 
 ## Phase 2: GPU Memory Pool
 - [ ] Task: Implement sub-allocating scratch buffer

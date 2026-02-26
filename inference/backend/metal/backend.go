@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 	"unsafe"
 
 	"vexel/inference/backend"
@@ -48,6 +49,9 @@ type Backend struct {
 
 	// Buffer pool for temporary allocations
 	pool *bufferPool
+
+	// Dispatch profiler for kernel counting and allocation tracking
+	profiler *DispatchProfiler
 
 	// Cached pipeline states
 	matmulPipeline              unsafe.Pointer // For matmul_transposed_f32 (C = A @ B^T)
@@ -153,6 +157,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b := &Backend{
 		deviceID: deviceID,
 		pool:     newBufferPool(),
+		profiler: NewDispatchProfiler(),
 	}
 
 	// Initialize Metal device
@@ -274,6 +279,11 @@ func (b *Backend) Device() tensor.Device {
 	return tensor.NewDevice(tensor.Metal, b.deviceID)
 }
 
+// DispatchProfiler returns the backend's dispatch profiler for kernel counting.
+func (b *Backend) DispatchProfiler() *DispatchProfiler {
+	return b.profiler
+}
+
 // =============================================================================
 // Memory Management
 // =============================================================================
@@ -281,12 +291,21 @@ func (b *Backend) Device() tensor.Device {
 // Alloc allocates a Metal buffer and returns a DevicePtr.
 // Uses buffer pooling to reuse buffers of the same size.
 func (b *Backend) Alloc(bytes int) tensor.DevicePtr {
+	var start time.Time
+	profiling := b.profiler.IsEnabled()
+	if profiling {
+		start = time.Now()
+	}
+
 	// Check if we have a buffer of this exact size in the pool
 	if buffers, ok := b.pool.available[bytes]; ok && len(buffers) > 0 {
 		// Pop from available pool
 		buf := buffers[len(buffers)-1]
 		b.pool.available[bytes] = buffers[:len(buffers)-1]
 		b.pool.inUse = append(b.pool.inUse, buf)
+		if profiling {
+			b.profiler.RecordAlloc(bytes, true, time.Since(start))
+		}
 		return tensor.NewDevicePtr(tensor.Metal, uintptr(buf))
 	}
 
@@ -296,6 +315,9 @@ func (b *Backend) Alloc(bytes int) tensor.DevicePtr {
 		return tensor.DevicePtr{}
 	}
 	b.pool.inUse = append(b.pool.inUse, buf)
+	if profiling {
+		b.profiler.RecordAlloc(bytes, false, time.Since(start))
+	}
 	return tensor.NewDevicePtr(tensor.Metal, uintptr(buf))
 }
 
@@ -424,6 +446,7 @@ func PrintGPUProfile() {
 
 // MatMul performs C = A @ B where A is [M,K], B is [K,N], C is [M,N].
 func (b *Backend) MatMul(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	b.profiler.RecordDispatch("MatMul")
 	C.metal_matmul_f32(b.queue, b.matmulNonTransposedPipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(m), C.int(n), C.int(k))
@@ -431,6 +454,7 @@ func (b *Backend) MatMul(a, bMat, out tensor.DevicePtr, m, n, k int) {
 
 // MatMulTransposed performs C = A @ B^T where A is [M,K], B is [N,K], C is [M,N].
 func (b *Backend) MatMulTransposed(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	b.profiler.RecordDispatch("MatMulTransposed")
 	if m == 1 && b.matvecPipeline != nil {
 		// Use optimized matrix-vector kernel for single-row case
 		C.metal_matvec_transposed_f32(b.queue, b.matvecPipeline,
@@ -447,6 +471,7 @@ func (b *Backend) MatMulTransposed(a, bMat, out tensor.DevicePtr, m, n, k int) {
 // MatMulQ4_0 performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q4_0 format.
 // B contains raw Q4_0 data (18 bytes per 32 elements).
 func (b *Backend) MatMulQ4_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	b.profiler.RecordDispatch("MatMulQ4_0")
 	if b.matvecQ4NR2Pipeline == nil {
 		panic("MatMulQ4_0 called but no matvecQ4NR2Pipeline available")
 	}
@@ -479,6 +504,7 @@ func (b *Backend) MatMulQ4_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 // MatVecQ4_0MultiOutput executes the 8-output-per-threadgroup kernel explicitly.
 // Primarily used for validation/testing of the multi-output implementation.
 func (b *Backend) MatVecQ4_0MultiOutput(a, bMat, out tensor.DevicePtr, n, k int) {
+	b.profiler.RecordDispatch("MatMulQ4_0")
 	switch {
 	case b.matvecQ4MultiOutputPipeline != nil:
 		C.metal_matvec_q4_0_multi_output_f32(b.queue, b.matvecQ4MultiOutputPipeline,
@@ -505,6 +531,7 @@ func (b *Backend) MatVecQ4_0MultiOutput(a, bMat, out tensor.DevicePtr, n, k int)
 var q6kNR2DebugOnce sync.Once
 
 func (b *Backend) MatMulQ6_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	b.profiler.RecordDispatch("MatMulQ6_K")
 	if m == 1 {
 		// Use optimized NR2 kernel (2 outputs per simdgroup) if available
 		if b.matvecQ6KNR2Pipeline != nil {
@@ -547,6 +574,7 @@ func (b *Backend) MatMulQ6_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 // MatMulQ4_K performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q4_K format.
 // B contains raw Q4_K data (144 bytes per 256 elements).
 func (b *Backend) MatMulQ4_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	b.profiler.RecordDispatch("MatMulQ4_K")
 	if m == 1 {
 		// Decode: use optimized matvec kernel
 		if b.matvecQ4KNR2Pipeline != nil {
@@ -582,6 +610,7 @@ func (b *Backend) MatMulQ4_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 // B contains raw Q5_K data (176 bytes per 256 elements).
 // Currently only supports M=1 (matvec) natively, uses loop for M>1.
 func (b *Backend) MatMulQ5_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	b.profiler.RecordDispatch("MatMulQ5_K")
 	if m == 1 {
 		// if b.matvecQ5KNR2Pipeline != nil {
 		// 	offsets := []C.uint64_t{
@@ -628,6 +657,7 @@ func (b *Backend) MatMulQ5_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 // MatMulQ4_0_FusedRMSNorm performs fused RMSNorm(x) + Q4_0 MatVec.
 // Only supports M=1 (decode) currently.
 func (b *Backend) MatMulQ4_0_FusedRMSNorm(x, normWeight, wMat, out tensor.DevicePtr, m, n, k int, eps float32) {
+	b.profiler.RecordDispatch("FusedRMSNorm+MatMul")
 	if m != 1 {
 		panic("MatMulQ4_0_FusedRMSNorm only supports M=1")
 	}
@@ -643,6 +673,7 @@ func (b *Backend) MatMulQ4_0_FusedRMSNorm(x, normWeight, wMat, out tensor.Device
 // MatMulQ4_0_FusedRMSNormF16 performs fused RMSNorm + Q4_0 matmul with FP16 output.
 // Eliminates FP32->FP16 conversion after QKV projections.
 func (b *Backend) MatMulQ4_0_FusedRMSNormF16(x, normWeight, wMat, out tensor.DevicePtr, m, n, k int, eps float32) {
+	b.profiler.RecordDispatch("FusedRMSNorm+MatMul")
 	if m != 1 {
 		panic("MatMulQ4_0_FusedRMSNormF16 only supports M=1")
 	}
@@ -658,6 +689,7 @@ func (b *Backend) MatMulQ4_0_FusedRMSNormF16(x, normWeight, wMat, out tensor.Dev
 // MatMulQ4_0_FusedMLP performs fused MLP: SiLU(x @ W1) * (x @ W3).
 // Only supports M=1 (decode) currently.
 func (b *Backend) MatMulQ4_0_FusedMLP(x, w1, w3, out tensor.DevicePtr, m, n, k int) {
+	b.profiler.RecordDispatch("FusedMLP")
 	if m != 1 {
 		panic("MatMulQ4_0_FusedMLP only supports M=1")
 	}
@@ -672,6 +704,7 @@ func (b *Backend) MatMulQ4_0_FusedMLP(x, w1, w3, out tensor.DevicePtr, m, n, k i
 
 // RMSNorm performs RMS normalization.
 func (b *Backend) RMSNorm(x, weight, out tensor.DevicePtr, rows, cols int, eps float32) {
+	b.profiler.RecordDispatch("RMSNorm")
 	C.metal_rmsnorm_f32(b.queue, b.rmsnormPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(weight.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(rows), C.int(cols), C.float(eps))
@@ -680,6 +713,7 @@ func (b *Backend) RMSNorm(x, weight, out tensor.DevicePtr, rows, cols int, eps f
 // LayerNorm performs Layer normalization (for Phi-2 and similar architectures).
 // out = (x - mean) / sqrt(var + eps) * weight + bias
 func (b *Backend) LayerNorm(x, weight, bias, out tensor.DevicePtr, rows, cols int, eps float32) {
+	b.profiler.RecordDispatch("LayerNorm")
 	C.metal_layernorm_f32(b.queue, b.layernormPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(weight.Addr()),
 		unsafe.Pointer(bias.Addr()), unsafe.Pointer(out.Addr()),
@@ -689,12 +723,14 @@ func (b *Backend) LayerNorm(x, weight, bias, out tensor.DevicePtr, rows, cols in
 // GELU applies the GELU activation function.
 // out = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 func (b *Backend) GELU(x, out tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("GELU")
 	C.metal_gelu_f32(b.queue, b.geluPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
 
 // AddBias adds bias to each row: out[row, col] = x[row, col] + bias[col]
 func (b *Backend) AddBias(x, bias, out tensor.DevicePtr, rows, cols int) {
+	b.profiler.RecordDispatch("AddBias")
 	C.metal_add_bias_f32(b.queue, b.addBiasPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(bias.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(rows), C.int(cols))
@@ -704,6 +740,7 @@ func (b *Backend) AddBias(x, bias, out tensor.DevicePtr, rows, cols int) {
 // x = x + residual (in-place), then out = RMSNorm(x, weight)
 // This saves one memory round-trip compared to separate Add + RMSNorm.
 func (b *Backend) AddRMSNorm(x, residual, weight, out tensor.DevicePtr, rows, cols int, eps float32) {
+	b.profiler.RecordDispatch("AddRMSNorm")
 	C.metal_add_rmsnorm_f32(b.queue, b.addRMSNormPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(residual.Addr()),
 		unsafe.Pointer(weight.Addr()), unsafe.Pointer(out.Addr()),
@@ -714,6 +751,7 @@ func (b *Backend) AddRMSNorm(x, residual, weight, out tensor.DevicePtr, rows, co
 // ropeDim: dimensions to rotate (0 = full headDim). For partial RoPE like Phi-2.
 // ropeNeox: true = NEOX-style (split pairs), false = LLaMA-style (interleaved pairs)
 func (b *Backend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos, ropeDim int, theta float32, ropeNeox bool) {
+	b.profiler.RecordDispatch("RoPE")
 	// If ropeDim is 0 or equals headDim, rotate all dimensions
 	effectiveRopeDim := ropeDim
 	if effectiveRopeDim == 0 {
@@ -735,6 +773,7 @@ func (b *Backend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seq
 // ropeDim: dimensions to rotate (0 = full headDim). For partial RoPE like Phi-2.
 // ropeNeox: true = NEOX-style (split pairs), false = LLaMA-style (interleaved pairs)
 func (b *Backend) RoPEF16(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos, ropeDim int, theta float32, ropeNeox bool) {
+	b.profiler.RecordDispatch("RoPE")
 	if b.ropeGQAF16Pipeline == nil {
 		panic("RoPEF16 called but pipeline unavailable")
 	}
@@ -754,6 +793,7 @@ func (b *Backend) RoPEF16(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, 
 
 // Softmax applies softmax row-wise.
 func (b *Backend) Softmax(x, out tensor.DevicePtr, rows, cols int) {
+	b.profiler.RecordDispatch("Softmax")
 	C.metal_softmax_f32(b.queue, b.softmaxPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(rows), C.int(cols))
@@ -761,24 +801,28 @@ func (b *Backend) Softmax(x, out tensor.DevicePtr, rows, cols int) {
 
 // SiLU applies the SiLU activation function.
 func (b *Backend) SiLU(x, out tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("SiLU")
 	C.metal_silu_f32(b.queue, b.siluPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
 
 // SiLUMul performs fused silu(gate) * up operation.
 func (b *Backend) SiLUMul(gate, up, out tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("SiLUMul")
 	C.metal_silu_mul_f32(b.queue, b.siluMulPipeline,
 		unsafe.Pointer(gate.Addr()), unsafe.Pointer(up.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
 
 // Add performs element-wise addition.
 func (b *Backend) Add(a, bIn, out tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("Add")
 	C.metal_add_f32(b.queue, b.addPipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bIn.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
 
 // Mul performs element-wise multiplication.
 func (b *Backend) Mul(a, bIn, out tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("Mul")
 	C.metal_mul_f32(b.queue, b.mulPipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bIn.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
@@ -786,6 +830,7 @@ func (b *Backend) Mul(a, bIn, out tensor.DevicePtr, n int) {
 // Argmax returns the index of the maximum value in the input tensor.
 // This runs entirely on GPU, avoiding the 128KB logits transfer for greedy sampling.
 func (b *Backend) Argmax(input tensor.DevicePtr, n int) int {
+	b.profiler.RecordDispatch("Argmax")
 	// Allocate a small buffer for the result (4 bytes for int32)
 	resultBuf := C.metal_alloc_buffer(b.device, 4)
 	defer C.metal_release(resultBuf)
@@ -808,6 +853,7 @@ func (b *Backend) Argmax(input tensor.DevicePtr, n int) int {
 
 // ReLUInplace performs in-place ReLU: x = max(0, x)
 func (b *Backend) ReLUInplace(x tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("ReLU")
 	C.metal_relu_inplace_f32(b.queue, b.reluInplacePipeline,
 		unsafe.Pointer(x.Addr()), C.int(n))
 }
@@ -815,6 +861,7 @@ func (b *Backend) ReLUInplace(x tensor.DevicePtr, n int) {
 // ReLUBackward performs ReLU backward: dx = dx * (x > 0)
 // x is the pre-ReLU input, dx is the gradient (modified in-place)
 func (b *Backend) ReLUBackward(x, dx tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("ReLU")
 	C.metal_relu_backward_f32(b.queue, b.reluBackwardPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(dx.Addr()), C.int(n))
 }
@@ -823,6 +870,7 @@ func (b *Backend) ReLUBackward(x, dx tensor.DevicePtr, n int) {
 // a: [batch, M], bIn: [batch, N], out: [M, N]
 // Used for computing weight gradients dFC1 and dFC2
 func (b *Backend) BatchedOuterProduct(a, bIn, out tensor.DevicePtr, batch, M, N int) {
+	b.profiler.RecordDispatch("BatchedOuterProduct")
 	C.metal_batched_outer_product_f32(b.queue, b.batchedOuterProductPipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bIn.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(batch), C.int(M), C.int(N))
@@ -830,12 +878,14 @@ func (b *Backend) BatchedOuterProduct(a, bIn, out tensor.DevicePtr, batch, M, N 
 
 // SGDUpdate performs w = w*(1-lr*wd) - lr*grad (SGD with weight decay)
 func (b *Backend) SGDUpdate(w, grad tensor.DevicePtr, lr, weightDecay float32, n int) {
+	b.profiler.RecordDispatch("SGDUpdate")
 	C.metal_sgd_update_f32(b.queue, b.sgdUpdatePipeline,
 		unsafe.Pointer(w.Addr()), unsafe.Pointer(grad.Addr()), C.float(lr), C.float(weightDecay), C.int(n))
 }
 
 // Zero sets all elements to zero
 func (b *Backend) Zero(x tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("Zero")
 	C.metal_zero_f32(b.queue, b.zeroPipeline,
 		unsafe.Pointer(x.Addr()), C.int(n))
 }
@@ -843,6 +893,7 @@ func (b *Backend) Zero(x tensor.DevicePtr, n int) {
 // Embedding performs embedding lookup.
 // ids should be int32 values in an MTLBuffer on device
 func (b *Backend) Embedding(ids tensor.DevicePtr, numTokens int, table, out tensor.DevicePtr, vocabSize, dim int) {
+	b.profiler.RecordDispatch("Embedding")
 	C.metal_embedding_f32(b.queue,
 		unsafe.Pointer(ids.Addr()), unsafe.Pointer(table.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(numTokens), C.int(vocabSize), C.int(dim))
@@ -851,6 +902,7 @@ func (b *Backend) Embedding(ids tensor.DevicePtr, numTokens int, table, out tens
 // SDPA performs scaled dot-product attention for decode (single query token).
 // Uses Flash Decoding for longer sequences, naive for short ones.
 func (b *Backend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
+	b.profiler.RecordDispatch("SDPA")
 	// Use Flash Decoding for longer KV lengths where parallelism helps
 	// For short sequences, the overhead of threadgroup sync isn't worth it
 	useFlash := b.sdpaFlashDecodePipeline != nil && kvLen >= 16
@@ -874,6 +926,7 @@ func (b *Backend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHea
 // SDPAPrefill performs SDPA for prefill with causal masking.
 // Uses Flash Attention 2 for longer sequences where K/V tiling provides benefit.
 func (b *Backend) SDPAPrefill(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	b.profiler.RecordDispatch("SDPAPrefill")
 	// Use Flash Attention 2 for sequences >= 32 tokens
 	// FA2 uses two-pass tiling (find max, then accumulate) to reduce register pressure
 	// and caches Q in registers while streaming K/V tiles from shared memory
@@ -895,6 +948,7 @@ func (b *Backend) SDPAPrefill(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, 
 // SDPAPrefillStandard calls the standard SDPA kernel directly, bypassing FA2 threshold.
 // Used for benchmarking to compare FA2 vs standard at same sequence lengths.
 func (b *Backend) SDPAPrefillStandard(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	b.profiler.RecordDispatch("SDPAPrefill")
 	C.metal_sdpa_prefill_f32(b.queue, b.sdpaPrefillPipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
@@ -905,6 +959,7 @@ func (b *Backend) SDPAPrefillStandard(q, k, v, out tensor.DevicePtr, seqLen, num
 // FlashAttention2 performs optimized SDPA with K/V tiling in shared memory.
 // Uses larger tiles (64 K positions) and exploits GQA to share K/V loads.
 func (b *Backend) FlashAttention2(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	b.profiler.RecordDispatch("FlashAttention2")
 	C.metal_flash_attention_2_f32(b.queue, b.flashAttention2Pipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
@@ -916,6 +971,7 @@ func (b *Backend) FlashAttention2(q, k, v, out tensor.DevicePtr, seqLen, numQHea
 // Q, K, V, and out are expected to be in FP16 format.
 // Provides 2x memory bandwidth savings for activation loading.
 func (b *Backend) SDPAPrefillF16(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	b.profiler.RecordDispatch("SDPAPrefill")
 	C.metal_flash_attention_2_f16(b.queue, b.flashAttention2F16Pipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
@@ -930,24 +986,28 @@ func (b *Backend) SDPAPrefillF16(q, k, v, out tensor.DevicePtr, seqLen, numQHead
 
 // AddF16 performs element-wise addition on FP16 data.
 func (b *Backend) AddF16(a, bIn, out tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("Add")
 	C.metal_add_f16(b.queue, b.addF16Pipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bIn.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
 
 // MulF16 performs element-wise multiplication on FP16 data.
 func (b *Backend) MulF16(a, bIn, out tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("Mul")
 	C.metal_mul_f16(b.queue, b.mulF16Pipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bIn.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
 
 // SiLUF16 applies the SiLU activation function on FP16 data.
 func (b *Backend) SiLUF16(x, out tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("SiLU")
 	C.metal_silu_f16(b.queue, b.siluF16Pipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
 
 // SiLUMulF16 performs fused silu(gate) * up operation on FP16 data.
 func (b *Backend) SiLUMulF16(gate, up, out tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("SiLUMul")
 	C.metal_silu_mul_f16(b.queue, b.siluMulF16Pipeline,
 		unsafe.Pointer(gate.Addr()), unsafe.Pointer(up.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
@@ -955,6 +1015,7 @@ func (b *Backend) SiLUMulF16(gate, up, out tensor.DevicePtr, n int) {
 // RMSNormF16 performs RMS normalization with FP16 input/output.
 // x: [rows, cols] in FP16, weight: [cols] in FP32, out: [rows, cols] in FP16
 func (b *Backend) RMSNormF16(x, weight, out tensor.DevicePtr, rows, cols int, eps float32) {
+	b.profiler.RecordDispatch("RMSNorm")
 	C.metal_rmsnorm_f16(b.queue, b.rmsnormF16Pipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(weight.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(rows), C.int(cols), C.float(eps))
@@ -964,6 +1025,7 @@ func (b *Backend) RMSNormF16(x, weight, out tensor.DevicePtr, rows, cols int, ep
 // A: [1, K] in FP16, B: [N, K] in Q4_0 format, C: [1, N] in FP16.
 // This provides 2x activation bandwidth savings while maintaining Q4_0 weight compression.
 func (b *Backend) MatMulQ4_0_F16(a, bMat, out tensor.DevicePtr, n, k int) {
+	b.profiler.RecordDispatch("MatMulQ4_0")
 	C.metal_matvec_q4_0_f16(b.queue, b.matvecQ4F16Pipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(n), C.int(k))
@@ -974,6 +1036,7 @@ func (b *Backend) MatMulQ4_0_F16(a, bMat, out tensor.DevicePtr, n, k int) {
 // All tensors in FP16. Provides 2x KV cache bandwidth savings.
 // kvHeadStride: stride between KV heads in elements (maxSeqLen * headDim).
 func (b *Backend) SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
+	b.profiler.RecordDispatch("SDPA")
 	// Use vectorized kernel if available and headDim is multiple of 4
 	if b.sdpaDecodeF16VecPipeline != nil && headDim%4 == 0 {
 		C.metal_sdpa_decode_f16(b.queue, b.sdpaDecodeF16VecPipeline,
@@ -994,6 +1057,7 @@ func (b *Backend) SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKV
 // ConvertF32ToF16 converts FP32 data to FP16.
 // in: [n] in FP32, out: [n] in FP16 (out buffer must be n*2 bytes)
 func (b *Backend) ConvertF32ToF16(in, out tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("Convert")
 	C.metal_convert_f32_to_f16(b.queue, b.convertF32ToF16Pipeline,
 		unsafe.Pointer(in.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
@@ -1001,6 +1065,7 @@ func (b *Backend) ConvertF32ToF16(in, out tensor.DevicePtr, n int) {
 // ConvertF16ToF32 converts FP16 data to FP32.
 // in: [n] in FP16, out: [n] in FP32 (out buffer must be n*4 bytes)
 func (b *Backend) ConvertF16ToF32(in, out tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("Convert")
 	C.metal_convert_f16_to_f32(b.queue, b.convertF16ToF32Pipeline,
 		unsafe.Pointer(in.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
@@ -1008,12 +1073,14 @@ func (b *Backend) ConvertF16ToF32(in, out tensor.DevicePtr, n int) {
 // ScatterKVF16 transposes KV data from [newTokens, numKVHeads, headDim] to [numKVHeads, maxSeqLen, headDim].
 // This is used to efficiently populate the head-major KV cache layout in a single kernel dispatch.
 func (b *Backend) ScatterKVF16(src, dst tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int) {
+	b.profiler.RecordDispatch("ScatterKV")
 	C.metal_scatter_kv_f16(b.queue, b.scatterKVF16Pipeline,
 		unsafe.Pointer(src.Addr()), unsafe.Pointer(dst.Addr()),
 		C.int(newTokens), C.int(numKVHeads), C.int(headDim), C.int(maxSeqLen), C.int(seqPos))
 }
 
 func (b *Backend) ScatterKVF32ToF16(src, dst tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int) {
+	b.profiler.RecordDispatch("ScatterKV")
 	if b.scatterKVF32ToF16Pipeline == nil {
 		panic("ScatterKVF32ToF16 called but pipeline unavailable")
 	}
@@ -1024,6 +1091,7 @@ func (b *Backend) ScatterKVF32ToF16(src, dst tensor.DevicePtr, newTokens, numKVH
 
 
 func (b *Backend) ScatterKV(src, dst tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int) {
+	b.profiler.RecordDispatch("ScatterKV")
 	C.metal_scatter_kv_f32(b.queue, b.scatterKVF32Pipeline,
 		unsafe.Pointer(src.Addr()), unsafe.Pointer(dst.Addr()),
 		C.int(newTokens), C.int(numKVHeads), C.int(headDim),
@@ -1041,6 +1109,7 @@ func (b *Backend) ScatterKV(src, dst tensor.DevicePtr, newTokens, numKVHeads, he
 // in: [n] in FP32 (n must be multiple of 32)
 // out: [n/32 * 34] bytes in Q8_0 format
 func (b *Backend) QuantizeF32ToQ8_0(in, out tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("Quantize")
 	C.metal_quantize_f32_to_q8_0(b.queue, b.quantizeF32ToQ8_0Pipeline,
 		unsafe.Pointer(in.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
@@ -1049,6 +1118,7 @@ func (b *Backend) QuantizeF32ToQ8_0(in, out tensor.DevicePtr, n int) {
 // in: [n/32 * 34] bytes in Q8_0 format
 // out: [n] in FP32
 func (b *Backend) DequantizeQ8_0ToF32(in, out tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("Dequantize")
 	C.metal_dequantize_q8_0_to_f32(b.queue, b.dequantizeQ8_0ToF32Pipeline,
 		unsafe.Pointer(in.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
@@ -1059,6 +1129,7 @@ func (b *Backend) DequantizeQ8_0ToF32(in, out tensor.DevicePtr, n int) {
 // out: [numQHeads, headDim] in FP32
 // Provides 4x KV cache memory savings.
 func (b *Backend) SDPAQ8_0(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	b.profiler.RecordDispatch("SDPA")
 	C.metal_sdpa_decode_q8_0(b.queue, b.sdpaDecodeQ8_0Pipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
@@ -1068,6 +1139,7 @@ func (b *Backend) SDPAQ8_0(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numK
 
 // ReshapePagedKV copies and reshapes data into a paged KV cache.
 func (b *Backend) ReshapePagedKV(src, dstBase, pageTable, blockOffsets tensor.DevicePtr, numTokens, numKVHeads, headDim, blockSize int, isValue bool) {
+	b.profiler.RecordDispatch("ReshapePagedKV")
 	if b.reshapePagedKVPipeline == nil {
 		panic("ReshapePagedKV called but pipeline unavailable")
 	}
