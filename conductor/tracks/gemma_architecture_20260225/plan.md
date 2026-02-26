@@ -36,12 +36,15 @@ work. The main gaps are GeGLU, architecture detection, and Gemma 2's attention v
     - Wired conditional soft-cap routing in all 3 block Execute variants.
     - GPU tests: 4 subtests (zero-cap identity, bounds, GQA typical, prefill), maxDiff < 2.1e-7.
     - Architecture detection test verifies gemma2 → softcap=30.0.
-- [~] Task: Alternating sliding window + global attention
-    - Add `AttentionWindowPattern` field to `ModelConfig`: "global", "sliding", or "alternating".
-    - For alternating: even layers use full context, odd layers use sliding window.
-    - Implement per-layer attention mask selection in the block execution loop.
-    - Requires passing layer index to attention dispatch.
-- [ ] Task: Pre and post norms
+- [x] Task: Alternating sliding window + global attention
+    - Added `AttentionWindowType` enum (Global, Sliding, Alternating) to config.
+    - Gemma 2 auto-detects as `WindowAlternating`: even layers=global, odd layers=sliding.
+    - Added `useSlidingWindow(layerIdx)` and `effectiveKVLen(layerIdx, totalKVLen)` helpers.
+    - Updated `ExecuteWithPagedKV` existing sliding window to respect alternating pattern.
+    - Added KV pointer offset in `ExecuteWithGPUKV` FP32 decode path for sliding window.
+    - Comprehensive unit tests: 5 subtests covering alternating, global, sliding, and edge cases.
+    - Architecture detection test verifies gemma2 → WindowAlternating.
+- [~] Task: Pre and post norms
     - Add `PostNorm` boolean to `ModelConfig` (Gemma 2 applies RMSNorm after attention AND MLP too).
     - Current flow: norm -> attn -> residual. New flow: norm -> attn -> post_norm -> residual.
     - Load post-norm weights from GGUF (separate weight tensors).
