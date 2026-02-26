@@ -31,13 +31,19 @@ The README documents `./vexel serve` but no unified CLI binary exists. Individua
     - Uses scheduler for inference via `internal.RunChatLoopWithConfig`.
     - Moved `printUsage` from Metal-tagged main.go to cli.go for testability.
 
-## Phase 3: Utility Subcommands
-- [ ] Task: Integrate `bench` subcommand
-    - Wrap existing `cmd/bench/main.go` logic as a subcommand.
+## Phase 3: Utility Subcommands [checkpoint: pending]
+- [x] Task: Integrate `bench` subcommand
+    - Wrapped existing `cmd/bench/main.go` logic as a subcommand.
+    - Uses `runtime.Llama3_8B()` config and `MemoryPlan` for estimation.
+    - Reports memory usage, duration, total tokens, and throughput.
     - Flags: `--batch`, `--seq-len`, `--num-seqs`.
-- [ ] Task: Integrate `tokenize` subcommand
-    - Wrap existing `cmd/tokenize/main.go` as a subcommand.
+- [x] Task: Integrate `tokenize` subcommand
+    - Already implemented in Phase 1 (`runTokenize` in commands.go).
+    - Loads tokenizer from `--tokenizer` path or infers from `--model`.
+    - Reads from `--input` flag or stdin, outputs JSON-encoded token IDs.
     - Flags: `--input`, `--tokenizer`.
-- [ ] Task: Update Makefile and README
-    - Update `make build` to produce `./vexel` binary.
-    - Update README usage examples to reflect final CLI interface.
+- [x] Task: Update Makefile and README
+    - `make build` now produces `./vexel` binary with Metal tags.
+    - Added `build-all`, `test-metal`, `vet-metal` targets.
+    - README updated with full CLI reference (all 5 subcommands).
+    - Architecture section updated with cmd/vexel entry.

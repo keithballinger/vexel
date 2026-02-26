@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"vexel/inference/backend/metal"
 	"vexel/inference/cmd/vexel/internal"
@@ -233,13 +234,54 @@ func runChat(globals GlobalFlags, args []string) error {
 	return internal.RunChatLoopWithConfig(os.Stdin, os.Stdout, sched, config)
 }
 
-// runBench runs scheduling benchmarks. Implemented in Phase 3.
+// runBench runs scheduling benchmarks.
 func runBench(globals GlobalFlags, args []string) error {
-	_, err := parseBenchFlags(subcommandArgs(args))
+	bf, err := parseBenchFlags(subcommandArgs(args))
 	if err != nil {
 		return err
 	}
-	return fmt.Errorf("bench subcommand not yet implemented (Phase 3)")
+
+	cfg := runtime.Llama3_8B()
+	plan := cfg.MemoryPlan(bf.BatchSize, bf.SeqLen, tensor.Q4_0)
+	fmt.Printf("Estimated Memory Usage:\n  Weights: %.2f GB\n  KV Cache: %.2f GB\n  Scratch: %.2f GB\n  Total: %.2f GB\n",
+		toGB(plan.Weights), toGB(plan.KV), toGB(plan.Scratch), toGB(plan.Total))
+
+	rt := &runtime.ModelRuntime{}
+	sched, err := scheduler.NewScheduler(rt, nil, scheduler.Config{
+		MaxBatchSize: bf.BatchSize,
+		MaxSequences: bf.NumSeqs,
+	})
+	if err != nil {
+		return fmt.Errorf("create scheduler: %w", err)
+	}
+
+	start := time.Now()
+	for i := 0; i < bf.NumSeqs; i++ {
+		sched.AddSequence(scheduler.NewSequence(scheduler.SequenceID(i), "Benchmark Prompt"))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	log.Println("Running benchmark...")
+	if err := sched.Run(ctx); err != nil {
+		log.Printf("Scheduler finished with: %v", err)
+	}
+
+	duration := time.Since(start)
+	metrics := sched.Metrics()
+	throughput := float64(metrics.TotalTokens) / duration.Seconds()
+
+	fmt.Printf("\nResults:\n")
+	fmt.Printf("  Duration: %v\n", duration)
+	fmt.Printf("  Total Tokens: %d\n", metrics.TotalTokens)
+	fmt.Printf("  Throughput: %.2f tokens/sec\n", throughput)
+
+	return nil
+}
+
+func toGB(bytes int64) float64 {
+	return float64(bytes) / 1024 / 1024 / 1024
 }
 
 // runTokenize tokenizes input text. Implemented in Phase 3.

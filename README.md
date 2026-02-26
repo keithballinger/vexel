@@ -23,26 +23,70 @@ Vexel is a high-performance inference engine for Large Language Models (LLMs) on
 
 ### Building
 
-Build the project:
+Build the unified `vexel` binary:
 
 ```bash
 make build
 ```
 
-This will compile the Go code and the Metal kernels.
+This produces a single `./vexel` binary with all subcommands. Requires macOS with Metal support.
+
+### CLI Subcommands
+
+```
+vexel [global flags] <subcommand> [flags]
+
+Global flags:
+  --model    Path to GGUF model file (required for serve/generate/chat)
+  --verbose  Enable verbose logging
+
+Subcommands:
+  serve      Start the HTTP inference server
+  generate   One-shot text generation from a prompt
+  chat       Interactive chat REPL
+  bench      Run scheduling benchmarks
+  tokenize   Tokenize text to token IDs
+```
 
 ### Running the Server
 
-Start the inference server with a GGUF model:
-
 ```bash
-./vexel serve --model models/tinyllama-1.1b-chat-v1.0.Q4_0.gguf --port 8080
+./vexel --model models/tinyllama-1.1b-chat-v1.0.Q4_0.gguf serve --port 8080
 ```
 
-Flags:
-- `--model`: Path to the GGUF model file.
-- `--port`: HTTP port to listen on (default: 8080).
-- `--gpu-layers`: Number of layers to offload to GPU (default: all).
+Serve flags:
+- `--port`: HTTP port (default: 8080).
+- `--max-tokens`: Max tokens per request (default: 256).
+- `--max-batch-size`: Max batch size for scheduler (default: 1).
+
+### Text Generation
+
+```bash
+./vexel --model models/tinyllama-1.1b-chat-v1.0.Q4_0.gguf generate \
+  --prompt "Once upon a time" --max-tokens 100 --temperature 0.7
+```
+
+### Interactive Chat
+
+```bash
+./vexel --model models/tinyllama-1.1b-chat-v1.0.Q4_0.gguf chat \
+  --system-prompt "You are a helpful assistant."
+```
+
+### Tokenization
+
+```bash
+./vexel --model models/tinyllama-1.1b-chat-v1.0.Q4_0.gguf tokenize \
+  --input "Hello world"
+# Or pipe from stdin:
+echo "Hello world" | ./vexel tokenize --tokenizer path/to/tokenizer.json
+```
+
+### Benchmarking
+
+```bash
+./vexel bench --batch 128 --seq-len 128 --num-seqs 256
+```
 
 ## Usage
 
@@ -154,6 +198,8 @@ go run -tags metal ./examples/generate -model path/to/model.gguf -prompt "Hello!
 ```
 client/              Go HTTP client library (no Metal dependency)
 inference/
+  cmd/vexel/         Unified CLI binary (serve, generate, chat, bench, tokenize)
+  cmd/vexel/internal REPL and chat loop implementation
   backend/metal/     Metal GPU backend and kernel dispatch
   runtime/           Model loading, weight management, inference loop
   scheduler/         Continuous batching scheduler with metrics
@@ -180,8 +226,12 @@ Benchmarks measured on Apple Silicon with LLaMA 2 7B Q4_0 (~3.7 GB):
 
 Run the benchmark suite:
 ```bash
+# Unit-level benchmarks
 go test -tags metal -run TestThroughput -v ./inference/runtime/
 go test -tags metal -run TestLatency -v ./inference/runtime/
+
+# Scheduling benchmarks via CLI
+./vexel bench --batch 128 --seq-len 128 --num-seqs 256
 ```
 
 ## Performance & Correctness Harness
