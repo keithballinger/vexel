@@ -53,6 +53,8 @@ Checkpoint: 786dc4d
     - Build candidate tree from top-k predictions of each Medusa head.
     - Single forward pass through target model verifies all candidates.
 
+Checkpoint: d69055a
+
 ## Phase 4: Verification
 - [ ] Task: Correctness tests
     - Verify speculative decoding produces identical output to standard decoding (temp=0).
