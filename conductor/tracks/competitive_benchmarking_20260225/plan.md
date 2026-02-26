@@ -37,7 +37,7 @@ Sources:
     - Output machine-readable JSON for each run.
     - Warmup: discard first 3 runs, measure next 10, report mean + stddev.
 
-## Phase 2: Single-Stream Benchmarks
+## Phase 2: Single-Stream Benchmarks [checkpoint: ec60491]
 - [x] Task: Decode throughput comparison
     - Model: LLaMA 2 7B Q4_0 on M3 Max 128GB.
     - Vexel: 43.38 tok/s (46.6% BW util), llama.cpp: 78.45 tok/s (84.3%), Ollama: 81.23 tok/s.
@@ -58,7 +58,7 @@ Sources:
     - vllm-mlx server tested and available for comparison once Vexel stabilizes.
     - Harness (`run_batched.sh`) is ready.
 
-## Phase 4: Analysis & Reporting
+## Phase 4: Analysis & Reporting [checkpoint: ec60491]
 - [x] Task: Generate comparison report
     - Created `benchmarks/RESULTS.md` with root cause analysis.
     - Identified 6 architectural bottlenecks causing the 44.7% gap.
