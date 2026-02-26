@@ -19,7 +19,7 @@ Sources:
 - arxiv 2601.19139 — "Native LLM and MLLM Inference at Scale on Apple Silicon" (Jan 2026)
 - github.com/ggml-org/llama.cpp/discussions/4167 — Apple Silicon perf tracking
 
-## Phase 1: Competitor Research & Tooling
+## Phase 1: Competitor Research & Tooling [checkpoint: 917f61b]
 - [x] Task: Web research — identify fastest Apple Silicon inference engine
     - Search for latest benchmark comparisons (2025-2026) on Apple Silicon.
     - Determine if MLX is still the throughput leader or if newer competitors exist.
