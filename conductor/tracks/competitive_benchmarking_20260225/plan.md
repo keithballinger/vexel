@@ -20,7 +20,7 @@ Sources:
 - github.com/ggml-org/llama.cpp/discussions/4167 — Apple Silicon perf tracking
 
 ## Phase 1: Competitor Research & Tooling
-- [ ] Task: Web research — identify fastest Apple Silicon inference engine
+- [x] Task: Web research — identify fastest Apple Silicon inference engine
     - Search for latest benchmark comparisons (2025-2026) on Apple Silicon.
     - Determine if MLX is still the throughput leader or if newer competitors exist.
     - Check vllm-mlx, MLC-LLM, and any new Metal-optimized engines.
