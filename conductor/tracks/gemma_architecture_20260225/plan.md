@@ -9,7 +9,7 @@ Google's Gemma family (Gemma 1, Gemma 2) has distinctive features vs LLaMA:
 The Vexel runtime is ~75% ready: RMSNorm, RoPE, GQA, GGUF parsing, and bias handling all
 work. The main gaps are GeGLU, architecture detection, and Gemma 2's attention variants.
 
-## Phase 1: Gemma 1 Support
+## Phase 1: Gemma 1 Support [checkpoint: 9e8a645]
 - [x] Task: Add Gemma architecture detection
     - Added `"gemma"/"gemma2"` case to `ModelConfigFromGGUF` switch in `runtime/config.go`.
     - Set: NormRMSNorm, MLPGeGLU, HasBias=false, ParallelResidual=false, RoPENeox=false.
