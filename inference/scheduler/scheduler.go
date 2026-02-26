@@ -719,6 +719,15 @@ func (s *Scheduler) Metrics() SchedulerMetrics {
 	return s.metrics
 }
 
+// ModelConfig returns the loaded model's configuration.
+// Returns a zero-value config if no model is loaded.
+func (s *Scheduler) ModelConfig() runtime.ModelConfig {
+	if s.runtime == nil {
+		return runtime.ModelConfig{}
+	}
+	return s.runtime.Config()
+}
+
 // getLogitsOnCPU returns logits as a float32 slice on CPU.
 // If the logits are on GPU, it copies them to host first.
 // NOTE: Caller must ensure GPU work is complete (e.g., Decode functions call Sync).

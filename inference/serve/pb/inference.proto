@@ -5,14 +5,63 @@ package pb;
 option go_package = "vexel/inference/serve/pb";
 
 service InferenceService {
+  // Generate produces a complete response for the given prompt.
   rpc Generate(GenerateRequest) returns (GenerateResponse) {}
+
+  // StreamGenerate streams tokens as they are generated.
   rpc StreamGenerate(GenerateRequest) returns (stream GenerateResponse) {}
+
+  // ModelInfo returns metadata about the loaded model.
+  rpc ModelInfo(ModelInfoRequest) returns (ModelInfoResponse) {}
+}
+
+// SamplingParams configures token sampling behavior.
+message SamplingParams {
+  // Temperature for sampling (0 = greedy/argmax).
+  float temperature = 1;
+
+  // Top-k sampling: only consider the k most likely tokens. 0 = disabled.
+  int32 top_k = 2;
+
+  // Top-p (nucleus) sampling: consider tokens with cumulative probability >= p. 0 = disabled.
+  float top_p = 3;
+
+  // Maximum number of tokens to generate. 0 = model default.
+  int32 max_tokens = 4;
 }
 
 message GenerateRequest {
+  // The input prompt to generate from.
   string prompt = 1;
+
+  // Optional sampling parameters. If not set, server defaults are used.
+  SamplingParams sampling_params = 2;
 }
 
 message GenerateResponse {
+  // Generated text. For streaming, each message contains a single token.
   string text = 1;
+
+  // Total number of tokens generated so far (including this one).
+  int32 token_count = 2;
+
+  // Reason generation finished. Only set on the final message.
+  // Values: "eos" (end of sequence), "max_tokens" (limit reached), "cancelled" (client cancelled).
+  string finish_reason = 3;
+}
+
+message ModelInfoRequest {}
+
+message ModelInfoResponse {
+  // Human-readable model name (e.g., "LLaMA 2 7B").
+  string model_name = 1;
+
+  // Model architecture (e.g., "llama", "phi").
+  string architecture = 2;
+
+  // Quantization method (e.g., "Q4_0", "Q8_0", "F16").
+  string quantization = 3;
+
+  // Maximum context length in tokens.
+  int32 max_context_length = 4;
 }

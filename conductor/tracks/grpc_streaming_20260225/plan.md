@@ -14,7 +14,7 @@ server starts. This track completes the implementation and adds production featu
     - Wire to scheduler: create Sequence, AddSequence, stream tokens via `server.Send()`.
     - Each token is sent as a `GenerateResponse{text: token}`.
     - Handle client cancellation (context.Done) and clean up sequence.
-- [ ] Task: Expand proto schema
+- [x] Task: Expand proto schema
     - Add sampling parameters to `GenerateRequest`: temperature, top_k, top_p, max_tokens.
     - Add metadata to `GenerateResponse`: token_count, finish_reason (eos, max_tokens, cancelled).
     - Add `ModelInfo` RPC returning model name, architecture, quantization, max context length.

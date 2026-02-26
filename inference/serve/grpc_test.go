@@ -326,3 +326,190 @@ func TestGRPCStreamGenerateNilScheduler(t *testing.T) {
 		t.Errorf("expected Internal, got %v", st.Code())
 	}
 }
+
+// --- Tests for expanded proto schema ---
+
+// TestGRPCGenerateTokenCount verifies that Generate returns the correct
+// token_count in the response.
+func TestGRPCGenerateTokenCount(t *testing.T) {
+	sched, _ := scheduler.NewScheduler(&runtime.ModelRuntime{}, nil, scheduler.Config{})
+	simulateTokens(sched, []string{"Hello", " ", "world"})
+
+	client, cleanup := startGRPCServer(t, sched)
+	defer cleanup()
+
+	resp, err := client.Generate(context.Background(), &pb.GenerateRequest{Prompt: "test"})
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if resp.TokenCount != 3 {
+		t.Errorf("expected token_count=3, got %d", resp.TokenCount)
+	}
+}
+
+// TestGRPCGenerateFinishReason verifies that Generate sets finish_reason
+// to "eos" when generation completes normally.
+func TestGRPCGenerateFinishReason(t *testing.T) {
+	sched, _ := scheduler.NewScheduler(&runtime.ModelRuntime{}, nil, scheduler.Config{})
+	simulateTokens(sched, []string{"done"})
+
+	client, cleanup := startGRPCServer(t, sched)
+	defer cleanup()
+
+	resp, err := client.Generate(context.Background(), &pb.GenerateRequest{Prompt: "test"})
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	if resp.FinishReason != "eos" {
+		t.Errorf("expected finish_reason='eos', got %q", resp.FinishReason)
+	}
+}
+
+// TestGRPCStreamTokenCount verifies that StreamGenerate sends incrementing
+// token_count with each message.
+func TestGRPCStreamTokenCount(t *testing.T) {
+	sched, _ := scheduler.NewScheduler(&runtime.ModelRuntime{}, nil, scheduler.Config{})
+	simulateTokens(sched, []string{"a", "b", "c"})
+
+	client, cleanup := startGRPCServer(t, sched)
+	defer cleanup()
+
+	stream, err := client.StreamGenerate(context.Background(), &pb.GenerateRequest{Prompt: "test"})
+	if err != nil {
+		t.Fatalf("StreamGenerate failed: %v", err)
+	}
+
+	var counts []int32
+	for {
+		resp, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("recv failed: %v", err)
+		}
+		counts = append(counts, resp.TokenCount)
+	}
+
+	if len(counts) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(counts))
+	}
+	for i, c := range counts {
+		if c != int32(i+1) {
+			t.Errorf("message %d: expected token_count=%d, got %d", i, i+1, c)
+		}
+	}
+}
+
+// TestGRPCStreamFinishReason verifies that the last streamed message
+// has finish_reason="eos" and intermediate messages have it empty.
+func TestGRPCStreamFinishReason(t *testing.T) {
+	sched, _ := scheduler.NewScheduler(&runtime.ModelRuntime{}, nil, scheduler.Config{})
+	simulateTokens(sched, []string{"tok1", "tok2", "tok3"})
+
+	client, cleanup := startGRPCServer(t, sched)
+	defer cleanup()
+
+	stream, err := client.StreamGenerate(context.Background(), &pb.GenerateRequest{Prompt: "test"})
+	if err != nil {
+		t.Fatalf("StreamGenerate failed: %v", err)
+	}
+
+	var responses []*pb.GenerateResponse
+	for {
+		resp, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("recv failed: %v", err)
+		}
+		responses = append(responses, resp)
+	}
+
+	if len(responses) != 3 {
+		t.Fatalf("expected 3 responses, got %d", len(responses))
+	}
+
+	// Intermediate messages should have no finish_reason
+	for i := 0; i < len(responses)-1; i++ {
+		if responses[i].FinishReason != "" {
+			t.Errorf("message %d: expected empty finish_reason, got %q", i, responses[i].FinishReason)
+		}
+	}
+
+	// Last message should have finish_reason="eos"
+	last := responses[len(responses)-1]
+	if last.FinishReason != "eos" {
+		t.Errorf("last message: expected finish_reason='eos', got %q", last.FinishReason)
+	}
+}
+
+// TestGRPCModelInfo verifies that ModelInfo returns model metadata.
+func TestGRPCModelInfo(t *testing.T) {
+	sched, _ := scheduler.NewScheduler(&runtime.ModelRuntime{}, nil, scheduler.Config{})
+	client, cleanup := startGRPCServer(t, sched)
+	defer cleanup()
+
+	resp, err := client.ModelInfo(context.Background(), &pb.ModelInfoRequest{})
+	if err != nil {
+		t.Fatalf("ModelInfo failed: %v", err)
+	}
+
+	// Zero-value runtime defaults: NormRMSNorm=0, MLPSwiGLU=0 → "llama"
+	// VocabSize=0 → model_name="unknown"
+	if resp.ModelName != "unknown" {
+		t.Errorf("expected model_name='unknown' for zero config, got %q", resp.ModelName)
+	}
+	if resp.Architecture != "llama" {
+		t.Errorf("expected architecture='llama' for zero config, got %q", resp.Architecture)
+	}
+	if resp.Quantization != "F32" {
+		t.Errorf("expected quantization='F32' for zero config, got %q", resp.Quantization)
+	}
+}
+
+// TestGRPCModelInfoNilScheduler verifies ModelInfo returns Internal
+// error when no scheduler is configured.
+func TestGRPCModelInfoNilScheduler(t *testing.T) {
+	client, cleanup := startGRPCServer(t, nil)
+	defer cleanup()
+
+	_, err := client.ModelInfo(context.Background(), &pb.ModelInfoRequest{})
+	if err == nil {
+		t.Fatal("expected error for nil scheduler")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got: %v", err)
+	}
+	if st.Code() != codes.Internal {
+		t.Errorf("expected Internal, got %v", st.Code())
+	}
+}
+
+// TestGRPCSamplingParamsAccepted verifies that requests with sampling
+// parameters are accepted without error.
+func TestGRPCSamplingParamsAccepted(t *testing.T) {
+	sched, _ := scheduler.NewScheduler(&runtime.ModelRuntime{}, nil, scheduler.Config{})
+	simulateTokens(sched, []string{"ok"})
+
+	client, cleanup := startGRPCServer(t, sched)
+	defer cleanup()
+
+	resp, err := client.Generate(context.Background(), &pb.GenerateRequest{
+		Prompt: "test with params",
+		SamplingParams: &pb.SamplingParams{
+			Temperature: 0.7,
+			TopK:        50,
+			TopP:        0.9,
+			MaxTokens:   100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Generate with sampling params failed: %v", err)
+	}
+	if resp.Text != "ok" {
+		t.Errorf("expected 'ok', got %q", resp.Text)
+	}
+}
