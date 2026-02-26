@@ -1,6 +1,6 @@
 # Track Plan: Documentation & Examples
 
-## Phase 1: Implementation
+## Phase 1: Implementation [checkpoint: 2b584a9]
 - [x] Task: Create `examples/`
     - Add basic Go examples for usage (CLI wrapper, API client if implemented).
     - Added `examples/server/main.go`: Embedding Vexel HTTP server with scheduler.
