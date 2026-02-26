@@ -37,6 +37,8 @@ Checkpoint: d6d13eb
     - Increase `NumDraftTokens` when acceptance is high (>80%), decrease when low (<40%).
     - Clamp to [1, 8] range.
 
+Checkpoint: 786dc4d
+
 ## Phase 3: Medusa Heads
 - [ ] Task: Medusa head architecture
     - Implement Medusa head: small MLP that predicts K future tokens from a hidden state.
