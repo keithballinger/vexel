@@ -1258,7 +1258,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	// For parallel residual, we skip Add1 and do a combined add at the end
 	// For SwiGLU with RMSNorm + fusedOps: defer Add1 to fuse with RMSNorm2
 	// via AddRMSNorm kernel (saves 1 dispatch/layer = 32 dispatches total)
-	canFuseAdd1Norm := !b.ParallelResidual && b.MLPType != MLPGELU &&
+	fuseAddRMSNorm := b.plan == nil || b.plan.Fusion.FuseAddRMSNorm
+	canFuseAdd1Norm := fuseAddRMSNorm && !b.ParallelResidual && b.MLPType != MLPGELU &&
 		b.NormType == NormRMSNorm && b.fusedOps != nil
 	if !b.ParallelResidual && !canFuseAdd1Norm {
 		profileOp("Add1", func() {
@@ -1502,7 +1503,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	} else {
 		// SwiGLU MLP (LLaMA, Mistral): gate = SiLU(x @ W1) * (x @ W3), out = gate @ W2
 		// Fused MLP for FFN (only for RMSNorm + Q4_0 models, decode only)
-		canFuseFFN := seqLen == 1 && b.fusedOps != nil &&
+		fuseMLP := b.plan == nil || b.plan.Fusion.FuseMLP
+		canFuseFFN := fuseMLP && seqLen == 1 && b.fusedOps != nil &&
 			b.NormType == NormRMSNorm &&
 			b.W1.QuantProfile() == tensor.Q4_0 &&
 			b.W3.QuantProfile() == tensor.Q4_0

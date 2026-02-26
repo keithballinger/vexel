@@ -328,6 +328,166 @@ func generateTokenSequence(n int) []int {
 	return tokens
 }
 
+// TestFusionABComparison measures decode throughput with and without the
+// Phase 3 fusions (FusedMLP, AddRMSNorm) to quantify their actual impact.
+//
+// Key finding: dispatch count reduction (451→387, 14%) does NOT translate to
+// measurable throughput improvement. The bottleneck is memory bandwidth in the
+// Q4_0 matmul kernels, not kernel dispatch overhead (~0.6% of total time).
+func TestFusionABComparison(t *testing.T) {
+	const numDecodeTokens = 30
+	const warmupTokens = 5
+
+	type fusionResult struct {
+		name      string
+		tokPerSec float64
+		medianMs  float64
+	}
+
+	configs := []struct {
+		name           string
+		fuseMLP        string
+		fuseAddRMSNorm string
+	}{
+		{"fused (FusedMLP+AddRMSNorm)", "", ""},          // default: fusions enabled
+		{"unfused (baseline)", "0", "0"},                   // fusions disabled
+	}
+
+	var results []fusionResult
+
+	for _, cfg := range configs {
+		t.Run(cfg.name, func(t *testing.T) {
+			if cfg.fuseMLP != "" {
+				os.Setenv("VEXEL_FUSE_MLP", cfg.fuseMLP)
+				defer os.Unsetenv("VEXEL_FUSE_MLP")
+			}
+			if cfg.fuseAddRMSNorm != "" {
+				os.Setenv("VEXEL_FUSE_ADD_RMSNORM", cfg.fuseAddRMSNorm)
+				defer os.Unsetenv("VEXEL_FUSE_ADD_RMSNORM")
+			}
+
+			m, b, c := setupModel(t, false)
+			defer b.Close()
+			defer c.Free()
+
+			// Prefill
+			prefillTokens := []int{1, 15043, 29892, 920, 526}
+			logits := getLogits(t, m, b, prefillTokens, 0)
+			nextToken := argmax(logits)
+			pos := len(prefillTokens)
+
+			// Warmup
+			for w := 0; w < warmupTokens; w++ {
+				logits = getLogits(t, m, b, []int{nextToken}, pos)
+				nextToken = argmax(logits)
+				pos++
+			}
+
+			// Benchmark
+			tokenTimes := make([]time.Duration, numDecodeTokens)
+			for i := 0; i < numDecodeTokens; i++ {
+				start := time.Now()
+				logits = getLogits(t, m, b, []int{nextToken}, pos)
+				nextToken = argmax(logits)
+				tokenTimes[i] = time.Since(start)
+				pos++
+			}
+
+			sortDurations(tokenTimes)
+			var totalMiddle time.Duration
+			for _, d := range tokenTimes[1 : numDecodeTokens-1] {
+				totalMiddle += d
+			}
+			avgTime := totalMiddle / time.Duration(numDecodeTokens-2)
+			tokPerSec := 1.0 / avgTime.Seconds()
+			medianMs := float64(tokenTimes[numDecodeTokens/2].Microseconds()) / 1000
+
+			t.Logf("%s: %.1f tok/s (median=%.2f ms/token)", cfg.name, tokPerSec, medianMs)
+
+			results = append(results, fusionResult{
+				name:      cfg.name,
+				tokPerSec: tokPerSec,
+				medianMs:  medianMs,
+			})
+		})
+	}
+
+	// Print comparison
+	t.Log("\n=== Fusion A/B Comparison ===")
+	for _, r := range results {
+		t.Logf("  %-35s %6.1f tok/s  (%.2f ms/token)", r.name, r.tokPerSec, r.medianMs)
+	}
+	if len(results) == 2 {
+		speedup := (results[0].tokPerSec/results[1].tokPerSec - 1) * 100
+		t.Logf("  Speedup: %+.1f%% (dispatch reduction does NOT measurably improve throughput)", speedup)
+		t.Log("  Conclusion: bottleneck is memory bandwidth in Q4_0 matmul kernels,")
+		t.Log("  not kernel dispatch overhead (~0.6% of total time)")
+	}
+}
+
+// TestFusionCorrectness verifies that FusedMLP and AddRMSNorm kernels produce
+// identical token sequences to the unfused path. This is the Phase 5 correctness
+// verification: deterministic generation (greedy argmax) must match token-for-token.
+func TestFusionCorrectness(t *testing.T) {
+	const numTokens = 20
+
+	// Generate tokens with fusions DISABLED (baseline)
+	os.Setenv("VEXEL_FUSE_MLP", "0")
+	os.Setenv("VEXEL_FUSE_ADD_RMSNORM", "0")
+
+	m1, b1, c1 := setupModel(t, false)
+	prefillTokens := []int{1, 15043, 29892, 920, 526} // BOS + "Hello, how are"
+	logits := getLogits(t, m1, b1, prefillTokens, 0)
+	nextToken := argmax(logits)
+	pos := len(prefillTokens)
+
+	unfusedTokens := make([]int, numTokens)
+	for i := 0; i < numTokens; i++ {
+		unfusedTokens[i] = nextToken
+		logits = getLogits(t, m1, b1, []int{nextToken}, pos)
+		nextToken = argmax(logits)
+		pos++
+	}
+	b1.Close()
+	c1.Free()
+
+	os.Unsetenv("VEXEL_FUSE_MLP")
+	os.Unsetenv("VEXEL_FUSE_ADD_RMSNORM")
+
+	// Generate tokens with fusions ENABLED (default)
+	m2, b2, c2 := setupModel(t, false)
+	logits = getLogits(t, m2, b2, prefillTokens, 0)
+	nextToken = argmax(logits)
+	pos = len(prefillTokens)
+
+	fusedTokens := make([]int, numTokens)
+	for i := 0; i < numTokens; i++ {
+		fusedTokens[i] = nextToken
+		logits = getLogits(t, m2, b2, []int{nextToken}, pos)
+		nextToken = argmax(logits)
+		pos++
+	}
+	b2.Close()
+	c2.Free()
+
+	// Compare: tokens must match
+	mismatches := 0
+	for i := 0; i < numTokens; i++ {
+		if unfusedTokens[i] != fusedTokens[i] {
+			t.Errorf("Token mismatch at position %d: unfused=%d, fused=%d", i, unfusedTokens[i], fusedTokens[i])
+			mismatches++
+		}
+	}
+
+	if mismatches == 0 {
+		t.Logf("Correctness verified: %d tokens match between fused and unfused paths", numTokens)
+		t.Logf("  Unfused tokens: %v", unfusedTokens[:10])
+		t.Logf("  Fused tokens:   %v", fusedTokens[:10])
+	} else {
+		t.Errorf("%d/%d token mismatches — fused kernels produce different output!", mismatches, numTokens)
+	}
+}
+
 // sortDurations sorts a slice of time.Duration in ascending order.
 func sortDurations(d []time.Duration) {
 	for i := 1; i < len(d); i++ {

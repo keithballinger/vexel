@@ -90,6 +90,15 @@ type FusionPolicy struct {
 
 	// FuseResidualAdd fuses residual additions into preceding kernels.
 	FuseResidualAdd bool
+
+	// FuseMLP uses FusedMLP kernel: SiLU(x@W1)*(x@W3) in single dispatch.
+	// Replaces separate FusedRMSNorm+MatMul(W1) + FusedRMSNorm+MatMul(W3) + SiLUMul.
+	// Only applies to decode (seqLen=1) with RMSNorm + Q4_0 weights.
+	FuseMLP bool
+
+	// FuseAddRMSNorm uses AddRMSNorm kernel: x+=residual, out=RMSNorm(x) in single dispatch.
+	// Replaces separate Add1 + RMSNorm2. Applies to both decode and prefill.
+	FuseAddRMSNorm bool
 }
 
 // TuningParams contains kernel-specific tuning parameters.
@@ -328,6 +337,8 @@ func applySmallModelDefaults(plan *ExecutionPlan, model ModelMeta, device Device
 		FuseW1W3:          false, // Not implemented yet
 		FuseSiLUMul:       true,
 		FuseResidualAdd:   false, // Not implemented yet
+		FuseMLP:           true,  // SiLU(x@W1)*(x@W3) in single kernel
+		FuseAddRMSNorm:    true,  // Fused Add1+RMSNorm2
 	}
 
 	// Tuning: conservative settings
@@ -384,6 +395,8 @@ func applyLargeModelDefaults(plan *ExecutionPlan, model ModelMeta, device Device
 		FuseW1W3:          false, // TODO: implement fused W1+W3 kernel
 		FuseSiLUMul:       true,
 		FuseResidualAdd:   false, // TODO: implement fused residual add
+		FuseMLP:           true,  // SiLU(x@W1)*(x@W3) in single kernel
+		FuseAddRMSNorm:    true,  // Fused Add1+RMSNorm2
 	}
 
 	// Tuning: aggressive settings for throughput
@@ -472,6 +485,12 @@ func applyEnvOverrides(plan *ExecutionPlan) {
 	if v := os.Getenv("VEXEL_FUSE_RMSNORM_GATEUP"); v == "0" {
 		plan.Fusion.FuseRMSNormGateUp = false
 	}
+	if v := os.Getenv("VEXEL_FUSE_MLP"); v == "0" {
+		plan.Fusion.FuseMLP = false
+	}
+	if v := os.Getenv("VEXEL_FUSE_ADD_RMSNORM"); v == "0" {
+		plan.Fusion.FuseAddRMSNorm = false
+	}
 
 	// Precision overrides
 	if v := os.Getenv("VEXEL_KV_FP32"); v == "1" {
@@ -512,6 +531,8 @@ func (p *ExecutionPlan) String() string {
 	sb.WriteString(fmt.Sprintf("    FuseRMSNormGateUp: %v\n", p.Fusion.FuseRMSNormGateUp))
 	sb.WriteString(fmt.Sprintf("    FuseW1W3:          %v\n", p.Fusion.FuseW1W3))
 	sb.WriteString(fmt.Sprintf("    FuseSiLUMul:       %v\n", p.Fusion.FuseSiLUMul))
+	sb.WriteString(fmt.Sprintf("    FuseMLP:           %v\n", p.Fusion.FuseMLP))
+	sb.WriteString(fmt.Sprintf("    FuseAddRMSNorm:    %v\n", p.Fusion.FuseAddRMSNorm))
 	sb.WriteString("\n")
 
 	sb.WriteString("  Tuning:\n")
