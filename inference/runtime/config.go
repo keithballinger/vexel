@@ -109,6 +109,7 @@ type ModelConfig struct {
 
 	// Gemma 2-specific settings
 	AttentionLogitSoftCap float32 // Logit soft-capping value (0 = disabled, typically 30.0 for Gemma 2)
+	HasPostNorms          bool    // Apply RMSNorm after attention and MLP (before residual). Gemma 2 only.
 }
 
 // MemoryPlan holds the estimated memory usage breakdown.
@@ -340,6 +341,7 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 	ropeNeox := false         // Default to LLaMA-style (interleaved pairs)
 	attnLogitSoftCap := float32(0)         // 0 = disabled, typically 30.0 for Gemma 2
 	attnWindowType := WindowGlobal         // Default: full context on every layer
+	hasPostNorms := false                  // Default: no post-norms
 
 	switch g.Architecture {
 	case "phi", "phi2", "phi3":
@@ -365,6 +367,7 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		hasBias = false
 		attnLogitSoftCap = 30.0     // Gemma 2 uses logit soft-capping with cap=30
 		attnWindowType = WindowAlternating // Even layers=global, odd layers=sliding window
+		hasPostNorms = true                // Gemma 2 applies RMSNorm after attn and MLP
 		// Gemma 2 uses LLaMA-style RoPE (interleaved pairs)
 	case "llama", "mistral", "qwen2":
 		// Default LLaMA-family settings
@@ -397,5 +400,6 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		SlidingWindow:         g.SlidingWindow,
 		AttentionWindowType:   attnWindowType,
 		AttentionLogitSoftCap: attnLogitSoftCap,
+		HasPostNorms:          hasPostNorms,
 	}
 }

@@ -111,60 +111,61 @@ func TestModelConfigFromGGUF_ArchitectureDetection(t *testing.T) {
 		wantRoPENeox     bool
 		wantSoftCap      float32
 		wantWindowType   AttentionWindowType
+		wantPostNorms    bool
 	}{
 		{
 			name:     "llama",
 			arch:     "llama",
 			wantNorm: NormRMSNorm, wantMLP: MLPSwiGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0, wantWindowType: WindowGlobal,
+			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0, wantWindowType: WindowGlobal, wantPostNorms: false,
 		},
 		{
 			name:     "mistral",
 			arch:     "mistral",
 			wantNorm: NormRMSNorm, wantMLP: MLPSwiGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0, wantWindowType: WindowGlobal,
+			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0, wantWindowType: WindowGlobal, wantPostNorms: false,
 		},
 		{
 			name:     "qwen2",
 			arch:     "qwen2",
 			wantNorm: NormRMSNorm, wantMLP: MLPSwiGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0, wantWindowType: WindowGlobal,
+			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0, wantWindowType: WindowGlobal, wantPostNorms: false,
 		},
 		{
 			name:     "phi2",
 			arch:     "phi2",
 			wantNorm: NormLayerNorm, wantMLP: MLPGELU,
-			wantBias: true, wantParallel: true, wantRoPENeox: true, wantSoftCap: 0, wantWindowType: WindowGlobal,
+			wantBias: true, wantParallel: true, wantRoPENeox: true, wantSoftCap: 0, wantWindowType: WindowGlobal, wantPostNorms: false,
 		},
 		{
 			name:     "phi3",
 			arch:     "phi3",
 			wantNorm: NormLayerNorm, wantMLP: MLPGELU,
-			wantBias: true, wantParallel: true, wantRoPENeox: true, wantSoftCap: 0, wantWindowType: WindowGlobal,
+			wantBias: true, wantParallel: true, wantRoPENeox: true, wantSoftCap: 0, wantWindowType: WindowGlobal, wantPostNorms: false,
 		},
 		{
 			name:     "gpt2",
 			arch:     "gpt2",
 			wantNorm: NormLayerNorm, wantMLP: MLPGELU,
-			wantBias: true, wantParallel: false, wantRoPENeox: true, wantSoftCap: 0, wantWindowType: WindowGlobal,
+			wantBias: true, wantParallel: false, wantRoPENeox: true, wantSoftCap: 0, wantWindowType: WindowGlobal, wantPostNorms: false,
 		},
 		{
 			name:     "gptneox",
 			arch:     "gptneox",
 			wantNorm: NormLayerNorm, wantMLP: MLPGELU,
-			wantBias: true, wantParallel: false, wantRoPENeox: true, wantSoftCap: 0, wantWindowType: WindowGlobal,
+			wantBias: true, wantParallel: false, wantRoPENeox: true, wantSoftCap: 0, wantWindowType: WindowGlobal, wantPostNorms: false,
 		},
 		{
 			name:     "gemma",
 			arch:     "gemma",
 			wantNorm: NormRMSNorm, wantMLP: MLPGeGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0, wantWindowType: WindowGlobal,
+			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0, wantWindowType: WindowGlobal, wantPostNorms: false,
 		},
 		{
 			name:     "gemma2",
 			arch:     "gemma2",
 			wantNorm: NormRMSNorm, wantMLP: MLPGeGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 30.0, wantWindowType: WindowAlternating,
+			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 30.0, wantWindowType: WindowAlternating, wantPostNorms: true,
 		},
 	}
 
@@ -204,6 +205,9 @@ func TestModelConfigFromGGUF_ArchitectureDetection(t *testing.T) {
 			}
 			if cfg.AttentionWindowType != tt.wantWindowType {
 				t.Errorf("AttentionWindowType: got %v, want %v", cfg.AttentionWindowType, tt.wantWindowType)
+			}
+			if cfg.HasPostNorms != tt.wantPostNorms {
+				t.Errorf("HasPostNorms: got %v, want %v", cfg.HasPostNorms, tt.wantPostNorms)
 			}
 		})
 	}

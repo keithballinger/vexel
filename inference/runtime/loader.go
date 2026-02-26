@@ -578,6 +578,13 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 		if err := copyToDevice(&layer.W3); err != nil {
 			return fmt.Errorf("layer %d w3: %w", i, err)
 		}
+		// Post-norm weights (Gemma 2)
+		if err := copyToDevice(&layer.PostAttnNorm); err != nil {
+			return fmt.Errorf("layer %d post_attn_norm: %w", i, err)
+		}
+		if err := copyToDevice(&layer.PostFFNNorm); err != nil {
+			return fmt.Errorf("layer %d post_ffn_norm: %w", i, err)
+		}
 	}
 
 	// Sync to ensure all copies complete
@@ -686,6 +693,12 @@ func (m *ModelRuntime) mapTensor(name string, t tensor.Tensor) {
 		layer.FFNNorm = t
 	case "post_attention_layernorm.bias", "ffn_norm.bias":
 		layer.FFNNormBias = t
+
+	// Post-norm weights (Gemma 2): applied after attention/MLP, before residual
+	case "attn_post_norm.weight":
+		layer.PostAttnNorm = t
+	case "ffn_post_norm.weight":
+		layer.PostFFNNorm = t
 	}
 }
 

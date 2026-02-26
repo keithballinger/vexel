@@ -237,6 +237,8 @@ type BlockRuntime struct {
 	Wo           tensor.Tensor
 
 	FFNNorm      tensor.Tensor
+	PostAttnNorm tensor.Tensor // Post-attention RMSNorm weight (Gemma 2)
+	PostFFNNorm  tensor.Tensor // Post-FFN RMSNorm weight (Gemma 2)
 	W1, W2, W3   tensor.Tensor // Gate, Down, Up (W3 not used for GELU MLP)
 
 	// Optional bias tensors (for Phi, GPT-2, etc.)
@@ -279,6 +281,7 @@ type BlockRuntime struct {
 
 	// Gemma 2 attention config
 	AttentionLogitSoftCap float32 // 0 = disabled, typically 30.0 for Gemma 2
+	HasPostNorms          bool    // Apply post-norms after attn and MLP (before residual)
 
 	// Execution plan (set by ModelRuntime.BuildPlan)
 	plan *ExecutionPlan
@@ -334,6 +337,7 @@ func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 
 	// Gemma 2 attention config
 	br.AttentionLogitSoftCap = config.AttentionLogitSoftCap
+	br.HasPostNorms = config.HasPostNorms
 
 	return br
 }
@@ -552,6 +556,10 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 	if !b.Wo.DevicePtr().IsNil() {
 		oDim := b.Wo.Shape().Dims()[0]
 		b.matMulTransposedWithBias(attnOutPtr, b.Wo, b.WoBias, attnResidualPtr, seqLen, oDim, numHeads*headDim)
+		// Post-attention norm (Gemma 2): norm after attn projection, before residual
+		if b.HasPostNorms && !b.PostAttnNorm.DevicePtr().IsNil() {
+			b.backend.RMSNorm(attnResidualPtr, b.PostAttnNorm.DevicePtr(), attnResidualPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+		}
 		if !b.ParallelResidual {
 			b.backend.Add(xPtr, attnResidualPtr, xPtr, seqLen*hiddenSize)
 		}
@@ -598,7 +606,12 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 		}
 	}
 
-	// 8. Add residuals
+	// 8. Post-FFN norm (Gemma 2): norm after MLP, before residual
+	if b.HasPostNorms && !b.PostFFNNorm.DevicePtr().IsNil() {
+		b.backend.RMSNorm(normOutPtr, b.PostFFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+	}
+
+	// 9. Add residuals
 	if b.ParallelResidual {
 		b.backend.Add(xPtr, attnResidualPtr, xPtr, seqLen*hiddenSize)
 		b.backend.Sync()
@@ -810,6 +823,10 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 	if !b.Wo.DevicePtr().IsNil() {
 		oDim := b.Wo.Shape().Dims()[0]
 		b.matMulTransposedWithBias(attnOutPtr, b.Wo, b.WoBias, attnResidualPtr, seqLen, oDim, numHeads*headDim)
+		// Post-attention norm (Gemma 2): norm after attn projection, before residual
+		if b.HasPostNorms && !b.PostAttnNorm.DevicePtr().IsNil() {
+			b.backend.RMSNorm(attnResidualPtr, b.PostAttnNorm.DevicePtr(), attnResidualPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+		}
 		// For serial residual, add attention output to x immediately
 		if !b.ParallelResidual {
 			b.backend.Add(xPtr, attnResidualPtr, xPtr, seqLen*hiddenSize)
@@ -890,7 +907,12 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 	}
 	// No sync - operations serialized in command queue
 
-	// 9. Add residuals
+	// 9. Post-FFN norm (Gemma 2): norm after MLP, before residual
+	if b.HasPostNorms && !b.PostFFNNorm.DevicePtr().IsNil() {
+		b.backend.RMSNorm(normOutPtr, b.PostFFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+	}
+
+	// 10. Add residuals
 	if b.ParallelResidual {
 		// Parallel residual: x = x + attn(norm(x)) + mlp(norm(x))
 		b.backend.Add(xPtr, attnResidualPtr, xPtr, seqLen*hiddenSize) // Add attention
@@ -1353,6 +1375,10 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			oDim := b.Wo.Shape().Dims()[0]
 			b.matMulTransposedWithBias(attnOutPtr, b.Wo, b.WoBias, woOutputPtr, seqLen, oDim, numHeads*headDim)
 		}
+		// Post-attention norm (Gemma 2): norm after attn projection, before residual
+		if b.HasPostNorms && !b.PostAttnNorm.DevicePtr().IsNil() {
+			b.backend.RMSNorm(woOutputPtr, b.PostAttnNorm.DevicePtr(), woOutputPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+		}
 	})
 	// Debug L15 after Wo
 	if debugL15 {
@@ -1713,7 +1739,12 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	// Debug harness: capture MLP output
 	capture("mlp", "mlpOut", normOutPtr, seqLen*hiddenSize)
 
-	// 9. Final residual add
+	// 9. Post-FFN norm (Gemma 2): norm after MLP, before residual
+	if b.HasPostNorms && !b.PostFFNNorm.DevicePtr().IsNil() {
+		b.backend.RMSNorm(normOutPtr, b.PostFFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+	}
+
+	// 10. Final residual add
 	// For parallel residual (Phi): x = x + attn_output + mlp_output (combined add)
 	// For serial residual (LLaMA): x = x + mlp_output (attn was already added in Add1)
 	if b.ParallelResidual {
