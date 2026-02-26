@@ -6,11 +6,11 @@ the interface but both methods return mock data. A basic test (`grpc_test.go`) v
 server starts. This track completes the implementation and adds production features.
 
 ## Phase 1: Implementation
-- [ ] Task: Implement `Generate` RPC
+- [x] Task: Implement `Generate` RPC
     - Wire to scheduler: create Sequence, AddSequence, collect tokens from TokenChan, return response.
     - Add timeout handling via context deadline.
     - Return proper gRPC status codes (InvalidArgument, DeadlineExceeded, Internal).
-- [ ] Task: Implement `StreamGenerate` RPC
+- [x] Task: Implement `StreamGenerate` RPC
     - Wire to scheduler: create Sequence, AddSequence, stream tokens via `server.Send()`.
     - Each token is sent as a `GenerateResponse{text: token}`.
     - Handle client cancellation (context.Done) and clean up sequence.
