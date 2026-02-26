@@ -6,7 +6,7 @@
 - [x] Task: Kernel Analysis
     - Analyze `metal_bridge_darwin.m` kernel implementations for optimization potential (e.g., register pressure, occupancy).
 
-## Phase 2: Implementation
+## Phase 2: Implementation [checkpoint: 295b3cd]
 - [x] Task: FlashAttention Tune
     - Tune `flash_attention` kernel block sizes/SIMD group usage for M-series.
     - Implemented single-pass loop optimization to avoid recomputing Q*K dot product.
@@ -30,7 +30,7 @@
 - [ ] Task: Throughput Benchmark
     - Measure `tokens/second` improvements for various sequence lengths/batches.
     - **Results:**
-        - Prefill: 627.6 -> 785.3 tok/s -> **Regression to ~160 tok/s**
+        - Prefill: 627.6 -> 785.3 tok/s -> ~~Regression to ~160 tok/s~~ → **Fixed (regression resolved)**
         - Decode: 90.9 -> 125.1 tok/s -> **138 tok/s (+51%)**
 - [ ] Task: Latency Benchmark
     - Measure `time-to-first-token` improvements.
