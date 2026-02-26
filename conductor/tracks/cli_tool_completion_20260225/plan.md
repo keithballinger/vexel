@@ -19,7 +19,7 @@ The README documents `./vexel serve` but no unified CLI binary exists. Individua
     - Graceful shutdown on SIGINT/SIGTERM.
     - Shared `initModel()` helper for model loading (reused by chat/generate).
 
-## Phase 2: Generation Subcommands [checkpoint: pending]
+## Phase 2: Generation Subcommands [checkpoint: e80c244]
 - [x] Task: Implement `generate` subcommand
     - One-shot text generation from a prompt (no HTTP, direct runtime).
     - Flags: `--prompt`, `--max-tokens`, `--temperature`.
