@@ -169,14 +169,13 @@ run_llama() {
     local start_time end_time duration
     start_time=$(python3 -c "import time; print(time.perf_counter())")
 
-    # llama-cli outputs timing stats to stderr
+    # llama-completion is the non-interactive mode (llama-cli enters chat mode)
     local output
-    output=$(llama-cli \
+    output=$(llama-completion \
         -m "$MODEL_PATH" \
         -p "$PROMPT" \
         -n "$GEN_TOKENS" \
         --temp "$TEMPERATURE" \
-        --no-display-prompt \
         -ngl 99 \
         2>&1) || true
 
@@ -200,17 +199,22 @@ prompt_tok_s = 0
 gen_tokens = 0
 prompt_tokens = 0
 
+load_time_s = 0
 for line in output.split('\n'):
-    # Token generation (decode)
-    m = re.search(r'eval time\s*=\s*[\d.]+\s*ms\s*/\s*(\d+)\s*tokens\s*\(\s*([\d.]+)\s*ms per token,\s*([\d.]+)\s*tokens per second\)', line)
-    if m:
-        gen_tokens = int(m.group(1))
-        eval_tok_s = float(m.group(3))
+    # Token generation (decode) — matches both old and new llama.cpp output formats
+    m = re.search(r'eval time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*(?:tokens|runs)\s*\(\s*([\d.]+)\s*ms per token,\s*([\d.]+)\s*tokens per second\)', line)
+    if m and 'prompt' not in line.lower():
+        gen_tokens = int(m.group(2))
+        eval_tok_s = float(m.group(4))
     # Prompt eval (prefill)
-    m = re.search(r'prompt eval time\s*=\s*[\d.]+\s*ms\s*/\s*(\d+)\s*tokens\s*\(\s*([\d.]+)\s*ms per token,\s*([\d.]+)\s*tokens per second\)', line)
+    m = re.search(r'prompt eval time\s*=\s*([\d.]+)\s*ms\s*/\s*(\d+)\s*tokens\s*\(\s*([\d.]+)\s*ms per token,\s*([\d.]+)\s*tokens per second\)', line)
     if m:
-        prompt_tokens = int(m.group(1))
-        prompt_tok_s = float(m.group(3))
+        prompt_tokens = int(m.group(2))
+        prompt_tok_s = float(m.group(4))
+    # Load time
+    m = re.search(r'load time\s*=\s*([\d.]+)\s*ms', line)
+    if m:
+        load_time_s = float(m.group(1)) / 1000.0
 
 result = {
     'engine': 'llama.cpp',
@@ -221,6 +225,7 @@ result = {
     'gen_time_s': round(duration, 4),
     'decode_tok_s': eval_tok_s,
     'prefill_tok_s': prompt_tok_s,
+    'load_time_s': round(load_time_s, 4),
 }
 print(json.dumps(result))
 "
