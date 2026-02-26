@@ -25,7 +25,7 @@ Sources:
     - Determine if MLX is still the throughput leader or if newer competitors exist.
     - Check vllm-mlx, MLC-LLM, and any new Metal-optimized engines.
     - Document findings in `benchmarks/COMPETITORS.md`.
-- [ ] Task: Install and validate competitors
+- [x] Task: Install and validate competitors
     - Install on benchmark machine: `mlx-lm`, `llama.cpp` (Metal), `ollama`, `vllm-mlx`.
     - Optionally install `MLC-LLM` if long-context benchmarks are needed.
     - Verify each engine can load and run the same GGUF/MLX model.

@@ -8,3 +8,8 @@ models/
 vexel_metal
 vexel_old
 .gocache/
+
+# Benchmark environment
+benchmarks/.venv/
+benchmarks/models/
+benchmarks/results/
