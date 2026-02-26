@@ -56,6 +56,32 @@ func (m MLPType) String() string {
 	}
 }
 
+// AttentionWindowType specifies the attention window pattern for each layer.
+type AttentionWindowType int
+
+const (
+	// WindowGlobal uses full context attention on every layer (default, e.g. LLaMA).
+	WindowGlobal AttentionWindowType = iota
+	// WindowSliding uses sliding window attention on every layer (e.g. Mistral).
+	WindowSliding
+	// WindowAlternating uses global attention on even layers and sliding window
+	// on odd layers (e.g. Gemma 2).
+	WindowAlternating
+)
+
+func (w AttentionWindowType) String() string {
+	switch w {
+	case WindowGlobal:
+		return "Global"
+	case WindowSliding:
+		return "Sliding"
+	case WindowAlternating:
+		return "Alternating"
+	default:
+		return "Unknown"
+	}
+}
+
 // ModelConfig defines the hyperparameters for the model architecture.
 type ModelConfig struct {
 	HiddenSize        int
@@ -78,7 +104,8 @@ type ModelConfig struct {
 	RoPEDim          int      // Dimensions to apply RoPE to (0 = full headDim for LLaMA-style)
 	                          // Phi-2 uses partial RoPE where only first 32 dims of 80 are rotated
 	RoPENeox         bool     // Use NEOX-style RoPE (split pairs: i, i+dim/2) vs LLaMA-style (interleaved: 2i, 2i+1)
-	SlidingWindow    int      // Sliding window size for attention (0 = infinite/full context)
+	SlidingWindow       int                // Sliding window size for attention (0 = infinite/full context)
+	AttentionWindowType AttentionWindowType // Window pattern: Global (default), Sliding (all layers), Alternating (even=global, odd=sliding)
 
 	// Gemma 2-specific settings
 	AttentionLogitSoftCap float32 // Logit soft-capping value (0 = disabled, typically 30.0 for Gemma 2)
@@ -311,7 +338,8 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 	hasBias := false
 	parallelResidual := false
 	ropeNeox := false         // Default to LLaMA-style (interleaved pairs)
-	attnLogitSoftCap := float32(0) // 0 = disabled, typically 30.0 for Gemma 2
+	attnLogitSoftCap := float32(0)         // 0 = disabled, typically 30.0 for Gemma 2
+	attnWindowType := WindowGlobal         // Default: full context on every layer
 
 	switch g.Architecture {
 	case "phi", "phi2", "phi3":
@@ -335,7 +363,8 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		normType = NormRMSNorm
 		mlpType = MLPGeGLU
 		hasBias = false
-		attnLogitSoftCap = 30.0 // Gemma 2 uses logit soft-capping with cap=30
+		attnLogitSoftCap = 30.0     // Gemma 2 uses logit soft-capping with cap=30
+		attnWindowType = WindowAlternating // Even layers=global, odd layers=sliding window
 		// Gemma 2 uses LLaMA-style RoPE (interleaved pairs)
 	case "llama", "mistral", "qwen2":
 		// Default LLaMA-family settings
@@ -366,6 +395,7 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		RoPEDim:           g.RoPEDimCount, // 0 = full headDim, otherwise partial RoPE
 		RoPENeox:              ropeNeox,       // NEOX-style (split) vs LLaMA-style (interleaved) RoPE
 		SlidingWindow:         g.SlidingWindow,
+		AttentionWindowType:   attnWindowType,
 		AttentionLogitSoftCap: attnLogitSoftCap,
 	}
 }

@@ -110,60 +110,61 @@ func TestModelConfigFromGGUF_ArchitectureDetection(t *testing.T) {
 		wantParallel     bool
 		wantRoPENeox     bool
 		wantSoftCap      float32
+		wantWindowType   AttentionWindowType
 	}{
 		{
 			name:     "llama",
 			arch:     "llama",
 			wantNorm: NormRMSNorm, wantMLP: MLPSwiGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0,
+			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0, wantWindowType: WindowGlobal,
 		},
 		{
 			name:     "mistral",
 			arch:     "mistral",
 			wantNorm: NormRMSNorm, wantMLP: MLPSwiGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0,
+			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0, wantWindowType: WindowGlobal,
 		},
 		{
 			name:     "qwen2",
 			arch:     "qwen2",
 			wantNorm: NormRMSNorm, wantMLP: MLPSwiGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0,
+			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0, wantWindowType: WindowGlobal,
 		},
 		{
 			name:     "phi2",
 			arch:     "phi2",
 			wantNorm: NormLayerNorm, wantMLP: MLPGELU,
-			wantBias: true, wantParallel: true, wantRoPENeox: true, wantSoftCap: 0,
+			wantBias: true, wantParallel: true, wantRoPENeox: true, wantSoftCap: 0, wantWindowType: WindowGlobal,
 		},
 		{
 			name:     "phi3",
 			arch:     "phi3",
 			wantNorm: NormLayerNorm, wantMLP: MLPGELU,
-			wantBias: true, wantParallel: true, wantRoPENeox: true, wantSoftCap: 0,
+			wantBias: true, wantParallel: true, wantRoPENeox: true, wantSoftCap: 0, wantWindowType: WindowGlobal,
 		},
 		{
 			name:     "gpt2",
 			arch:     "gpt2",
 			wantNorm: NormLayerNorm, wantMLP: MLPGELU,
-			wantBias: true, wantParallel: false, wantRoPENeox: true, wantSoftCap: 0,
+			wantBias: true, wantParallel: false, wantRoPENeox: true, wantSoftCap: 0, wantWindowType: WindowGlobal,
 		},
 		{
 			name:     "gptneox",
 			arch:     "gptneox",
 			wantNorm: NormLayerNorm, wantMLP: MLPGELU,
-			wantBias: true, wantParallel: false, wantRoPENeox: true, wantSoftCap: 0,
+			wantBias: true, wantParallel: false, wantRoPENeox: true, wantSoftCap: 0, wantWindowType: WindowGlobal,
 		},
 		{
 			name:     "gemma",
 			arch:     "gemma",
 			wantNorm: NormRMSNorm, wantMLP: MLPGeGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0,
+			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0, wantWindowType: WindowGlobal,
 		},
 		{
 			name:     "gemma2",
 			arch:     "gemma2",
 			wantNorm: NormRMSNorm, wantMLP: MLPGeGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 30.0,
+			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 30.0, wantWindowType: WindowAlternating,
 		},
 	}
 
@@ -200,6 +201,9 @@ func TestModelConfigFromGGUF_ArchitectureDetection(t *testing.T) {
 			}
 			if cfg.AttentionLogitSoftCap != tt.wantSoftCap {
 				t.Errorf("AttentionLogitSoftCap: got %v, want %v", cfg.AttentionLogitSoftCap, tt.wantSoftCap)
+			}
+			if cfg.AttentionWindowType != tt.wantWindowType {
+				t.Errorf("AttentionWindowType: got %v, want %v", cfg.AttentionWindowType, tt.wantWindowType)
 			}
 		})
 	}
@@ -416,4 +420,119 @@ func TestGGUFTensorInfo_LLaMA2(t *testing.T) {
 
 	t.Logf("GGUF tensor index verified: %d tensors across %d quant types",
 		len(tensors), len(typeCounts))
+}
+
+// TestAlternatingWindowSelection verifies that the alternating sliding window
+// pattern correctly routes even layers to global attention and odd layers to
+// sliding window attention with proper KV length computation.
+//
+// Track 6: Gemma Architecture, Phase 2 Task 2.
+func TestAlternatingWindowSelection(t *testing.T) {
+	// Create a minimal backend for BlockRuntime construction
+	cfg := ModelConfig{
+		HiddenSize:          256,
+		IntermediateSize:    512,
+		NumAttentionHeads:   4,
+		NumKeyValueHeads:    4,
+		SlidingWindow:       128,
+		AttentionWindowType: WindowAlternating,
+	}
+
+	// Construct BlockRuntime directly to test helper methods
+	br := &BlockRuntime{
+		SlidingWindow:       cfg.SlidingWindow,
+		AttentionWindowType: cfg.AttentionWindowType,
+	}
+
+	// Test useSlidingWindow
+	t.Run("useSlidingWindow", func(t *testing.T) {
+		tests := []struct {
+			layerIdx int
+			want     bool
+		}{
+			{0, false}, // Even → global
+			{1, true},  // Odd → sliding
+			{2, false}, // Even → global
+			{3, true},  // Odd → sliding
+			{10, false},
+			{11, true},
+		}
+		for _, tt := range tests {
+			got := br.useSlidingWindow(tt.layerIdx)
+			if got != tt.want {
+				t.Errorf("useSlidingWindow(layer=%d): got %v, want %v", tt.layerIdx, got, tt.want)
+			}
+		}
+	})
+
+	// Test effectiveKVLen for alternating pattern
+	t.Run("effectiveKVLen_alternating", func(t *testing.T) {
+		tests := []struct {
+			layerIdx    int
+			totalKVLen  int
+			wantKVLen   int
+			wantStartPos int
+		}{
+			// Even layers (global) - always use full context
+			{0, 200, 200, 0},
+			{0, 50, 50, 0},   // Below window - no change
+			{2, 1000, 1000, 0},
+
+			// Odd layers (sliding) - cap at window size
+			{1, 200, 128, 72},   // 200 > 128, so window=128, startPos=72
+			{3, 500, 128, 372},  // 500 > 128, so window=128, startPos=372
+			{1, 50, 50, 0},      // 50 < 128, no truncation needed
+			{1, 128, 128, 0},    // Exactly window size, no truncation
+			{1, 129, 128, 1},    // Just over, trim 1
+		}
+		for _, tt := range tests {
+			gotKVLen, gotStartPos := br.effectiveKVLen(tt.layerIdx, tt.totalKVLen)
+			if gotKVLen != tt.wantKVLen || gotStartPos != tt.wantStartPos {
+				t.Errorf("effectiveKVLen(layer=%d, total=%d): got (%d, %d), want (%d, %d)",
+					tt.layerIdx, tt.totalKVLen, gotKVLen, gotStartPos, tt.wantKVLen, tt.wantStartPos)
+			}
+		}
+	})
+
+	// Test with WindowGlobal - no sliding window should be used
+	t.Run("effectiveKVLen_global", func(t *testing.T) {
+		brGlobal := &BlockRuntime{
+			SlidingWindow:       128,
+			AttentionWindowType: WindowGlobal,
+		}
+		for _, layerIdx := range []int{0, 1, 2, 3} {
+			kvLen, startPos := brGlobal.effectiveKVLen(layerIdx, 500)
+			if kvLen != 500 || startPos != 0 {
+				t.Errorf("WindowGlobal effectiveKVLen(layer=%d, 500): got (%d, %d), want (500, 0)",
+					layerIdx, kvLen, startPos)
+			}
+		}
+	})
+
+	// Test with WindowSliding - all layers should use sliding window
+	t.Run("effectiveKVLen_sliding", func(t *testing.T) {
+		brSliding := &BlockRuntime{
+			SlidingWindow:       128,
+			AttentionWindowType: WindowSliding,
+		}
+		for _, layerIdx := range []int{0, 1, 2, 3} {
+			kvLen, startPos := brSliding.effectiveKVLen(layerIdx, 500)
+			if kvLen != 128 || startPos != 372 {
+				t.Errorf("WindowSliding effectiveKVLen(layer=%d, 500): got (%d, %d), want (128, 372)",
+					layerIdx, kvLen, startPos)
+			}
+		}
+	})
+
+	// Test with no sliding window configured - should always be global
+	t.Run("effectiveKVLen_no_window", func(t *testing.T) {
+		brNoWindow := &BlockRuntime{
+			SlidingWindow:       0,
+			AttentionWindowType: WindowAlternating,
+		}
+		kvLen, startPos := brNoWindow.effectiveKVLen(1, 500)
+		if kvLen != 500 || startPos != 0 {
+			t.Errorf("No window effectiveKVLen(layer=1, 500): got (%d, %d), want (500, 0)", kvLen, startPos)
+		}
+	})
 }

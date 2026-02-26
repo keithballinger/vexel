@@ -220,7 +220,8 @@ type BlockRuntime struct {
 	RoPETheta         float64
 	RoPEDim           int  // Dimensions to rotate (0 = full headDim). For partial RoPE like Phi-2.
 	RoPENeox          bool // NEOX-style RoPE (split pairs: i, i+dim/2) vs LLaMA-style (interleaved: 2i, 2i+1)
-	SlidingWindow     int  // Window size for sliding window attention (0 = infinite/full context)
+	SlidingWindow       int                // Window size for sliding window attention (0 = infinite/full context)
+	AttentionWindowType AttentionWindowType // Window pattern: Global, Sliding, or Alternating
 	RMSNormEPS        float64
 
 	// Architecture-specific config
@@ -301,7 +302,8 @@ func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 		RoPETheta:         config.RoPETheta,
 		RoPEDim:           config.RoPEDim,  // 0 = full headDim (LLaMA), otherwise partial (Phi-2)
 		RoPENeox:          config.RoPENeox, // NEOX-style (Phi) vs LLaMA-style RoPE
-		SlidingWindow:     config.SlidingWindow,
+		SlidingWindow:       config.SlidingWindow,
+		AttentionWindowType: config.AttentionWindowType,
 		RMSNormEPS:        config.RMSNormEPS,
 		NormType:          config.NormType,
 		MLPType:           config.MLPType,
@@ -334,6 +336,35 @@ func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 	br.AttentionLogitSoftCap = config.AttentionLogitSoftCap
 
 	return br
+}
+
+// useSlidingWindow returns true if the given layer should use sliding window attention.
+// For WindowSliding: all layers use sliding window.
+// For WindowAlternating (Gemma 2): odd layers use sliding window, even layers use global.
+// For WindowGlobal: no layers use sliding window.
+func (b *BlockRuntime) useSlidingWindow(layerIdx int) bool {
+	if b.SlidingWindow <= 0 {
+		return false // No window configured
+	}
+	switch b.AttentionWindowType {
+	case WindowSliding:
+		return true
+	case WindowAlternating:
+		return layerIdx%2 == 1 // Odd layers use sliding window
+	default:
+		return false
+	}
+}
+
+// effectiveKVLen computes the effective KV sequence length for attention,
+// applying sliding window when appropriate based on layer index.
+// totalKVLen is the total number of KV positions available.
+// Returns the number of positions to attend to and the start position offset.
+func (b *BlockRuntime) effectiveKVLen(layerIdx, totalKVLen int) (kvLen, startPos int) {
+	if b.useSlidingWindow(layerIdx) && totalKVLen > b.SlidingWindow {
+		return b.SlidingWindow, totalKVLen - b.SlidingWindow
+	}
+	return totalKVLen, 0
 }
 
 // matMulTransposed performs C = A @ W^T, dispatching to quantized kernel if supported.
@@ -722,7 +753,7 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 
 		currentPos := startPos + seqLen - 1
 		attnStartPos := 0
-		if b.SlidingWindow > 0 && currentPos >= b.SlidingWindow {
+		if b.useSlidingWindow(layerIdx) && currentPos >= b.SlidingWindow {
 			attnStartPos = currentPos - b.SlidingWindow + 1
 		}
 
@@ -1254,10 +1285,21 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				if debugDecode && layerIdx == 0 {
 					fmt.Printf("FP32 (stride=%d)\n", gpuCache.KVHeadStride())
 				}
+				// Compute effective KV length (may be reduced by sliding window)
+				effKVLen, kvStartPos := b.effectiveKVLen(layerIdx, fullSeqLen)
+				sdpaKPtr, sdpaVPtr := fullKPtr, fullVPtr
+				if kvStartPos > 0 {
+					// Offset K/V pointers within head-major layout.
+					// Layout: [numKVHeads, maxSeqLen, headDim]
+					// Offsetting by startPos*headDim skips old positions in each head.
+					offsetBytes := uintptr(kvStartPos * headDim * 4) // 4 bytes per float32
+					sdpaKPtr = tensor.DevicePtrOffset(fullKPtr, offsetBytes)
+					sdpaVPtr = tensor.DevicePtrOffset(fullVPtr, offsetBytes)
+				}
 				if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
-					b.softCapOps.SDPASoftCap(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap, gpuCache.KVHeadStride())
+					b.softCapOps.SDPASoftCap(qPtr, sdpaKPtr, sdpaVPtr, attnOutPtr, effKVLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap, gpuCache.KVHeadStride())
 				} else {
-					b.backend.SDPA(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale, gpuCache.KVHeadStride())
+					b.backend.SDPA(qPtr, sdpaKPtr, sdpaVPtr, attnOutPtr, effKVLen, numHeads, numKVHeads, headDim, scale, gpuCache.KVHeadStride())
 				}
 			}
 		} else {
