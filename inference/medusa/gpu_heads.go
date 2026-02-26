@@ -43,7 +43,7 @@ type GPUHeads struct {
 	scratchAllocated bool
 	scratchHidden    tensor.DevicePtr // [maxBatch, hiddenSize]
 	scratchInter     tensor.DevicePtr // [maxBatch, hiddenSize]
-	scratchPreRelu   tensor.DevicePtr // [maxBatch, hiddenSize] - for ReLU backward
+	scratchPreRelu   tensor.DevicePtr // [maxBatch, hiddenSize] - pre-activation for SiLU backward
 	scratchLogits    tensor.DevicePtr // [maxBatch, vocabSize]
 	scratchDLogits   tensor.DevicePtr // [maxBatch, vocabSize]
 	scratchDInter    tensor.DevicePtr // [maxBatch, hiddenSize]
@@ -199,20 +199,14 @@ func (h *GPUHeads) Forward(headIdx int, hidden []float32) []float32 {
 		// This preserves the lm_head initialization exactly
 		intermediate = hidden
 	} else {
-		// FC1: intermediate = LeakyReLU(hidden @ FC1)
-		// LeakyReLU with alpha=0.01 to prevent dead neurons
-		const leakyAlpha = float32(0.01)
+		// FC1: intermediate = SiLU(hidden @ FC1)
 		intermediate = make([]float32, hiddenSize)
 		for i := 0; i < hiddenSize; i++ {
 			var sum float32
 			for j := 0; j < hiddenSize; j++ {
 				sum += hidden[j] * head.FC1CPU[j*hiddenSize+i]
 			}
-			if sum > 0 {
-				intermediate[i] = sum
-			} else {
-				intermediate[i] = leakyAlpha * sum
-			}
+			intermediate[i] = silu(sum)
 		}
 	}
 
@@ -382,13 +376,13 @@ func (h *GPUHeads) TrainStep(samples []TrainingSample, lr float32) float32 {
 		// FC1: intermediate = hidden @ FC1 [validBatch, hidden] @ [hidden, hidden] -> [validBatch, hidden]
 		h.backend.MatMul(h.scratchHidden, head.FC1, h.scratchInter, validBatch, hiddenSize, hiddenSize)
 
-		// Save pre-ReLU for backward (copy to scratchPreRelu)
-		preReluBytes := make([]byte, validBatch*hiddenSize*4)
-		h.backend.ToHost(preReluBytes, h.scratchInter)
-		h.backend.ToDevice(h.scratchPreRelu, preReluBytes)
+		// Save pre-activation for backward (copy to scratchPreRelu)
+		preActBytes := make([]byte, validBatch*hiddenSize*4)
+		h.backend.ToHost(preActBytes, h.scratchInter)
+		h.backend.ToDevice(h.scratchPreRelu, preActBytes)
 
-		// ReLU in-place
-		trainOps.ReLUInplace(h.scratchInter, validBatch*hiddenSize)
+		// SiLU in-place
+		trainOps.SiLUInplace(h.scratchInter, validBatch*hiddenSize)
 
 		// FC2: logits = intermediate @ FC2 [validBatch, hidden] @ [hidden, vocab] -> [validBatch, vocab]
 		h.backend.MatMul(h.scratchInter, head.FC2, h.scratchLogits, validBatch, vocabSize, hiddenSize)
@@ -447,8 +441,8 @@ func (h *GPUHeads) TrainStep(samples []TrainingSample, lr float32) float32 {
 		h.backend.MatMulTransposed(h.scratchDLogits, head.FC2, h.scratchDInter,
 			validBatch, hiddenSize, vocabSize)
 
-		// ReLU backward: mask gradient where pre-ReLU <= 0
-		trainOps.ReLUBackward(h.scratchPreRelu, h.scratchDInter, validBatch*hiddenSize)
+		// SiLU backward: dSiLU/dx = sigmoid(x) * (1 + x*(1-sigmoid(x)))
+		trainOps.SiLUBackward(h.scratchPreRelu, h.scratchDInter, validBatch*hiddenSize)
 
 		// FC1 gradient: grad1[i,j] = sum_b(hidden[b,i] * dIntermediate[b,j])
 		trainOps.BatchedOuterProduct(h.scratchHidden, h.scratchDInter, h.scratchGrad1,
@@ -496,19 +490,16 @@ func (h *GPUHeads) trainStepCPU(samples []TrainingSample, lr float32) float32 {
 			}
 
 			// Forward pass (using CPU weights for gradient computation)
-			// FC1 forward with LeakyReLU
-			const leakyAlpha = float32(0.01)
+			// FC1 forward with SiLU
+			preAct := make([]float32, hiddenSize)
 			intermediate := make([]float32, hiddenSize)
 			for i := 0; i < hiddenSize; i++ {
 				var sum float32
 				for j := 0; j < hiddenSize; j++ {
 					sum += sample.HiddenState[j] * head.FC1CPU[j*hiddenSize+i]
 				}
-				if sum > 0 {
-					intermediate[i] = sum
-				} else {
-					intermediate[i] = leakyAlpha * sum
-				}
+				preAct[i] = sum
+				intermediate[i] = silu(sum)
 			}
 
 			// FC2 forward
@@ -546,11 +537,9 @@ func (h *GPUHeads) trainStepCPU(samples []TrainingSample, lr float32) float32 {
 				}
 			}
 
-			// LeakyReLU backward: derivative is 1 for x>0, alpha for x<=0
+			// SiLU backward: dSiLU/dx = sigmoid(x) * (1 + x*(1-sigmoid(x)))
 			for i := 0; i < hiddenSize; i++ {
-				if intermediate[i] <= 0 {
-					dIntermediate[i] *= leakyAlpha
-				}
+				dIntermediate[i] *= siluDerivative(preAct[i])
 			}
 
 			// Gradient for FC1: dFC1 = hidden^T @ dIntermediate

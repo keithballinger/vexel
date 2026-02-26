@@ -81,10 +81,10 @@ func TestGPUForwardPass(t *testing.T) {
 		for j := 0; j < hiddenSize; j++ {
 			sum += hidden[j] * heads.heads[0].FC1CPU[j*hiddenSize+i]
 		}
-		cpuInter[i] = sum // before ReLU
+		cpuInter[i] = sum // before SiLU
 	}
 
-	// Compare intermediate (before ReLU)
+	// Compare intermediate (before SiLU)
 	maxInterDiff := float32(0)
 	for i := 0; i < hiddenSize; i++ {
 		diff := float32(math.Abs(float64(cpuInter[i] - gpuInter[i])))
@@ -92,7 +92,7 @@ func TestGPUForwardPass(t *testing.T) {
 			maxInterDiff = diff
 		}
 	}
-	t.Logf("Max intermediate diff (pre-ReLU): %e", maxInterDiff)
+	t.Logf("Max intermediate diff (pre-SiLU): %e", maxInterDiff)
 
 	if maxInterDiff > 1e-4 {
 		// Print first few values for debugging
@@ -101,14 +101,12 @@ func TestGPUForwardPass(t *testing.T) {
 		t.Errorf("Intermediate values differ too much")
 	}
 
-	// Apply LeakyReLU to GPU intermediate (alpha=0.01 to match Metal kernel)
+	// Apply SiLU to GPU intermediate
 	for i := range gpuInter {
-		if gpuInter[i] < 0 {
-			gpuInter[i] *= 0.01
-		}
+		gpuInter[i] = silu(gpuInter[i])
 	}
 
-	// Upload ReLU'd intermediate and compute logits
+	// Upload SiLU'd intermediate and compute logits
 	metalBackend.ToDevice(interGPU, float32ToBytes(gpuInter))
 	metalBackend.MatMul(interGPU, heads.heads[0].FC2, logitsGPU, 1, vocabSize, hiddenSize)
 
@@ -194,18 +192,15 @@ func TestGPUTrainingGradients(t *testing.T) {
 	}
 	t.Logf("CPU inter (pre-ReLU): %v", cpuInter)
 
-	// Save pre-ReLU for backward
-	cpuPreRelu := make([]float32, hiddenSize)
-	copy(cpuPreRelu, cpuInter)
+	// Save pre-SiLU for backward
+	cpuPreAct := make([]float32, hiddenSize)
+	copy(cpuPreAct, cpuInter)
 
-	// LeakyReLU with alpha=0.01
-	const leakyAlpha = float32(0.01)
+	// SiLU activation
 	for i := range cpuInter {
-		if cpuInter[i] < 0 {
-			cpuInter[i] *= leakyAlpha
-		}
+		cpuInter[i] = silu(cpuInter[i])
 	}
-	t.Logf("CPU inter (post-LeakyReLU): %v", cpuInter)
+	t.Logf("CPU inter (post-SiLU): %v", cpuInter)
 
 	// FC2 forward
 	cpuLogits := make([]float32, vocabSize)
@@ -246,15 +241,13 @@ func TestGPUTrainingGradients(t *testing.T) {
 			cpuDInter[i] += cpuDLogits[j] * initialFC2[i*vocabSize+j]
 		}
 	}
-	t.Logf("CPU dInter (pre-ReLU backward): %v", cpuDInter)
+	t.Logf("CPU dInter (pre-SiLU backward): %v", cpuDInter)
 
-	// LeakyReLU backward: derivative is 1 for x>0, alpha for x<=0
+	// SiLU backward: dSiLU/dx = sigmoid(x) * (1 + x*(1-sigmoid(x)))
 	for i := 0; i < hiddenSize; i++ {
-		if cpuPreRelu[i] <= 0 {
-			cpuDInter[i] *= leakyAlpha
-		}
+		cpuDInter[i] *= siluDerivative(cpuPreAct[i])
 	}
-	t.Logf("CPU dInter (post-LeakyReLU backward): %v", cpuDInter)
+	t.Logf("CPU dInter (post-SiLU backward): %v", cpuDInter)
 
 	// FC1 gradient: grad1[i,j] = hidden[i] * dInter[j]
 	cpuGrad1 := make([]float32, hiddenSize*hiddenSize)
@@ -276,14 +269,14 @@ func TestGPUTrainingGradients(t *testing.T) {
 	b.MatMul(heads.scratchHidden, head.FC1, heads.scratchInter, 1, hiddenSize, hiddenSize)
 	b.Sync()
 
-	// Download GPU inter (pre-ReLU)
+	// Download GPU inter (pre-SiLU)
 	gpuInterBytes := make([]byte, hiddenSize*4)
 	b.ToHost(gpuInterBytes, heads.scratchInter)
 	b.Sync()
 	gpuInter := bytesToFloat32(gpuInterBytes)
-	t.Logf("GPU inter (pre-ReLU): %v", gpuInter)
+	t.Logf("GPU inter (pre-SiLU): %v", gpuInter)
 
-	// Compare pre-ReLU intermediate
+	// Compare pre-SiLU intermediate
 	maxInterDiff := float32(0)
 	for i := 0; i < hiddenSize; i++ {
 		diff := float32(math.Abs(float64(cpuInter[i] - gpuInter[i])))
@@ -291,35 +284,35 @@ func TestGPUTrainingGradients(t *testing.T) {
 			maxInterDiff = diff
 		}
 	}
-	t.Logf("Max inter diff (should use cpuPreRelu): %e", maxInterDiff)
+	t.Logf("Max inter diff (should use cpuPreAct): %e", maxInterDiff)
 
-	// Actually compare to cpuPreRelu since cpuInter has ReLU applied
-	maxPreReluDiff := float32(0)
+	// Compare to cpuPreAct since cpuInter has SiLU applied
+	maxPreActDiff := float32(0)
 	for i := 0; i < hiddenSize; i++ {
-		diff := float32(math.Abs(float64(cpuPreRelu[i] - gpuInter[i])))
-		if diff > maxPreReluDiff {
-			maxPreReluDiff = diff
+		diff := float32(math.Abs(float64(cpuPreAct[i] - gpuInter[i])))
+		if diff > maxPreActDiff {
+			maxPreActDiff = diff
 		}
 	}
-	t.Logf("Max pre-ReLU diff: %e", maxPreReluDiff)
+	t.Logf("Max pre-SiLU diff: %e", maxPreActDiff)
 
-	if maxPreReluDiff > 1e-5 {
-		t.Errorf("Pre-ReLU values differ: max diff = %e", maxPreReluDiff)
+	if maxPreActDiff > 1e-5 {
+		t.Errorf("Pre-SiLU values differ: max diff = %e", maxPreActDiff)
 	}
 
-	// Save pre-ReLU to scratch
+	// Save pre-activation to scratch
 	b.ToDevice(heads.scratchPreRelu, gpuInterBytes)
 
-	// Apply ReLU
+	// Apply SiLU
 	trainOps := heads.backend.(backend.TrainingOps)
-	trainOps.ReLUInplace(heads.scratchInter, hiddenSize)
+	trainOps.SiLUInplace(heads.scratchInter, hiddenSize)
 	b.Sync()
 
-	// Download post-ReLU
+	// Download post-SiLU
 	b.ToHost(gpuInterBytes, heads.scratchInter)
 	b.Sync()
-	gpuInterPostRelu := bytesToFloat32(gpuInterBytes)
-	t.Logf("GPU inter (post-ReLU): %v", gpuInterPostRelu)
+	gpuInterPostSiLU := bytesToFloat32(gpuInterBytes)
+	t.Logf("GPU inter (post-SiLU): %v", gpuInterPostSiLU)
 
 	// FC2: logits = inter @ FC2
 	b.MatMul(heads.scratchInter, head.FC2, heads.scratchLogits, 1, vocabSize, hiddenSize)
@@ -394,57 +387,57 @@ func TestGPUTrainingGradients(t *testing.T) {
 	b.MatMulTransposed(heads.scratchDLogits, head.FC2, heads.scratchDInter, 1, hiddenSize, vocabSize)
 	b.Sync()
 
-	// Download dInter (pre-ReLU backward)
+	// Download dInter (pre-SiLU backward)
 	gpuDInterBytes := make([]byte, hiddenSize*4)
 	b.ToHost(gpuDInterBytes, heads.scratchDInter)
 	b.Sync()
-	gpuDInterPreRelu := bytesToFloat32(gpuDInterBytes)
-	t.Logf("GPU dInter (pre-ReLU backward): %v", gpuDInterPreRelu)
+	gpuDInterPreSiLU := bytesToFloat32(gpuDInterBytes)
+	t.Logf("GPU dInter (pre-SiLU backward): %v", gpuDInterPreSiLU)
 
-	// Compare dInter pre-ReLU backward (before masking)
+	// Compare dInter pre-SiLU backward (before SiLU derivative)
 	cpuDInterPreMask := make([]float32, hiddenSize)
 	for i := 0; i < hiddenSize; i++ {
 		for j := 0; j < vocabSize; j++ {
 			cpuDInterPreMask[i] += cpuDLogits[j] * initialFC2[i*vocabSize+j]
 		}
 	}
-	t.Logf("CPU dInter (pre-mask): %v", cpuDInterPreMask)
+	t.Logf("CPU dInter (pre-SiLU backward): %v", cpuDInterPreMask)
 
 	maxDInterPreMaskDiff := float32(0)
 	for i := 0; i < hiddenSize; i++ {
-		diff := float32(math.Abs(float64(cpuDInterPreMask[i] - gpuDInterPreRelu[i])))
+		diff := float32(math.Abs(float64(cpuDInterPreMask[i] - gpuDInterPreSiLU[i])))
 		if diff > maxDInterPreMaskDiff {
 			maxDInterPreMaskDiff = diff
 		}
 	}
-	t.Logf("Max dInter (pre-mask) diff: %e", maxDInterPreMaskDiff)
+	t.Logf("Max dInter (pre-SiLU backward) diff: %e", maxDInterPreMaskDiff)
 
 	if maxDInterPreMaskDiff > 1e-5 {
-		t.Errorf("dInter (pre-mask) differs: max diff = %e", maxDInterPreMaskDiff)
+		t.Errorf("dInter (pre-SiLU backward) differs: max diff = %e", maxDInterPreMaskDiff)
 	}
 
-	// ReLU backward
-	trainOps.ReLUBackward(heads.scratchPreRelu, heads.scratchDInter, hiddenSize)
+	// SiLU backward
+	trainOps.SiLUBackward(heads.scratchPreRelu, heads.scratchDInter, hiddenSize)
 	b.Sync()
 
-	// Download dInter (post-ReLU backward)
+	// Download dInter (post-SiLU backward)
 	b.ToHost(gpuDInterBytes, heads.scratchDInter)
 	b.Sync()
-	gpuDInterPostRelu := bytesToFloat32(gpuDInterBytes)
-	t.Logf("GPU dInter (post-ReLU backward): %v", gpuDInterPostRelu)
+	gpuDInterPostSiLU := bytesToFloat32(gpuDInterBytes)
+	t.Logf("GPU dInter (post-SiLU backward): %v", gpuDInterPostSiLU)
 
-	// Compare dInter post-ReLU backward
+	// Compare dInter post-SiLU backward
 	maxDInterDiff := float32(0)
 	for i := 0; i < hiddenSize; i++ {
-		diff := float32(math.Abs(float64(cpuDInter[i] - gpuDInterPostRelu[i])))
+		diff := float32(math.Abs(float64(cpuDInter[i] - gpuDInterPostSiLU[i])))
 		if diff > maxDInterDiff {
 			maxDInterDiff = diff
 		}
 	}
-	t.Logf("Max dInter (post-ReLU) diff: %e", maxDInterDiff)
+	t.Logf("Max dInter (post-SiLU) diff: %e", maxDInterDiff)
 
 	if maxDInterDiff > 1e-5 {
-		t.Errorf("dInter (post-ReLU) differs: max diff = %e", maxDInterDiff)
+		t.Errorf("dInter (post-SiLU) differs: max diff = %e", maxDInterDiff)
 	}
 
 	// FC1 gradient
