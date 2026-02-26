@@ -343,16 +343,16 @@ func (t *OnlineTrainer) trainHead(headIdx int, batch []TrainingSample) float32 {
 		// Need to recompute forward pass to get intermediate values
 		head := &t.heads.heads[headIdx]
 
-		// FC1 forward: intermediate = ReLU(hidden @ FC1)
+		// FC1 forward: pre-activation and SiLU(hidden @ FC1)
+		preAct := make([]float32, hiddenSize)
 		intermediate := make([]float32, hiddenSize)
 		for i := 0; i < hiddenSize; i++ {
 			var sum float32
 			for j := 0; j < hiddenSize; j++ {
 				sum += sample.HiddenState[j] * head.FC1[j*hiddenSize+i]
 			}
-			if sum > 0 {
-				intermediate[i] = sum
-			}
+			preAct[i] = sum
+			intermediate[i] = silu(sum)
 		}
 
 		// Gradient for FC2: dFC2 = intermediate^T @ dLogits
@@ -370,11 +370,9 @@ func (t *OnlineTrainer) trainHead(headIdx int, batch []TrainingSample) float32 {
 			}
 		}
 
-		// Backprop through ReLU
+		// Backprop through SiLU: dSiLU/dx = sigmoid(x) * (1 + x*(1-sigmoid(x)))
 		for i := 0; i < hiddenSize; i++ {
-			if intermediate[i] <= 0 {
-				dIntermediate[i] = 0
-			}
+			dIntermediate[i] *= siluDerivative(preAct[i])
 		}
 
 		// Gradient for FC1: dFC1 = hidden^T @ dIntermediate

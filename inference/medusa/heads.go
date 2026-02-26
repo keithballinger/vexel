@@ -13,8 +13,21 @@ import (
 	"sync"
 )
 
+// silu computes the SiLU (Sigmoid Linear Unit) activation: x * sigmoid(x).
+// Also known as the Swish function. SiLU is smooth and non-monotonic,
+// which helps gradient flow for small prediction heads.
+func silu(x float32) float32 {
+	return x / (1.0 + float32(math.Exp(float64(-x))))
+}
+
+// siluDerivative computes the derivative of SiLU: sigmoid(x) * (1 + x*(1-sigmoid(x)))
+func siluDerivative(x float32) float32 {
+	sig := float32(1.0 / (1.0 + math.Exp(float64(-x))))
+	return sig * (1.0 + x*(1.0-sig))
+}
+
 // Head represents a single Medusa prediction head.
-// Architecture: hidden -> fc1 -> ReLU -> fc2 -> logits
+// Architecture: hidden -> fc1 -> SiLU -> fc2 -> logits
 // Each head predicts a different future position (t+1, t+2, etc.)
 type Head struct {
 	// FC1: [hiddenSize, hiddenSize] - first linear layer
@@ -78,17 +91,14 @@ func (h *Heads) Forward(headIdx int, hidden []float32) []float32 {
 
 	head := &h.heads[headIdx]
 
-	// FC1: hidden @ FC1 + ReLU
+	// FC1: intermediate = SiLU(hidden @ FC1)
 	intermediate := make([]float32, h.HiddenSize)
 	for i := 0; i < h.HiddenSize; i++ {
 		var sum float32
 		for j := 0; j < h.HiddenSize; j++ {
 			sum += hidden[j] * head.FC1[j*h.HiddenSize+i]
 		}
-		// ReLU activation
-		if sum > 0 {
-			intermediate[i] = sum
-		}
+		intermediate[i] = silu(sum)
 	}
 
 	// FC2: intermediate @ FC2

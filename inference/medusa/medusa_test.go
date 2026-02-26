@@ -247,6 +247,75 @@ func TestHeadsClone(t *testing.T) {
 	}
 }
 
+func TestSiLUActivation(t *testing.T) {
+	// SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
+	// For positive inputs, SiLU passes some negative intermediate values
+	// (unlike ReLU which zeros them), so the output must reflect this.
+	numHeads := 1
+	hiddenSize := 4
+	vocabSize := 4
+
+	heads := NewHeads(numHeads, hiddenSize, vocabSize)
+
+	// Create a hidden state where SiLU and ReLU would differ:
+	// SiLU(-2) ≈ -0.2384, ReLU(-2) = 0
+	// We need to verify the Forward pass uses SiLU, not ReLU.
+	hidden := []float32{-2.0, 1.0, -1.0, 0.5}
+	logits := heads.Forward(0, hidden)
+	if logits == nil {
+		t.Fatal("Forward returned nil")
+	}
+
+	// Manually compute expected SiLU output for verification
+	intermediate := make([]float32, hiddenSize)
+	for i := 0; i < hiddenSize; i++ {
+		var sum float32
+		for j := 0; j < hiddenSize; j++ {
+			sum += hidden[j] * heads.heads[0].FC1[j*hiddenSize+i]
+		}
+		// SiLU(x) = x * sigmoid(x)
+		intermediate[i] = silu(sum)
+	}
+
+	expectedLogits := make([]float32, vocabSize)
+	for i := 0; i < vocabSize; i++ {
+		var sum float32
+		for j := 0; j < hiddenSize; j++ {
+			sum += intermediate[j] * heads.heads[0].FC2[j*vocabSize+i]
+		}
+		expectedLogits[i] = sum
+	}
+
+	for i := range logits {
+		diff := logits[i] - expectedLogits[i]
+		if diff > 1e-4 || diff < -1e-4 {
+			t.Errorf("logit[%d] = %f, expected %f (diff=%f)", i, logits[i], expectedLogits[i], diff)
+		}
+	}
+}
+
+func TestSiLUNegativeInputs(t *testing.T) {
+	// Key property: SiLU passes negative values (unlike ReLU which zeros them).
+	// SiLU(-1) ≈ -0.2689, SiLU(0) = 0, SiLU(1) ≈ 0.7311
+	got := silu(-1.0)
+	if got >= 0 {
+		t.Errorf("silu(-1) should be negative, got %f", got)
+	}
+	if got < -0.28 || got > -0.26 {
+		t.Errorf("silu(-1) ≈ -0.2689, got %f", got)
+	}
+
+	gotZero := silu(0)
+	if gotZero != 0 {
+		t.Errorf("silu(0) should be 0, got %f", gotZero)
+	}
+
+	gotPos := silu(1.0)
+	if gotPos < 0.72 || gotPos > 0.74 {
+		t.Errorf("silu(1) ≈ 0.7311, got %f", gotPos)
+	}
+}
+
 func TestMemorySize(t *testing.T) {
 	numHeads := 4
 	hiddenSize := 2048

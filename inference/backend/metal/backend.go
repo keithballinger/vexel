@@ -10,6 +10,7 @@ package metal
 import "C"
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"sync"
@@ -1040,6 +1041,41 @@ func (b *Backend) ReLUBackward(x, dx tensor.DevicePtr, n int) {
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(dx.Addr()), C.int(n))
 }
 
+// SiLUInplace performs in-place SiLU: x = x * sigmoid(x)
+// Falls back to CPU implementation since Metal shader for SiLU is pending.
+func (b *Backend) SiLUInplace(x tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("SiLU")
+	// CPU fallback: read from GPU, apply SiLU, write back
+	buf := make([]byte, n*4)
+	b.ToHost(buf, x)
+	b.Sync()
+	data := bytesToFloat32Slice(buf)
+	for i := 0; i < n; i++ {
+		v := data[i]
+		data[i] = v / (1.0 + float32(math.Exp(float64(-v))))
+	}
+	b.ToDevice(x, float32SliceToBytes(data))
+}
+
+// SiLUBackward applies SiLU gradient: dx *= sigmoid(x) * (1 + x*(1-sigmoid(x)))
+// Falls back to CPU implementation since Metal shader for SiLU backward is pending.
+func (b *Backend) SiLUBackward(x, dx tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("SiLUBackward")
+	// CPU fallback: read from GPU, compute gradient, write back
+	xBuf := make([]byte, n*4)
+	dxBuf := make([]byte, n*4)
+	b.ToHost(xBuf, x)
+	b.ToHost(dxBuf, dx)
+	b.Sync()
+	xData := bytesToFloat32Slice(xBuf)
+	dxData := bytesToFloat32Slice(dxBuf)
+	for i := 0; i < n; i++ {
+		sig := float32(1.0 / (1.0 + math.Exp(float64(-xData[i]))))
+		dxData[i] *= sig * (1.0 + xData[i]*(1.0-sig))
+	}
+	b.ToDevice(dx, float32SliceToBytes(dxData))
+}
+
 // BatchedOuterProduct computes out[i,j] += sum_b(a[b,i] * bIn[b,j])
 // a: [batch, M], bIn: [batch, N], out: [M, N]
 // Used for computing weight gradients dFC1 and dFC2
@@ -1366,4 +1402,28 @@ func (b *Backend) SDPAPagedDecode(q, kvPool, blockTable, out tensor.DevicePtr, n
 		C.int(numBlocks), C.int(blockSize),
 		C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
 		C.float(scale), C.int(tokensInLastBlock))
+}
+
+// bytesToFloat32Slice reinterprets bytes as a float32 slice.
+func bytesToFloat32Slice(b []byte) []float32 {
+	n := len(b) / 4
+	f := make([]float32, n)
+	for i := 0; i < n; i++ {
+		bits := uint32(b[i*4]) | uint32(b[i*4+1])<<8 | uint32(b[i*4+2])<<16 | uint32(b[i*4+3])<<24
+		f[i] = math.Float32frombits(bits)
+	}
+	return f
+}
+
+// float32SliceToBytes converts a float32 slice to bytes.
+func float32SliceToBytes(f []float32) []byte {
+	b := make([]byte, len(f)*4)
+	for i, v := range f {
+		bits := math.Float32bits(v)
+		b[i*4] = byte(bits)
+		b[i*4+1] = byte(bits >> 8)
+		b[i*4+2] = byte(bits >> 16)
+		b[i*4+3] = byte(bits >> 24)
+	}
+	return b
 }

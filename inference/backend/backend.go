@@ -222,6 +222,14 @@ type TrainingOps interface {
 	// x: forward activations, dx: gradient (modified in place)
 	ReLUBackward(x, dx tensor.DevicePtr, n int)
 
+	// SiLUInplace applies SiLU (Sigmoid Linear Unit) activation in-place: x = x * sigmoid(x)
+	// Also known as Swish. Preferred over ReLU for Medusa prediction heads.
+	SiLUInplace(x tensor.DevicePtr, n int)
+
+	// SiLUBackward applies SiLU gradient: dx *= sigmoid(x) * (1 + x*(1-sigmoid(x)))
+	// x: pre-activation values (before SiLU), dx: gradient (modified in place)
+	SiLUBackward(x, dx tensor.DevicePtr, n int)
+
 	// BatchedOuterProduct computes out[i,j] += sum_b(a[b,i] * b[b,j])
 	// a: [batch, M], b: [batch, N], out: [M, N]
 	// Used for computing weight gradients in backpropagation.
