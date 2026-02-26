@@ -6,10 +6,12 @@ Vexel is a high-performance inference engine for Large Language Models (LLMs) on
 
 - **Metal Acceleration**: Fully optimized for Apple M-series chips (M1/M2/M3/M4) using custom Metal kernels.
 - **FlashAttention-2**: Implements FlashAttention-2 for efficient attention computation.
-- **Continuous Batching**: Supports continuous batching (via scheduler) for high throughput.
+- **Continuous Batching**: Event-driven scheduler for high-throughput concurrent inference.
 - **Streaming Support**: Server-Sent Events (SSE) for real-time token streaming.
-- **Go Client Library**: High-level Go client for easy integration.
-- **GGUF Support**: Compatible with GGUF model format (quantized models).
+- **Go Client Library**: High-level Go client (`vexel/client`) for easy integration.
+- **Direct Inference API**: Use the runtime directly for custom pipelines and benchmarking.
+- **GGUF Support**: Compatible with GGUF model format (Q4_0 and other quantizations).
+- **Multi-Architecture**: Supports LLaMA family (LLaMA 2/3, Mistral) and Phi family (Phi-2, Phi-3).
 
 ## Getting Started
 
@@ -21,13 +23,13 @@ Vexel is a high-performance inference engine for Large Language Models (LLMs) on
 
 ### Building
 
-Build the `vexel` binary:
+Build the project:
 
 ```bash
 make build
 ```
 
-This will compile the Go code and the Metal kernels, producing a `vexel` binary in the root directory.
+This will compile the Go code and the Metal kernels.
 
 ### Running the Server
 
@@ -46,7 +48,7 @@ Flags:
 
 ### Go Client
 
-Vexel provides a Go client library in `client/`.
+Vexel provides a Go client library in `client/` for communicating with a running server.
 
 ```go
 package main
@@ -59,8 +61,12 @@ import (
 
 func main() {
 	c := client.New(client.Config{BaseURL: "http://localhost:8080"})
-	
-	// Streaming
+
+	// Blocking generation
+	text, _ := c.Generate(context.Background(), "What is Go?", nil)
+	fmt.Println(text)
+
+	// Streaming generation (token-by-token)
 	tokenChan, _ := c.Stream(context.Background(), "Hello, world!", nil)
 	for token := range tokenChan {
 		fmt.Print(token)
@@ -68,17 +74,52 @@ func main() {
 }
 ```
 
-See `examples/client/main.go` for a full example.
+See [`examples/client/main.go`](examples/client/main.go) for a full example with options.
+
+### Direct Inference
+
+For custom pipelines, you can use the runtime directly without the HTTP layer:
+
+```go
+// Load model and run prefill + decode loop
+logits, _ := model.DecodeWithGPUKV(promptTokens, 0)  // prefill
+nextToken := argmax(logits)
+
+for i := 0; i < maxTokens; i++ {
+	logits, _ = model.DecodeWithGPUKV([]int{nextToken}, pos)  // decode
+	nextToken = argmax(logits)
+	pos++
+}
+```
+
+See [`examples/generate/main.go`](examples/generate/main.go) for a complete working example.
+
+### Embedding the Server
+
+You can embed Vexel's HTTP server into your own Go application:
+
+```go
+sched, _ := scheduler.NewScheduler(model, tok, scheduler.Config{
+	MaxBatchSize:  1,
+	MaxSequences:  64,
+	MaxTokens:     256,
+	SamplerConfig: sampler.DefaultConfig(),
+})
+go sched.Run(ctx)
+
+srv := serve.NewServer(sched)
+http.ListenAndServe(":8080", srv)
+```
+
+See [`examples/server/main.go`](examples/server/main.go) for a complete working example with model loading and graceful shutdown.
 
 ### HTTP API
-
-You can also use `curl`:
 
 **Generate (Blocking):**
 ```bash
 curl -X POST http://localhost:8080/generate \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "Tell me a joke", "temperature": 0.7}'
+  -d '{"prompt": "Tell me a joke"}'
 ```
 
 **Stream (SSE):**
@@ -86,6 +127,61 @@ curl -X POST http://localhost:8080/generate \
 curl -N -X POST http://localhost:8080/stream \
   -H "Content-Type: application/json" \
   -d '{"prompt": "Tell me a joke"}'
+```
+
+## Examples
+
+| Example | Description | Build Tags |
+|---------|-------------|------------|
+| [`examples/client/`](examples/client/main.go) | HTTP client with Generate and Stream | none |
+| [`examples/server/`](examples/server/main.go) | Embed Vexel server in your Go app | `metal` |
+| [`examples/generate/`](examples/generate/main.go) | Direct inference loop (no HTTP) | `metal` |
+
+Run examples with:
+```bash
+# Client (requires a running server)
+go run ./examples/client
+
+# Server (Metal required)
+go run -tags metal ./examples/server -model path/to/model.gguf
+
+# Direct generation (Metal required)
+go run -tags metal ./examples/generate -model path/to/model.gguf -prompt "Hello!"
+```
+
+## Architecture
+
+```
+client/              Go HTTP client library (no Metal dependency)
+inference/
+  backend/metal/     Metal GPU backend and kernel dispatch
+  runtime/           Model loading, weight management, inference loop
+  scheduler/         Continuous batching scheduler with metrics
+  serve/             HTTP server (/generate, /stream endpoints)
+  pkg/
+    gguf/            GGUF model format parser
+    tokenizer/       Tokenizer with chat template support
+    sampler/         Temperature, top-k, top-p sampling
+examples/            Usage examples (client, server, direct generation)
+scripts/             Performance harness and benchmarking tools
+```
+
+## Performance
+
+Benchmarks measured on Apple Silicon with LLaMA 2 7B Q4_0 (~3.7 GB):
+
+| Metric | Value |
+|--------|-------|
+| Prefill throughput (128 tokens) | ~200 tok/s |
+| Decode throughput | ~44 tok/s |
+| Time-to-first-token (5-token prompt) | ~80 ms |
+| Per-token decode latency (p50) | ~23 ms |
+| Decode jitter (p99/p50) | 1.10 |
+
+Run the benchmark suite:
+```bash
+go test -tags metal -run TestThroughput -v ./inference/runtime/
+go test -tags metal -run TestLatency -v ./inference/runtime/
 ```
 
 ## Performance & Correctness Harness
