@@ -212,6 +212,58 @@ func (sd *SpeculativeDecoder) VerifyDraftTokens(
 	return numAccepted, finalToken, finalLogits, nil
 }
 
+// verifyDraftAgainstLogits is the core verification algorithm extracted for testing.
+// It checks draft tokens against pre-computed target model logits and returns
+// the number of accepted tokens, the final token (correction or bonus), and
+// the final position's logits.
+//
+// allLogits: flat []float32 with shape [(numDraft+1) * vocabSize] or [numDraft * vocabSize]
+// draftTokens: proposed tokens from the draft model
+// draftProbs: probability of each draft token from the draft model
+// vocabSize: vocabulary size for slicing logits
+// s: sampler for token selection (argmax at temp=0)
+func verifyDraftAgainstLogits(
+	allLogits []float32,
+	draftTokens []int,
+	draftProbs []float32,
+	vocabSize int,
+	s *sampler.Sampler,
+) (numAccepted int, finalToken int, finalLogits []float32) {
+	if len(draftTokens) == 0 || len(allLogits) == 0 {
+		return 0, 0, nil
+	}
+
+	for i, draftToken := range draftTokens {
+		if (i+1)*vocabSize > len(allLogits) {
+			break
+		}
+		targetLogits := allLogits[i*vocabSize : (i+1)*vocabSize]
+
+		// Get target model's probability for the draft token
+		targetProb := getTokenProbability(targetLogits, draftToken, s)
+
+		// Get target model's preferred token
+		targetToken := s.Sample(targetLogits)
+
+		// Accept if target agrees with draft or if probability is high enough
+		if draftToken == targetToken || targetProb >= draftProbs[i] {
+			numAccepted++
+		} else {
+			// Reject: return the correct token from target model
+			return numAccepted, targetToken, targetLogits
+		}
+	}
+
+	// All draft tokens accepted — sample bonus token from next position if available
+	bonusStart := len(draftTokens) * vocabSize
+	if bonusStart+vocabSize <= len(allLogits) {
+		finalLogits = allLogits[bonusStart : bonusStart+vocabSize]
+		finalToken = s.Sample(finalLogits)
+	}
+
+	return numAccepted, finalToken, finalLogits
+}
+
 // getLogitsSlice extracts logits from a tensor as []float32.
 // numElements is the total number of float32 values to extract (vocabSize for single-token,
 // seqLen*vocabSize for multi-token verification).
