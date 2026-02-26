@@ -39,16 +39,16 @@ Checkpoint: 33b398c
 Checkpoint: bb7fd3a
 
 ## Phase 3: Testing
-- [ ] Task: Integration tests
+- [x] Task: Integration tests
     - Test `Generate` RPC end-to-end with a mock scheduler.
     - Test `StreamGenerate` receives correct token sequence.
     - Test cancellation: cancel context mid-stream, verify sequence cleanup.
     - Test timeout: set short deadline, verify DeadlineExceeded response.
-- [ ] Task: Client library
+- [x] Task: Client library
     - Add gRPC client to `client/` package alongside the HTTP client.
     - `GRPCClient` with `Generate()` and `Stream()` matching the HTTP client interface.
     - Auto-detection: try gRPC first, fall back to HTTP.
-- [ ] Task: Load testing
+- [x] Task: Load testing
     - Benchmark gRPC vs HTTP/SSE latency for single-token responses.
     - Benchmark concurrent streaming throughput (10, 50, 100 concurrent streams).
     - Measure gRPC overhead vs direct scheduler access.
