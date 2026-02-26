@@ -27,11 +27,11 @@ Checkpoint: 33b398c
     - Add TLS certificate loading to GRPCServer.
     - Support both mutual TLS and server-only TLS.
     - Add `--grpc-tls-cert` and `--grpc-tls-key` flags to CLI serve subcommand.
-- [ ] Task: Request metadata and interceptors
+- [x] Task: Request metadata and interceptors
     - Add unary and stream interceptors for logging (request ID, duration, token count).
     - Propagate request ID through scheduler for tracing.
     - Add keepalive configuration for long-running streams.
-- [ ] Task: Unified server startup
+- [x] Task: Unified server startup
     - Serve both HTTP (SSE) and gRPC from the CLI `serve` subcommand.
     - HTTP on `--port` (default 8080), gRPC on `--grpc-port` (default 9090).
     - Shared scheduler instance between both servers.
