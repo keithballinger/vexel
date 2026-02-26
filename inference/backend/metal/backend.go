@@ -53,6 +53,9 @@ type Backend struct {
 	// Dispatch profiler for kernel counting and allocation tracking
 	profiler *DispatchProfiler
 
+	// Scratch allocator for sub-allocating from a single MTLBuffer
+	scratch *ScratchAllocator
+
 	// Cached pipeline states
 	matmulPipeline              unsafe.Pointer // For matmul_transposed_f32 (C = A @ B^T)
 	matmulNonTransposedPipeline unsafe.Pointer // For matmul_f32 (C = A @ B)
@@ -282,6 +285,43 @@ func (b *Backend) Device() tensor.Device {
 // DispatchProfiler returns the backend's dispatch profiler for kernel counting.
 func (b *Backend) DispatchProfiler() *DispatchProfiler {
 	return b.profiler
+}
+
+// InitScratch creates a scratch allocator with the given capacity.
+// Once initialized, ScratchAlloc returns sub-regions of a single MTLBuffer.
+func (b *Backend) InitScratch(capacity int) error {
+	sa, err := NewScratchAllocator(b, capacity)
+	if err != nil {
+		return err
+	}
+	b.scratch = sa
+	return nil
+}
+
+// ScratchAllocator returns the backend's scratch allocator (may be nil).
+func (b *Backend) ScratchAllocator() *ScratchAllocator {
+	return b.scratch
+}
+
+// ScratchAlloc allocates from the scratch buffer. Falls back to pool Alloc if
+// scratch is not initialized or has insufficient space.
+func (b *Backend) ScratchAlloc(bytes int) tensor.DevicePtr {
+	if b.scratch != nil {
+		ptr := b.scratch.Alloc(bytes)
+		if !ptr.IsNil() {
+			return ptr
+		}
+	}
+	// Fallback to pool-based allocation
+	return b.Alloc(bytes)
+}
+
+// ScratchReset resets the scratch allocator's bump pointer to 0.
+// Call this at the start of each forward pass alongside ResetPool.
+func (b *Backend) ScratchReset() {
+	if b.scratch != nil {
+		b.scratch.Reset()
+	}
 }
 
 // =============================================================================
@@ -818,6 +858,35 @@ func (b *Backend) Add(a, bIn, out tensor.DevicePtr, n int) {
 	b.profiler.RecordDispatch("Add")
 	C.metal_add_f32(b.queue, b.addPipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bIn.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
+}
+
+// AddOffset performs element-wise addition using offset-aware dispatch.
+// This allows operating on sub-regions of a shared MTLBuffer (scratch allocation).
+func (b *Backend) AddOffset(a, bIn, out tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("Add")
+	C.metal_add_f32_offset(b.queue, b.addPipeline,
+		unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+		unsafe.Pointer(bIn.Addr()), C.uint64_t(bIn.Offset()),
+		unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()), C.int(n))
+}
+
+// RMSNormOffset performs RMS normalization using offset-aware dispatch.
+func (b *Backend) RMSNormOffset(x, weight, out tensor.DevicePtr, rows, cols int, eps float32) {
+	b.profiler.RecordDispatch("RMSNorm")
+	C.metal_rmsnorm_f32_offset(b.queue, b.rmsnormPipeline,
+		unsafe.Pointer(x.Addr()), C.uint64_t(x.Offset()),
+		unsafe.Pointer(weight.Addr()), C.uint64_t(weight.Offset()),
+		unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+		C.int(rows), C.int(cols), C.float(eps))
+}
+
+// SiLUMulOffset performs fused silu(gate) * up using offset-aware dispatch.
+func (b *Backend) SiLUMulOffset(gate, up, out tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("SiLUMul")
+	C.metal_silu_mul_f32_offset(b.queue, b.siluMulPipeline,
+		unsafe.Pointer(gate.Addr()), C.uint64_t(gate.Offset()),
+		unsafe.Pointer(up.Addr()), C.uint64_t(up.Offset()),
+		unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()), C.int(n))
 }
 
 // Mul performs element-wise multiplication.

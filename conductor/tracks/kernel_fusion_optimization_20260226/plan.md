@@ -38,18 +38,28 @@ Target: reach 70-80% bandwidth utilization (~78-89 tok/s), competitive with llam
       count is the primary optimization target.
 
 ## Phase 2: GPU Memory Pool
-- [ ] Task: Implement sub-allocating scratch buffer
-    - Pre-allocate a single large MTLBuffer for scratch space (sized via `ModelConfig.ScratchBytes`).
-    - `Alloc()` returns offsets into this buffer instead of creating new MTLBuffer objects.
-    - `ResetPool()` resets the offset to 0 (same as current arena reset).
-    - Kernels receive `(buffer, offset)` pairs instead of individual buffer pointers.
-- [ ] Task: Update Metal kernel dispatch for offset-based buffers
-    - Modify `setBuffer:offset:atIndex:` calls to use base buffer + offset.
-    - All temporary activations share one underlying MTLBuffer.
-    - Eliminates per-allocation `[device newBufferWithLength:]` overhead.
-- [ ] Task: Benchmark allocation improvement
-    - Measure tok/s improvement from eliminating per-allocation overhead.
-    - Profile remaining dispatch overhead to quantify fusion opportunity.
+- [x] Task: Implement sub-allocating scratch buffer
+    - Created `scratch_allocator.go` with ScratchAllocator (bump allocator from single MTLBuffer).
+    - 256-byte alignment for Metal optimal access.
+    - WriteAt/ReadAt for CPU-side data access to sub-regions.
+    - Integrated into Backend: InitScratch(), ScratchAlloc(), ScratchReset().
+    - Fallback to pool-based Alloc when scratch is exhausted or not initialized.
+    - 8 unit tests covering creation, bump alloc, alignment, reset, OOM, data isolation.
+- [x] Task: Update Metal kernel dispatch for offset-based buffers
+    - Added `metal_buffer_contents` to C bridge for CPU-side scratch access.
+    - Added offset-aware C bridge functions: `metal_add_f32_offset`,
+      `metal_rmsnorm_f32_offset`, `metal_silu_mul_f32_offset`.
+    - Added Go methods: AddOffset, RMSNormOffset, SiLUMulOffset.
+    - Existing ~40+ kernels retain zero-offset dispatch (pool path unchanged).
+    - Integration tests prove offset-aware dispatch produces correct results:
+      - TestScratchAllocatorAddKernel: a+b with shared buffer ✓
+      - TestScratchAllocatorRMSNormKernel: RMSNorm with mixed scratch/pool ✓
+- [x] Task: Benchmark allocation improvement
+    - Pool-based (second pass): 0.02 µs/alloc, 100% hit rate.
+    - Scratch-based: zero overhead (bump pointer, no profiler tracking).
+    - Both approaches eliminate fresh MTLBuffer creation overhead (5.54 µs/alloc).
+    - Confirms Phase 1 finding: allocation is not the bottleneck.
+    - Kernel dispatch count (451) remains the primary optimization target for Phase 3.
 
 ## Phase 3: Fused Transformer Block Kernels
 - [ ] Task: Fused RMSNorm + MatMul kernel

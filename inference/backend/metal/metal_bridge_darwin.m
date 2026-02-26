@@ -4647,6 +4647,11 @@ size_t metal_buffer_size(void* buffer) {
     return [buf length];
 }
 
+void* metal_buffer_contents(void* buffer) {
+    id<MTLBuffer> buf = (__bridge id<MTLBuffer>)buffer;
+    return [buf contents];
+}
+
 void metal_copy_to_buffer(void* buffer, const void* src, size_t size) {
     id<MTLBuffer> buf = (__bridge id<MTLBuffer>)buffer;
     memcpy([buf contents], src, size);
@@ -5725,6 +5730,90 @@ void metal_add_f32(void* queuePtr, void* pipelinePtr,
     ];
 
     dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+// Offset-aware variants: operate on sub-regions of shared MTLBuffers.
+// These enable scratch-allocated tensors to be used without separate buffer objects.
+
+void metal_add_f32_offset(void* queuePtr, void* pipelinePtr,
+                          void* a, uint64_t aOff,
+                          void* b, uint64_t bOff,
+                          void* out, uint64_t outOff, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)a offset:aOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)b offset:bOff atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:outOff atIndex:2];
+
+    MTLSize threadgroupSize = MTLSizeMake(
+        MIN(pipeline.maxTotalThreadsPerThreadgroup, (NSUInteger)n), 1, 1);
+    MTLSize threadgroups = MTLSizeMake(
+        ((NSUInteger)n + threadgroupSize.width - 1) / threadgroupSize.width, 1, 1);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadgroupSize];
+
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_rmsnorm_f32_offset(void* queuePtr, void* pipelinePtr,
+                              void* x, uint64_t xOff,
+                              void* weight, uint64_t weightOff,
+                              void* out, uint64_t outOff,
+                              int batchSize, int dim, float eps) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    int threadgroupSize = 256;
+    int numWarps = (threadgroupSize + 31) / 32;
+    int sharedMemSize = numWarps * sizeof(float);
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)x offset:xOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)weight offset:weightOff atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:outOff atIndex:2];
+    [encoder setBytes:&dim length:sizeof(dim) atIndex:3];
+    [encoder setBytes:&eps length:sizeof(eps) atIndex:4];
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    MTLSize threadgroups = MTLSizeMake(batchSize, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_silu_mul_f32_offset(void* queuePtr, void* pipelinePtr,
+                               void* gate, uint64_t gateOff,
+                               void* up, uint64_t upOff,
+                               void* out, uint64_t outOff, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)gate offset:gateOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)up offset:upOff atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:outOff atIndex:2];
+
+    MTLSize threadgroupSize = MTLSizeMake(
+        MIN(pipeline.maxTotalThreadsPerThreadgroup, (NSUInteger)n), 1, 1);
+    MTLSize threadgroups = MTLSizeMake(
+        ((NSUInteger)n + threadgroupSize.width - 1) / threadgroupSize.width, 1, 1);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadgroupSize];
+
+    finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
 void metal_mul_f32(void* queuePtr, void* pipelinePtr,

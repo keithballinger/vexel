@@ -18,6 +18,7 @@ void metal_release(void* obj);
 // Buffer management
 void* metal_alloc_buffer(void* device, size_t size);
 size_t metal_buffer_size(void* buffer);
+void* metal_buffer_contents(void* buffer);
 void metal_copy_to_buffer(void* buffer, const void* src, size_t size);
 void metal_copy_from_buffer(void* dst, void* buffer, size_t size);
 
@@ -215,6 +216,24 @@ void metal_silu_mul_f32(void* queue, void* pipeline,
 
 void metal_add_f32(void* queue, void* pipeline,
                    void* a, void* b, void* out, int n);
+
+// Offset-aware variants: use setBuffer:offset:atIndex: for sub-allocated buffers.
+// These allow kernels to operate on regions of a single pre-allocated MTLBuffer.
+void metal_add_f32_offset(void* queue, void* pipeline,
+                          void* a, uint64_t aOff,
+                          void* b, uint64_t bOff,
+                          void* out, uint64_t outOff, int n);
+
+void metal_rmsnorm_f32_offset(void* queue, void* pipeline,
+                              void* x, uint64_t xOff,
+                              void* weight, uint64_t weightOff,
+                              void* out, uint64_t outOff,
+                              int batchSize, int dim, float eps);
+
+void metal_silu_mul_f32_offset(void* queue, void* pipeline,
+                               void* gate, uint64_t gateOff,
+                               void* up, uint64_t upOff,
+                               void* out, uint64_t outOff, int n);
 
 void metal_mul_f32(void* queue, void* pipeline,
                    void* a, void* b, void* out, int n);
