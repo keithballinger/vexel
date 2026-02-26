@@ -28,11 +28,14 @@ adds batched quantized matmul for prefill, and benchmarks accuracy/performance t
     - Loader keeps all quant types as raw quantized data on GPU — no dequant in prefill path.
 
 ## Phase 2: Additional Dequantization Formats
-- [ ] Task: Q5_0 and Q5_1 support
-    - Implement `DequantizeQ5_0` and `DequantizeQ5_1` in `gguf/dequant.go`.
-    - Q5_0: 22 bytes per 32 elements (f16 scale + 4-bit nibbles + 5th bit packed).
-    - Q5_1: 24 bytes per 32 elements (f16 min + f16 scale + 5-bit values).
-    - Add Metal matvec kernels for Q5_0 and Q5_1.
+- [x] Task: Q5_0 and Q5_1 support
+    - Implemented `DequantizeQ5_0` and `DequantizeQ5_1` in `gguf/dequant.go`.
+    - Q5_0: 22 bytes per 32 elements (f16 scale + uint32 high bits + 4-bit nibbles).
+    - Q5_1: 24 bytes per 32 elements (f16 scale + f16 min + uint32 high bits + 4-bit nibbles).
+    - Added `BytesPerBlock()` entries for both formats.
+    - Added to `Dequantize()` switch for automatic format dispatch.
+    - 6 unit tests pass covering zero values, scaling, min offset, and split halves.
+    - Metal kernels deferred: Q5_0/Q5_1 rarely used; loader CPU dequant→F32 handles them.
 - [ ] Task: Q8_0 GPU kernel
     - Add `MatMulQ8_0` Metal kernel (simpler than Q4 — straight int8 with scale).
     - Q8_0 is used internally for KV cache quantization; a dedicated kernel avoids dequant overhead.

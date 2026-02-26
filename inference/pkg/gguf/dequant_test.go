@@ -181,6 +181,129 @@ func TestDequantizeF32(t *testing.T) {
 	}
 }
 
+func TestDequantizeQ5_0(t *testing.T) {
+	// Q5_0 block: 22 bytes = 2 (d) + 4 (qh) + 16 (qs)
+	// Test 1: scale=1.0, all q5=16 → dequant = (16-16)*1 = 0
+	t.Run("all_zero", func(t *testing.T) {
+		data := make([]byte, 22)
+		binary.LittleEndian.PutUint16(data[0:], 0x3C00) // scale = 1.0
+		// qh: all high bits set → all 5th bits are 1
+		binary.LittleEndian.PutUint32(data[2:], 0xFFFFFFFF)
+		// qs: all low nibbles 0 → q5 = 0|16 = 16 for all
+
+		result := DequantizeQ5_0(data, 32)
+		if len(result) != 32 {
+			t.Fatalf("got %d elements, want 32", len(result))
+		}
+		for i, v := range result {
+			if v != 0.0 {
+				t.Errorf("result[%d] = %v, want 0.0", i, v)
+			}
+		}
+	})
+
+	// Test 2: scale=1.0, first half q5=8 (dequant=-8), second half q5=24 (dequant=8)
+	t.Run("split_halves", func(t *testing.T) {
+		data := make([]byte, 22)
+		binary.LittleEndian.PutUint16(data[0:], 0x3C00) // scale = 1.0
+		// qh: bits 0-15 = 0 (first half high bit 0), bits 16-31 = 1 (second half high bit 1)
+		binary.LittleEndian.PutUint32(data[2:], 0xFFFF0000)
+		// qs: all bytes = 0x88 → low nibble=8, high nibble=8
+		for i := 0; i < 16; i++ {
+			data[6+i] = 0x88
+		}
+
+		result := DequantizeQ5_0(data, 32)
+		// First half (0-15): q=8|0=8, dequant=(8-16)*1=-8
+		for i := 0; i < 16; i++ {
+			if result[i] != -8.0 {
+				t.Errorf("result[%d] = %v, want -8.0", i, result[i])
+			}
+		}
+		// Second half (16-31): q=8|16=24, dequant=(24-16)*1=8
+		for i := 16; i < 32; i++ {
+			if result[i] != 8.0 {
+				t.Errorf("result[%d] = %v, want 8.0", i, result[i])
+			}
+		}
+	})
+
+	// Test 3: scale=0.5, varying values
+	t.Run("with_scale", func(t *testing.T) {
+		data := make([]byte, 22)
+		binary.LittleEndian.PutUint16(data[0:], 0x3800) // scale = 0.5
+		// qh: all 0 → no high bits
+		binary.LittleEndian.PutUint32(data[2:], 0x00000000)
+		// qs[0]: low=15, high=0 → q5=15 (first half), q5=0 (second half)
+		data[6] = 0x0F // high nibble=0, low nibble=15
+
+		result := DequantizeQ5_0(data, 32)
+		// Position 0: q=15, dequant=(15-16)*0.5 = -0.5
+		if result[0] != -0.5 {
+			t.Errorf("result[0] = %v, want -0.5", result[0])
+		}
+		// Position 16: q=0, dequant=(0-16)*0.5 = -8
+		if result[16] != -8.0 {
+			t.Errorf("result[16] = %v, want -8.0", result[16])
+		}
+	})
+}
+
+func TestDequantizeQ5_1(t *testing.T) {
+	// Q5_1 block: 24 bytes = 2 (d) + 2 (m) + 4 (qh) + 16 (qs)
+	// Test 1: scale=1.0, min=0, all q5=0 → dequant = 0*1+0 = 0
+	t.Run("all_zero", func(t *testing.T) {
+		data := make([]byte, 24)
+		binary.LittleEndian.PutUint16(data[0:], 0x3C00) // d = 1.0
+		binary.LittleEndian.PutUint16(data[2:], 0x0000) // m = 0.0
+		binary.LittleEndian.PutUint32(data[4:], 0x00000000)
+		// all qs = 0
+
+		result := DequantizeQ5_1(data, 32)
+		if len(result) != 32 {
+			t.Fatalf("got %d elements, want 32", len(result))
+		}
+		for i, v := range result {
+			if v != 0.0 {
+				t.Errorf("result[%d] = %v, want 0.0", i, v)
+			}
+		}
+	})
+
+	// Test 2: scale=1.0, min=10.0, q=0 → dequant = 0*1+10 = 10
+	t.Run("min_offset", func(t *testing.T) {
+		data := make([]byte, 24)
+		binary.LittleEndian.PutUint16(data[0:], 0x3C00) // d = 1.0
+		// 10.0 in f16: sign=0, exp=10+15=25=0b11001, mant=0b0100000000 → 0x4900
+		binary.LittleEndian.PutUint16(data[2:], 0x4900) // m = 10.0
+		binary.LittleEndian.PutUint32(data[4:], 0x00000000)
+
+		result := DequantizeQ5_1(data, 32)
+		expected := float16ToFloat32(0x4900) // verify the float16 encoding
+		for i := 0; i < 32; i++ {
+			if result[i] != expected {
+				t.Errorf("result[%d] = %v, want %v (10.0)", i, result[i], expected)
+			}
+		}
+	})
+
+	// Test 3: scale=0.5, min=1.0, first half q5=2 → dequant = 2*0.5+1 = 2
+	t.Run("with_scale_and_min", func(t *testing.T) {
+		data := make([]byte, 24)
+		binary.LittleEndian.PutUint16(data[0:], 0x3800) // d = 0.5
+		binary.LittleEndian.PutUint16(data[2:], 0x3C00) // m = 1.0
+		binary.LittleEndian.PutUint32(data[4:], 0x00000000) // no high bits
+		// qs[0]: low nibble = 2 → q5 for position 0 = 2
+		data[8] = 0x02
+
+		result := DequantizeQ5_1(data, 32)
+		// Position 0: q=2, dequant = 2*0.5 + 1.0 = 2.0
+		if result[0] != 2.0 {
+			t.Errorf("result[0] = %v, want 2.0", result[0])
+		}
+	})
+}
+
 func TestDequantizeUnsupported(t *testing.T) {
 	data := make([]byte, 100)
 	result := Dequantize(data, TensorTypeQ4_K, 32)

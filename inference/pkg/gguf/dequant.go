@@ -89,6 +89,113 @@ func DequantizeQ8_0(data []byte, numElements int) []float32 {
 	return result
 }
 
+// DequantizeQ5_0 converts Q5_0 quantized data to float32.
+// Q5_0 format: 32 5-bit weights per block with one f16 scale.
+// Block layout: [d:f16][qh:4bytes][qs:16bytes]
+// Total: 22 bytes per 32 elements.
+// Each element is a 5-bit unsigned value (0-31), dequantized as (q - 16) * d.
+// The 5th bit is stored in qh (packed as uint32), low nibbles in qs.
+//
+// Following llama.cpp's dequantize_row_q5_0 exactly.
+func DequantizeQ5_0(data []byte, numElements int) []float32 {
+	const blockSize = 32
+	const bytesPerBlock = 22 // 2 (d) + 4 (qh) + 16 (qs)
+
+	numBlocks := (numElements + blockSize - 1) / blockSize
+	result := make([]float32, numElements)
+
+	for b := 0; b < numBlocks; b++ {
+		blockOffset := b * bytesPerBlock
+		if blockOffset+bytesPerBlock > len(data) {
+			break
+		}
+
+		// Read f16 scale
+		dU16 := binary.LittleEndian.Uint16(data[blockOffset:])
+		d := float16ToFloat32(dU16)
+
+		// Read 32 high bits packed as uint32
+		qh := binary.LittleEndian.Uint32(data[blockOffset+2:])
+
+		// Process 16 bytes of packed nibbles
+		for j := 0; j < 16; j++ {
+			byteVal := data[blockOffset+6+j]
+
+			// First half element (j): low nibble + high bit from qh
+			idx := b*blockSize + j
+			if idx < numElements {
+				xh0 := uint8(((qh >> uint(j)) << 4) & 0x10)
+				q := int(byteVal&0x0F) | int(xh0)
+				result[idx] = float32(q-16) * d
+			}
+
+			// Second half element (j+16): high nibble + high bit from qh
+			idx = b*blockSize + j + 16
+			if idx < numElements {
+				xh1 := uint8(((qh >> uint(j+16)) << 4) & 0x10)
+				q := int(byteVal>>4) | int(xh1)
+				result[idx] = float32(q-16) * d
+			}
+		}
+	}
+
+	return result
+}
+
+// DequantizeQ5_1 converts Q5_1 quantized data to float32.
+// Q5_1 format: 32 5-bit weights per block with f16 scale and f16 min.
+// Block layout: [d:f16][m:f16][qh:4bytes][qs:16bytes]
+// Total: 24 bytes per 32 elements.
+// Each element is a 5-bit unsigned value (0-31), dequantized as q * d + m.
+//
+// Following llama.cpp's dequantize_row_q5_1 exactly.
+func DequantizeQ5_1(data []byte, numElements int) []float32 {
+	const blockSize = 32
+	const bytesPerBlock = 24 // 2 (d) + 2 (m) + 4 (qh) + 16 (qs)
+
+	numBlocks := (numElements + blockSize - 1) / blockSize
+	result := make([]float32, numElements)
+
+	for b := 0; b < numBlocks; b++ {
+		blockOffset := b * bytesPerBlock
+		if blockOffset+bytesPerBlock > len(data) {
+			break
+		}
+
+		// Read f16 scale and min
+		dU16 := binary.LittleEndian.Uint16(data[blockOffset:])
+		mU16 := binary.LittleEndian.Uint16(data[blockOffset+2:])
+		d := float16ToFloat32(dU16)
+		m := float16ToFloat32(mU16)
+
+		// Read 32 high bits packed as uint32
+		qh := binary.LittleEndian.Uint32(data[blockOffset+4:])
+
+		// Process 16 bytes of packed nibbles
+		for j := 0; j < 16; j++ {
+			byteVal := data[blockOffset+8+j]
+
+			// First half element (j): low nibble + high bit from qh
+			idx := b*blockSize + j
+			if idx < numElements {
+				xh0 := uint8(((qh >> uint(j)) << 4) & 0x10)
+				q := int(byteVal&0x0F) | int(xh0)
+				result[idx] = float32(q)*d + m
+			}
+
+			// Second half element (j+16): high nibble + high bit from qh
+			idx = b*blockSize + j + 16
+			if idx < numElements {
+				xh1 := uint8(((qh >> uint(j+16)) << 4) & 0x10)
+				q := int(byteVal>>4) | int(xh1)
+				result[idx] = float32(q)*d + m
+			}
+		}
+	}
+
+	return result
+}
+
 // DequantizeF16 converts F16 data to float32.
 func DequantizeF16(data []byte, numElements int) []float32 {
 	result := make([]float32, numElements)
@@ -412,6 +519,10 @@ func Dequantize(data []byte, tensorType TensorType, numElements int) []float32 {
 		return DequantizeBF16(data, numElements)
 	case TensorTypeQ4_0:
 		return DequantizeQ4_0(data, numElements)
+	case TensorTypeQ5_0:
+		return DequantizeQ5_0(data, numElements)
+	case TensorTypeQ5_1:
+		return DequantizeQ5_1(data, numElements)
 	case TensorTypeQ8_0:
 		return DequantizeQ8_0(data, numElements)
 	case TensorTypeQ6_K:

@@ -113,6 +113,10 @@ func (t TensorType) BytesPerBlock() int {
 		return 2
 	case TensorTypeQ4_0:
 		return 2 + 16 // scale (f16) + 32 * 4 bits
+	case TensorTypeQ5_0:
+		return 22 // scale (f16) + qh(4) + 32 * 4 bits
+	case TensorTypeQ5_1:
+		return 24 // scale (f16) + min (f16) + qh(4) + 32 * 4 bits
 	case TensorTypeQ8_0:
 		return 2 + 32 // scale (f16) + 32 * 8 bits
 	case TensorTypeQ4_K:
