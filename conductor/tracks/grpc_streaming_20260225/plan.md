@@ -20,7 +20,7 @@ server starts. This track completes the implementation and adds production featu
     - Add `ModelInfo` RPC returning model name, architecture, quantization, max context length.
     - Regenerate Go stubs.
 
-Checkpoint: pending
+Checkpoint: 33b398c
 
 ## Phase 2: Production Features
 - [ ] Task: TLS support
