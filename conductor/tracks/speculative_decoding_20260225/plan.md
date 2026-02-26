@@ -32,7 +32,7 @@ Checkpoint: d6d13eb
     - Support loading a separate small draft model (e.g., TinyLlama as draft for LLaMA 2 7B).
     - Both models share the same tokenizer.
     - Draft model uses its own KV cache but shared Metal backend.
-- [~] Task: Adaptive draft length
+- [x] Task: Adaptive draft length (9334f41)
     - Track acceptance rate over a rolling window.
     - Increase `NumDraftTokens` when acceptance is high (>80%), decrease when low (<40%).
     - Clamp to [1, 8] range.
