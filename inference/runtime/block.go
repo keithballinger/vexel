@@ -1256,7 +1256,11 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 
 	// 7. Add1 (serial residual only)
 	// For parallel residual, we skip Add1 and do a combined add at the end
-	if !b.ParallelResidual {
+	// For SwiGLU with RMSNorm + fusedOps: defer Add1 to fuse with RMSNorm2
+	// via AddRMSNorm kernel (saves 1 dispatch/layer = 32 dispatches total)
+	canFuseAdd1Norm := !b.ParallelResidual && b.MLPType != MLPGELU &&
+		b.NormType == NormRMSNorm && b.fusedOps != nil
+	if !b.ParallelResidual && !canFuseAdd1Norm {
 		profileOp("Add1", func() {
 			b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
 		})
@@ -1497,26 +1501,43 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		}
 	} else {
 		// SwiGLU MLP (LLaMA, Mistral): gate = SiLU(x @ W1) * (x @ W3), out = gate @ W2
-		// Fused RMSNorm+MatMul for FFN (only for RMSNorm models)
+		// Fused MLP for FFN (only for RMSNorm + Q4_0 models, decode only)
 		canFuseFFN := seqLen == 1 && b.fusedOps != nil &&
 			b.NormType == NormRMSNorm &&
 			b.W1.QuantProfile() == tensor.Q4_0 &&
 			b.W3.QuantProfile() == tensor.Q4_0
 
 		if canFuseFFN {
-			profileOp("FusedRMSNorm+GateUp", func() {
-				w1Dim := b.W1.Shape().Dims()[0]
-				b.fusedOps.MatMulQ4_0_FusedRMSNorm(xPtr, b.FFNNorm.DevicePtr(), b.W1.DevicePtr(), gatePtr, 1, w1Dim, hiddenSize, float32(b.RMSNormEPS))
-				w3Dim := b.W3.Shape().Dims()[0]
-				b.fusedOps.MatMulQ4_0_FusedRMSNorm(xPtr, b.FFNNorm.DevicePtr(), b.W3.DevicePtr(), upPtr, 1, w3Dim, hiddenSize, float32(b.RMSNormEPS))
+			// Fully fused MLP: (Add1+RMSNorm) + FusedMLP
+			// With AddRMSNorm: 2 dispatches instead of 4 (Add1 + RMSNorm + MatMul×2 + SiLUMul)
+			w1Dim := b.W1.Shape().Dims()[0]
+			if canFuseAdd1Norm {
+				// Fused Add1+RMSNorm: x += attn_output, normOut = RMSNorm(x)
+				profileOp("AddRMSNorm", func() {
+					b.fusedOps.AddRMSNorm(xPtr, normOutPtr, b.FFNNorm.DevicePtr(), normOutPtr, 1, hiddenSize, float32(b.RMSNormEPS))
+				})
+			} else {
+				profileOp("RMSNorm2", func() {
+					b.backend.RMSNorm(xPtr, b.FFNNorm.DevicePtr(), normOutPtr, 1, hiddenSize, float32(b.RMSNormEPS))
+				})
+			}
+			profileOp("FusedMLP", func() {
+				b.fusedOps.MatMulQ4_0_FusedMLP(normOutPtr, b.W1.DevicePtr(), b.W3.DevicePtr(), gatePtr, 1, w1Dim, hiddenSize)
 			})
 		} else {
-			// Standard path (RMSNorm then MatMul)
-			profileOp("RMSNorm2", func() {
-				if !b.FFNNorm.DevicePtr().IsNil() {
-					b.applyNorm(xPtr, b.FFNNorm.DevicePtr(), b.FFNNormBias.DevicePtr(), normOutPtr, seqLen, hiddenSize)
-				}
-			})
+			// Standard path: separate Add1 already happened above (or fused here)
+			if canFuseAdd1Norm {
+				// Fused Add1+RMSNorm: x += attn_output, normOut = RMSNorm(x)
+				profileOp("AddRMSNorm", func() {
+					b.fusedOps.AddRMSNorm(xPtr, normOutPtr, b.FFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+				})
+			} else {
+				profileOp("RMSNorm2", func() {
+					if !b.FFNNorm.DevicePtr().IsNil() {
+						b.applyNorm(xPtr, b.FFNNorm.DevicePtr(), b.FFNNormBias.DevicePtr(), normOutPtr, seqLen, hiddenSize)
+					}
+				})
+			}
 			if debugThisLayerPost {
 				b.backend.Sync()
 				b.debugBlockTensor(fmt.Sprintf("L%d FFN normOut (after RMSNorm2)", layerIdx), normOutPtr, seqLen*hiddenSize)
@@ -1543,11 +1564,11 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				b.backend.Sync()
 				b.debugBlockTensor(fmt.Sprintf("L%d up after W3", layerIdx), upPtr, seqLen*intermediateSize)
 			}
-		}
 
-		profileOp("SiLUMul", func() {
-			b.backend.SiLUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
-		})
+			profileOp("SiLUMul", func() {
+				b.backend.SiLUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
+			})
+		}
 		if debugThisLayerPost {
 			b.backend.Sync()
 			b.debugBlockTensor(fmt.Sprintf("L%d gate after SiLU*Mul", layerIdx), gatePtr, seqLen*intermediateSize)
