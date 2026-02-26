@@ -85,6 +85,7 @@ func subcommandArgs(args []string) []string {
 // ServeFlags holds flags for the serve subcommand.
 type ServeFlags struct {
 	Port         int
+	GRPCPort     int    // Port for gRPC server (default 9090)
 	MaxTokens    int
 	MaxBatchSize int
 	GRPCTLSCert  string // Path to TLS certificate for gRPC server
@@ -96,6 +97,7 @@ func parseServeFlags(args []string) (ServeFlags, error) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	sf := ServeFlags{}
 	fs.IntVar(&sf.Port, "port", 8080, "HTTP port to listen on")
+	fs.IntVar(&sf.GRPCPort, "grpc-port", 9090, "gRPC port to listen on")
 	fs.IntVar(&sf.MaxTokens, "max-tokens", 256, "Max tokens to generate per request")
 	fs.IntVar(&sf.MaxBatchSize, "max-batch-size", 1, "Max batch size for scheduler")
 	fs.StringVar(&sf.GRPCTLSCert, "grpc-tls-cert", "", "Path to TLS certificate for gRPC server")
@@ -199,7 +201,7 @@ Global flags:
   --verbose      Enable verbose logging
 
 Examples:
-  vexel --model model.gguf serve --port 8080
+  vexel --model model.gguf serve --port 8080 --grpc-port 9090
   vexel --model model.gguf generate --prompt "Hello!"
   vexel --model model.gguf --draft-model draft.gguf generate --prompt "Hello!"
   vexel --model model.gguf chat`)

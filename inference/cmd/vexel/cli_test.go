@@ -283,3 +283,32 @@ func TestServeFlagsTLSDefaults(t *testing.T) {
 		t.Errorf("expected empty grpc-tls-key by default, got %q", sf.GRPCTLSKey)
 	}
 }
+
+func TestServeFlagsGRPCPort(t *testing.T) {
+	sf, err := parseServeFlags([]string{"--port", "8080", "--grpc-port", "9090"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sf.GRPCPort != 9090 {
+		t.Errorf("got grpc-port=%d, want 9090", sf.GRPCPort)
+	}
+}
+
+func TestServeFlagsGRPCPortDefault(t *testing.T) {
+	sf, err := parseServeFlags(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sf.GRPCPort != 9090 {
+		t.Errorf("default grpc-port: got %d, want 9090", sf.GRPCPort)
+	}
+}
+
+func TestUsageContainsGRPCPort(t *testing.T) {
+	var buf bytes.Buffer
+	printUsage(&buf)
+	output := buf.String()
+	if !strings.Contains(output, "--grpc-port") {
+		t.Error("usage output missing --grpc-port flag reference")
+	}
+}
