@@ -1929,6 +1929,101 @@ kernel void matmul_q8_0_batched_f32(
     }
 }
 
+// =============================================================================
+// BF16 MatMul Kernels
+// BF16 format: 2 bytes per element (upper 16 bits of float32)
+// Conversion: float = as_type<float>(uint32(bf16_bits) << 16)
+// =============================================================================
+
+constant int BF16_NR2_OUTPUTS_PER_TG = 16; // 8 simdgroups × 2 outputs each
+
+// Helper: convert BF16 bits to float32
+inline float bf16_to_f32(ushort bits) {
+    return as_type<float>(uint(bits) << 16);
+}
+
+// BF16 NR2 matvec: C = A @ B^T where A is [1,K] F32, B is [N,K] BF16, C is [1,N] F32.
+// Each simdgroup handles 2 output rows, 8 simdgroups per threadgroup = 16 outputs.
+kernel void matvec_bf16_nr2_f32(
+    device const float* A [[buffer(0)]],
+    device const ushort* B [[buffer(1)]],
+    device float* C [[buffer(2)]],
+    constant int& N [[buffer(3)]],
+    constant int& K [[buffer(4)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int row0 = gid * BF16_NR2_OUTPUTS_PER_TG + simd_group * 2;
+    int row1 = row0 + 1;
+    if (row0 >= N) return;
+
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+
+    device const ushort* b_row0 = B + row0 * K;
+    device const ushort* b_row1 = B + row1 * K;
+
+    // Each lane processes elements at stride 32
+    for (int i = simd_lane; i < K; i += 32) {
+        float a_val = A[i];
+        sum0 += a_val * bf16_to_f32(b_row0[i]);
+        if (row1 < N) {
+            sum1 += a_val * bf16_to_f32(b_row1[i]);
+        }
+    }
+
+    sum0 = simd_sum(sum0);
+    sum1 = simd_sum(sum1);
+    if (simd_lane == 0) {
+        C[row0] = sum0;
+        if (row1 < N) C[row1] = sum1;
+    }
+}
+
+// BF16 batched matmul: C = A @ B^T where A is [M,K] F32, B is [N,K] BF16, C is [M,N] F32.
+// 2D grid: (nTiles, M) where nTiles = ceil(N / BF16_NR2_OUTPUTS_PER_TG).
+kernel void matmul_bf16_batched_f32(
+    device const float* A [[buffer(0)]],
+    device const ushort* B [[buffer(1)]],
+    device float* C [[buffer(2)]],
+    constant int& M [[buffer(3)]],
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    uint2 gid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int m = gid.y;
+    if (m >= M) return;
+
+    int row0 = gid.x * BF16_NR2_OUTPUTS_PER_TG + simd_group * 2;
+    int row1 = row0 + 1;
+    if (row0 >= N) return;
+
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+
+    device const float* a_row = A + m * K;
+    device const ushort* b_row0 = B + row0 * K;
+    device const ushort* b_row1 = B + row1 * K;
+
+    for (int i = simd_lane; i < K; i += 32) {
+        float a_val = a_row[i];
+        sum0 += a_val * bf16_to_f32(b_row0[i]);
+        if (row1 < N) {
+            sum1 += a_val * bf16_to_f32(b_row1[i]);
+        }
+    }
+
+    sum0 = simd_sum(sum0);
+    sum1 = simd_sum(sum1);
+    if (simd_lane == 0) {
+        C[m * N + row0] = sum0;
+        if (row1 < N) C[m * N + row1] = sum1;
+    }
+}
+
 // RMSNorm with threadgroup parallelism
 // Each threadgroup processes one row using parallel reduction
 constant int RMSNORM_THREADGROUP_SIZE = 256;
@@ -5524,6 +5619,67 @@ void metal_matvec_q8_0_nr2_f32(void* queuePtr, void* pipelinePtr,
 }
 
 void metal_matmul_q8_0_batched_f32(void* queuePtr, void* pipelinePtr,
+                                    void* A, uint64_t aOff,
+                                    void* B, uint64_t bOff,
+                                    void* C, uint64_t cOff,
+                                    int M, int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:aOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:bOff atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:cOff atIndex:2];
+    [encoder setBytes:&M length:sizeof(M) atIndex:3];
+    [encoder setBytes:&N length:sizeof(N) atIndex:4];
+    [encoder setBytes:&K length:sizeof(K) atIndex:5];
+
+    int outputsPerTG = 16;
+    int threadgroupSize = 256;
+    int nTiles = (N + outputsPerTG - 1) / outputsPerTG;
+
+    MTLSize threadgroups = MTLSizeMake(nTiles, M, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_matvec_bf16_nr2_f32(void* queuePtr, void* pipelinePtr,
+                               void* A, uint64_t aOff,
+                               void* B, uint64_t bOff,
+                               void* C, uint64_t cOff,
+                               int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:aOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:bOff atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:cOff atIndex:2];
+    [encoder setBytes:&N length:sizeof(N) atIndex:3];
+    [encoder setBytes:&K length:sizeof(K) atIndex:4];
+
+    int outputsPerTG = 16;
+    int threadgroupSize = 256;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
+
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_matmul_bf16_batched_f32(void* queuePtr, void* pipelinePtr,
                                     void* A, uint64_t aOff,
                                     void* B, uint64_t bOff,
                                     void* C, uint64_t cOff,

@@ -460,6 +460,20 @@ void metal_matmul_q8_0_batched_f32(void* queue, void* pipeline,
                                     void* C, uint64_t cOff,
                                     int M, int N, int K);
 
+// BF16 NR2 matvec: C = A @ B^T where A is [1,K] F32, B is [N,K] BF16
+void metal_matvec_bf16_nr2_f32(void* queue, void* pipeline,
+                                void* A, uint64_t aOff,
+                                void* B, uint64_t bOff,
+                                void* C, uint64_t cOff,
+                                int N, int K);
+
+// BF16 batched matmul: C = A @ B^T where A is [M,K] F32, B is [N,K] BF16, C is [M,N]
+void metal_matmul_bf16_batched_f32(void* queue, void* pipeline,
+                                    void* A, uint64_t aOff,
+                                    void* B, uint64_t bOff,
+                                    void* C, uint64_t cOff,
+                                    int M, int N, int K);
+
 #ifdef __cplusplus
 }
 #endif

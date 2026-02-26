@@ -152,6 +152,21 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			)
 			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
 			q4Count++
+		} else if info.Type == gguf.TensorTypeBF16 && m.isWeightMatrix(hfName) {
+			// BF16 native GPU kernel - keep raw BF16 data on GPU
+			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
+			if err != nil {
+				fmt.Printf("Warning: failed to load raw BF16 tensor %s: %v\n", hfName, err)
+				continue
+			}
+			t = tensor.NewQuantTensor(
+				tensor.NewShape(dims...),
+				m.config.DType,
+				tensor.NewDevicePtr(tensor.CPU, uintptr(unsafe.Pointer(&rawData[0]))),
+				tensor.BF16,
+			)
+			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
+			q4Count++
 		} else {
 			// Dequantize to F32 for embeddings, norms, or non-Q4_0/Q6_K types
 			data, dims, err := loader.LoadTensor(ggufName)
@@ -460,6 +475,9 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 				// Q8_0: 34 bytes per 32 elements (2 byte f16 scale + 32 int8 values)
 				numBlocks := (numElements + 31) / 32
 				sizeBytes = numBlocks * 34
+			case tensor.BF16:
+				// BF16: 2 bytes per element
+				sizeBytes = numElements * 2
 			default:
 				// Unknown quant, fall back to F32
 				sizeBytes = numElements * 4
@@ -717,6 +735,8 @@ func (m *ModelRuntime) splitQKVWeight(layer *BlockRuntime, combined tensor.Tenso
 			blockSize, bytesPerBlock = 256, 210
 		case tensor.Q8_0:
 			blockSize, bytesPerBlock = 32, 34
+		case tensor.BF16:
+			blockSize, bytesPerBlock = 1, 2
 		default:
 			fmt.Printf("Warning: splitting quantized profile %v not yet supported\n", profile)
 			return

@@ -16,6 +16,8 @@ const (
 	Q4_K
 	// Q5_K represents 5-bit k-quant quantization.
 	Q5_K
+	// BF16 represents bfloat16 format (not quantized, but stored in reduced precision).
+	BF16
 )
 
 func (q QuantProfile) String() string {
@@ -32,6 +34,8 @@ func (q QuantProfile) String() string {
 		return "Q4_K"
 	case Q5_K:
 		return "Q5_K"
+	case BF16:
+		return "BF16"
 	default:
 		return "Unknown"
 	}

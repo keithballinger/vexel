@@ -355,6 +355,10 @@ func (b *BlockRuntime) matMulTransposed(a tensor.DevicePtr, w tensor.Tensor, out
 			// Use GPU-native Q8_0 kernel
 			b.quantMatMul.MatMulQ8_0(a, w.DevicePtr(), out, m, n, k)
 			return
+		case tensor.BF16:
+			// Use GPU-native BF16 kernel (converts BF16→F32 on the fly)
+			b.quantMatMul.MatMulBF16(a, w.DevicePtr(), out, m, n, k)
+			return
 		default:
 			// Warn about unsupported quantization profile - falling back to F32
 			// but the data is still quantized which will produce garbage!

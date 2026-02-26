@@ -53,6 +53,11 @@ type QuantizedMatMul interface {
 	// B contains raw Q8_0 data (34 bytes per 32 elements: 2 byte f16 scale + 32 int8 values).
 	// Supports both M=1 (decode) and M>1 (prefill) with NR2 batched kernel.
 	MatMulQ8_0(a, b, out tensor.DevicePtr, m, n, k int)
+
+	// MatMulBF16 performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in BF16 format.
+	// B contains raw BF16 data (2 bytes per element). Kernel converts BF16→F32 on the fly.
+	// Supports both M=1 (decode) and M>1 (prefill) with NR2 batched kernel.
+	MatMulBF16(a, b, out tensor.DevicePtr, m, n, k int)
 }
 
 // FP16Ops is an optional interface for backends that support FP16 (half-precision) operations.

@@ -125,6 +125,10 @@ type Backend struct {
 	matvecQ8_0NR2Pipeline       unsafe.Pointer
 	matmulQ8_0BatchedPipeline   unsafe.Pointer
 
+	// BF16 Matmul pipelines (for weight matrices in BFloat16 format)
+	matvecBF16NR2Pipeline     unsafe.Pointer
+	matmulBF16BatchedPipeline unsafe.Pointer
+
 	// Training pipelines (for Medusa heads)
 	reluInplacePipeline         unsafe.Pointer
 	reluBackwardPipeline        unsafe.Pointer
@@ -230,6 +234,10 @@ func NewBackend(deviceID int) (*Backend, error) {
 	// Q8_0 matmul pipelines
 	b.matvecQ8_0NR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q8_0_nr2_f32"))
 	b.matmulQ8_0BatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q8_0_batched_f32"))
+
+	// BF16 matmul pipelines
+	b.matvecBF16NR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_bf16_nr2_f32"))
+	b.matmulBF16BatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_bf16_batched_f32"))
 
 	// FP16 pipelines
 	b.addF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_f16"))
@@ -723,6 +731,32 @@ func (b *Backend) MatMulQ8_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 			panic("MatMulQ8_0 batched called but no matmulQ8_0BatchedPipeline available")
 		}
 		C.metal_matmul_q8_0_batched_f32(b.queue, b.matmulQ8_0BatchedPipeline,
+			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			C.int(m), C.int(n), C.int(k))
+	}
+}
+
+// MatMulBF16 performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in BF16 format.
+// B contains raw BF16 data (2 bytes per element). Kernel converts BF16→F32 on the fly.
+// Track 4: Quantization Expansion, Phase 2 Task 3.
+func (b *Backend) MatMulBF16(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	b.profiler.RecordDispatch("MatMulBF16")
+	if m == 1 {
+		if b.matvecBF16NR2Pipeline == nil {
+			panic("MatMulBF16 called but no matvecBF16NR2Pipeline available")
+		}
+		C.metal_matvec_bf16_nr2_f32(b.queue, b.matvecBF16NR2Pipeline,
+			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			C.int(n), C.int(k))
+	} else {
+		if b.matmulBF16BatchedPipeline == nil {
+			panic("MatMulBF16 batched called but no matmulBF16BatchedPipeline available")
+		}
+		C.metal_matmul_bf16_batched_f32(b.queue, b.matmulBF16BatchedPipeline,
 			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
 			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
 			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
