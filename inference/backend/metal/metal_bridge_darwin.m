@@ -5204,8 +5204,9 @@ void metal_matmul_q4_0_batched_f32(void* queuePtr, void* pipelinePtr,
     int numWarps = (threadgroupSize + 31) / 32;
     int sharedMemSize = numWarps * sizeof(float);
 
-    id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
 
     [encoder setComputePipelineState:pipeline];
     [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:0 atIndex:0];
@@ -5221,8 +5222,7 @@ void metal_matmul_q4_0_batched_f32(void* queuePtr, void* pipelinePtr,
     MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
-    [encoder endEncoding];
-    [cmdBuffer commit];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
 void metal_matmul_q4k_batched_f32(void* queuePtr, void* pipelinePtr,
@@ -5295,11 +5295,7 @@ void metal_matmul_q4_0_simdgroup_f32(void* queuePtr, void* pipelinePtr,
     MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
-
-    if (shouldCommit) {
-        [encoder endEncoding];
-        [cmdBuffer commit];
-    }
+    finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
 // Q6_K multi-output matvec: 8 outputs per threadgroup using simdgroups

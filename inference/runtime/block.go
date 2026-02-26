@@ -882,11 +882,14 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	gateBytes := seqLen * intermediateSize * 4
 	upBytes := seqLen * intermediateSize * 4
 
-	// Allocate intermediate buffers from scratch space if available, otherwise use backend.Alloc
+	// Allocate intermediate buffers.
+	// For CPU: sub-allocate from scratch buffer (pointer arithmetic handles offsets correctly).
+	// For GPU: use individual Alloc() calls because Metal kernel dispatches use
+	// setBuffer:offset:0 and don't pass DevicePtr offsets — sub-allocating from a single
+	// MTLBuffer would cause all intermediates to alias offset 0, corrupting prefill.
 	var normOutPtr, qPtr, kPtr, vPtr, attnOutPtr, gatePtr, upPtr tensor.DevicePtr
 
-	if !scratch.DevicePtr().IsNil() {
-		scratchPtr := scratch.DevicePtr()
+	if scratchPtr.Location() == tensor.CPU {
 		offset := uintptr(0)
 		normOutPtr = tensor.DevicePtrOffset(scratchPtr, offset)
 		offset += uintptr(normOutBytes)
@@ -1514,6 +1517,10 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 					b.applyNorm(xPtr, b.FFNNorm.DevicePtr(), b.FFNNormBias.DevicePtr(), normOutPtr, seqLen, hiddenSize)
 				}
 			})
+			if debugThisLayerPost {
+				b.backend.Sync()
+				b.debugBlockTensor(fmt.Sprintf("L%d FFN normOut (after RMSNorm2)", layerIdx), normOutPtr, seqLen*hiddenSize)
+			}
 
 			profileOp("W1", func() {
 				if !b.W1.DevicePtr().IsNil() {
@@ -1521,6 +1528,10 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 					b.matMulTransposed(normOutPtr, b.W1, gatePtr, seqLen, w1Dim, hiddenSize)
 				}
 			})
+			if debugThisLayerPost {
+				b.backend.Sync()
+				b.debugBlockTensor(fmt.Sprintf("L%d gate after W1", layerIdx), gatePtr, seqLen*intermediateSize)
+			}
 
 			profileOp("W3", func() {
 				if !b.W3.DevicePtr().IsNil() {
@@ -1528,11 +1539,19 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 					b.matMulTransposed(normOutPtr, b.W3, upPtr, seqLen, w3Dim, hiddenSize)
 				}
 			})
+			if debugThisLayerPost {
+				b.backend.Sync()
+				b.debugBlockTensor(fmt.Sprintf("L%d up after W3", layerIdx), upPtr, seqLen*intermediateSize)
+			}
 		}
 
 		profileOp("SiLUMul", func() {
 			b.backend.SiLUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
 		})
+		if debugThisLayerPost {
+			b.backend.Sync()
+			b.debugBlockTensor(fmt.Sprintf("L%d gate after SiLU*Mul", layerIdx), gatePtr, seqLen*intermediateSize)
+		}
 
 		profileOp("W2", func() {
 			if !b.W2.DevicePtr().IsNil() {

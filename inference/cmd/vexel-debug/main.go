@@ -26,6 +26,7 @@ import (
 
 	"vexel/inference/backend/metal"
 	"vexel/inference/debug"
+	"vexel/inference/memory"
 	"vexel/inference/pkg/gguf"
 	"vexel/inference/pkg/tokenizer"
 	"vexel/inference/runtime"
@@ -77,7 +78,7 @@ func main() {
 	}
 	defer debug.Close()
 
-	// Load model
+	// Load model config from GGUF
 	fmt.Fprintf(os.Stderr, "Loading model: %s\n", *modelPath)
 
 	gf, err := gguf.Open(*modelPath)
@@ -99,18 +100,40 @@ func main() {
 		log.Fatalf("Failed to load tokenizer: %v", err)
 	}
 
-	// Initialize backend
-	backend, err := metal.NewMetalBackend()
+	// Initialize Metal backend
+	gpuBackend, err := metal.NewBackend(0)
 	if err != nil {
 		log.Fatalf("Failed to init Metal backend: %v", err)
 	}
-	defer backend.Close()
+	defer gpuBackend.Close()
 
-	// Load model weights
-	model, err := runtime.LoadModel(*modelPath, modelCfg, backend)
+	// Create memory context with scratch arenas
+	memCtx := memory.NewInferenceContext(tensor.Metal)
+	maxPrefillTokens := 256
+	scratchSize := modelCfg.ScratchBytes(maxPrefillTokens)
+	logitsSize := int64(modelCfg.VocabSize) * 4
+	attnScoresSize := int64(maxPrefillTokens * maxPrefillTokens * 4)
+	totalScratch := scratchSize + logitsSize*2 + attnScoresSize
+	memCtx.AddArenaWithBackend(memory.Scratch, int(totalScratch), gpuBackend.Alloc)
+
+	// Create model runtime
+	model, err := runtime.NewModelRuntime(gpuBackend, memCtx, nil, modelCfg)
 	if err != nil {
-		log.Fatalf("Failed to load model: %v", err)
+		log.Fatalf("Failed to create runtime: %v", err)
 	}
+
+	// Load weights and copy to GPU
+	fmt.Fprintf(os.Stderr, "Loading weights...\n")
+	if err := model.LoadWeights(*modelPath); err != nil {
+		log.Fatalf("Failed to load weights: %v", err)
+	}
+	if err := model.CopyWeightsToDevice(); err != nil {
+		log.Fatalf("Failed to copy weights to GPU: %v", err)
+	}
+
+	// Create GPU KV cache (auto-selects FP16 if backend supports it)
+	gpuCache := model.CreateGPUKVCache(2048)
+	defer gpuCache.Free()
 
 	debug.SetModel(*modelPath)
 	debug.SetPrompt(*prompt)
@@ -134,7 +157,9 @@ func main() {
 	fmt.Fprintf(os.Stderr, "\n")
 
 	// Run inference with debug hooks
-	runInference(model, backend, tok, tokens, *maxTokens)
+	// The debug harness is already initialized — ExecuteWithGPUKV calls
+	// debug.ShouldCapture/debug.Capture at each instrumented op.
+	runInference(model, gpuBackend, tok, tokens, *maxTokens)
 
 	fmt.Fprintf(os.Stderr, "\nDebug trace complete.\n")
 	if *output != "" {
@@ -142,32 +167,17 @@ func main() {
 	}
 }
 
-func runInference(model *runtime.ModelRuntime, backend *metal.MetalBackend, tok *tokenizer.Tokenizer, tokens []int, maxTokens int) {
-	hiddenSize := model.Config().HiddenSize
-	numLayers := model.Config().NumHiddenLayers
-
-	// Create GPU KV cache
-	gpuCache := runtime.NewGPUKVCache(
-		backend,
-		numLayers,
-		model.Config().NumKeyValueHeads,
-		hiddenSize/model.Config().NumAttentionHeads,
-		2048, // maxSeqLen
-		true, // useFP16
-	)
-	defer gpuCache.Close()
-
-	// Prefill
+func runInference(model *runtime.ModelRuntime, backend *metal.Backend, tok *tokenizer.Tokenizer, tokens []int, maxTokens int) {
+	// Prefill: process all prompt tokens at once
 	fmt.Fprintf(os.Stderr, "=== PREFILL (tokens=%v) ===\n", tokens)
-	prefillOut, err := model.DecodeWithGPUKVDebug(tokens, 0, gpuCache, debugCapture)
+	logits, err := model.DecodeWithGPUKV(tokens, 0)
 	if err != nil {
 		log.Printf("Prefill error: %v", err)
 		return
 	}
 
-	// Get logits and sample
-	logits := model.LMHead(prefillOut, len(tokens))
-	nextToken := sampleGreedy(logits)
+	// Sample next token from logits (already on GPU, need to read back)
+	nextToken := sampleGreedy(logits, backend)
 	decoded, _ := tok.Decode([]int{nextToken})
 	fmt.Fprintf(os.Stderr, "\nPrefill -> token %d (%q)\n", nextToken, decoded)
 
@@ -178,14 +188,13 @@ func runInference(model *runtime.ModelRuntime, backend *metal.MetalBackend, tok 
 		pos := len(tokens) + i
 		fmt.Fprintf(os.Stderr, "\n=== DECODE pos=%d token=%d ===\n", pos, nextToken)
 
-		decodeOut, err := model.DecodeWithGPUKVDebug([]int{nextToken}, pos, gpuCache, debugCapture)
+		logits, err = model.DecodeWithGPUKV([]int{nextToken}, pos)
 		if err != nil {
 			log.Printf("Decode error at pos %d: %v", pos, err)
 			break
 		}
 
-		logits = model.LMHead(decodeOut, 1)
-		nextToken = sampleGreedy(logits)
+		nextToken = sampleGreedy(logits, backend)
 		decoded, _ := tok.Decode([]int{nextToken})
 		fmt.Fprintf(os.Stderr, "\nDecode pos=%d -> token %d (%q)\n", pos, nextToken, decoded)
 
@@ -199,39 +208,22 @@ func runInference(model *runtime.ModelRuntime, backend *metal.MetalBackend, tok 
 	fmt.Fprintf(os.Stderr, "\n=== OUTPUT ===\n%s\n", output)
 }
 
-// debugCapture is called by DecodeWithGPUKVDebug at each debug point.
-func debugCapture(layer, position int, op, name string, ptr tensor.DevicePtr, size int, backend interface {
+// sampleGreedy reads logits from GPU and returns the argmax token index.
+func sampleGreedy(logits tensor.Tensor, backend interface {
 	Sync()
 	ToHost([]byte, tensor.DevicePtr)
-}) {
-	if !debug.ShouldCapture(layer, position, op) {
-		return
-	}
-
+}) int {
 	backend.Sync()
 
-	// Read tensor data from GPU
-	data := make([]byte, size*4)
-	backend.ToHost(data, ptr)
+	numElements := logits.Shape().NumElements()
+	data := make([]byte, numElements*4)
+	backend.ToHost(data, logits.DevicePtr())
 
-	// Convert to float32
-	floats := make([]float32, size)
-	for i := 0; i < size; i++ {
-		floats[i] = math.Float32frombits(binary.LittleEndian.Uint32(data[i*4:]))
-	}
-
-	// Capture with flag detection
-	flagged := debug.CaptureWithFlag(layer, position, op, name, floats)
-	if flagged {
-		fmt.Fprintf(os.Stderr, "  ^^^ FLAGS DETECTED ^^^\n")
-	}
-}
-
-func sampleGreedy(logits tensor.Tensor) int {
-	data := logits.Data().([]float32)
+	// Convert bytes to float32 and find argmax
 	maxIdx := 0
-	maxVal := data[0]
-	for i, v := range data {
+	maxVal := float32(-math.MaxFloat32)
+	for i := 0; i < numElements; i++ {
+		v := math.Float32frombits(binary.LittleEndian.Uint32(data[i*4:]))
 		if v > maxVal {
 			maxVal = v
 			maxIdx = i
