@@ -660,6 +660,11 @@ func (s *Scheduler) AddSequence(seq *Sequence) {
 		seq.SetKVSeqID(kvSeqID)
 	}
 
+	// Create sequence in GPU block pool if available
+	if pool := s.runtime.GetGPUBlockPool(); pool != nil && seq.KVSeqID() != 0 {
+		pool.CreateSequence(seq.KVSeqID())
+	}
+
 	s.mu.Lock()
 	s.sequences[seq.ID()] = seq
 	s.mu.Unlock()
@@ -679,6 +684,11 @@ func (s *Scheduler) RemoveSequence(id SequenceID) {
 	delete(s.sequences, id)
 	s.metrics.CompletedSequences++
 	s.mu.Unlock()
+
+	// Clean up GPU block pool (must come before PagedKVCache cleanup)
+	if pool := s.runtime.GetGPUBlockPool(); pool != nil && seq.KVSeqID() != 0 {
+		pool.DeleteSequence(seq.KVSeqID())
+	}
 
 	// Clean up KV cache
 	if cache := s.runtime.PagedKVCache(); cache != nil && seq.KVSeqID() != 0 {

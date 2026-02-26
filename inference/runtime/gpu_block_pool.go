@@ -33,6 +33,9 @@ type GPUBlockPool struct {
 	// Per-layer free list
 	freeLists [][]int32
 
+	// Per-layer reference counts: blockID → ref count
+	refCounts []map[int32]int
+
 	// Per-sequence state
 	mu   sync.Mutex
 	seqs map[int64]*gpuSeqState
@@ -67,6 +70,7 @@ func NewGPUBlockPool(be backend.Backend, pagedOps backend.PagedKVOps,
 		maxBlocks:  maxBlocks,
 		pools:      make([]tensor.DevicePtr, numLayers),
 		freeLists:  make([][]int32, numLayers),
+		refCounts:  make([]map[int32]int, numLayers),
 		seqs:       make(map[int64]*gpuSeqState),
 	}
 
@@ -76,6 +80,7 @@ func NewGPUBlockPool(be backend.Backend, pagedOps backend.PagedKVOps,
 	for i := 0; i < numLayers; i++ {
 		g.pools[i] = be.Alloc(poolBytes)
 		g.freeLists[i] = make([]int32, maxBlocks)
+		g.refCounts[i] = make(map[int32]int)
 		for j := 0; j < maxBlocks; j++ {
 			g.freeLists[i][j] = int32(j)
 		}
@@ -112,7 +117,7 @@ func (g *GPUBlockPool) DeleteSequence(seqID int64) {
 
 	for layer := 0; layer < g.numLayers; layer++ {
 		for _, blockID := range seq.blockTables[layer] {
-			g.freeLists[layer] = append(g.freeLists[layer], blockID)
+			g.releaseBlock(layer, blockID)
 		}
 		if !seq.btGPU[layer].IsNil() {
 			g.be.Free(seq.btGPU[layer])
@@ -137,7 +142,18 @@ func (g *GPUBlockPool) allocBlock(layer int) (int32, error) {
 	}
 	blockID := fl[len(fl)-1]
 	g.freeLists[layer] = fl[:len(fl)-1]
+	g.refCounts[layer][blockID] = 1
 	return blockID, nil
+}
+
+func (g *GPUBlockPool) releaseBlock(layer int, blockID int32) {
+	rc := g.refCounts[layer][blockID]
+	if rc <= 1 {
+		delete(g.refCounts[layer], blockID)
+		g.freeLists[layer] = append(g.freeLists[layer], blockID)
+	} else {
+		g.refCounts[layer][blockID] = rc - 1
+	}
 }
 
 // StoreKV scatters new K/V data into the GPU block pool.
@@ -255,6 +271,64 @@ func (g *GPUBlockPool) Attention(layerIdx int, seqID int64,
 		scale, tokensInLastBlock)
 
 	return nil
+}
+
+// ShareBlocks shares the first numBlocks logical blocks from srcSeq to dstSeq
+// across all layers. The shared physical blocks have their ref count incremented.
+// This is used for prefix caching: when a new sequence shares a prefix with
+// an existing one, the GPU blocks containing the prefix K/V are reused.
+func (g *GPUBlockPool) ShareBlocks(srcSeqID, dstSeqID int64, numTokens int) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	src, ok := g.seqs[srcSeqID]
+	if !ok {
+		return fmt.Errorf("source sequence %d not found", srcSeqID)
+	}
+	dst, ok := g.seqs[dstSeqID]
+	if !ok {
+		return fmt.Errorf("destination sequence %d not found", dstSeqID)
+	}
+
+	numBlocks := (numTokens + g.blockSize - 1) / g.blockSize
+
+	for layer := 0; layer < g.numLayers; layer++ {
+		if numBlocks > len(src.blockTables[layer]) {
+			return fmt.Errorf("source seq %d layer %d has %d blocks, need %d",
+				srcSeqID, layer, len(src.blockTables[layer]), numBlocks)
+		}
+
+		// Share physical blocks by copying block table entries and incrementing ref counts
+		for i := 0; i < numBlocks; i++ {
+			blockID := src.blockTables[layer][i]
+			dst.blockTables[layer] = append(dst.blockTables[layer], blockID)
+			g.refCounts[layer][blockID]++
+		}
+		dst.btDirty[layer] = true
+	}
+
+	if numTokens > dst.seqLen {
+		dst.seqLen = numTokens
+	}
+
+	return nil
+}
+
+// BlockStats returns allocation statistics for monitoring.
+func (g *GPUBlockPool) BlockStats() (totalBlocks, freeBlocks, sharedBlocks int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	totalBlocks = g.maxBlocks * g.numLayers
+	for layer := 0; layer < g.numLayers; layer++ {
+		freeBlocks += len(g.freeLists[layer])
+		for _, rc := range g.refCounts[layer] {
+			if rc > 1 {
+				sharedBlocks++
+			}
+		}
+	}
+	return
 }
 
 // Close releases all GPU resources.
