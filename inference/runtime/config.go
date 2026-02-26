@@ -108,8 +108,9 @@ type ModelConfig struct {
 	AttentionWindowType AttentionWindowType // Window pattern: Global (default), Sliding (all layers), Alternating (even=global, odd=sliding)
 
 	// Gemma 2-specific settings
-	AttentionLogitSoftCap float32 // Logit soft-capping value (0 = disabled, typically 30.0 for Gemma 2)
-	HasPostNorms          bool    // Apply RMSNorm after attention and MLP (before residual). Gemma 2 only.
+	AttentionLogitSoftCap float32   // Logit soft-capping value (0 = disabled, typically 30.0 for Gemma 2)
+	HasPostNorms          bool      // Apply RMSNorm after attention and MLP (before residual). Gemma 2 only.
+	RoPEFreqScales        []float32 // Per-dimension inverse frequency values for learned RoPE (nil = use theta-based)
 }
 
 // MemoryPlan holds the estimated memory usage breakdown.

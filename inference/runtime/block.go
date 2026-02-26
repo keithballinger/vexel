@@ -279,6 +279,13 @@ type BlockRuntime struct {
 	// Cached interface for logit soft-capping in attention (Gemma 2)
 	softCapOps backend.SoftCapAttentionOps
 
+	// Cached interface for learned RoPE frequency scaling (Gemma 2)
+	scaledRoPEOps backend.ScaledRoPEOps
+
+	// Pre-computed RoPE inverse frequency buffer on device ([headDim/2] float32).
+	// Non-nil when using learned RoPE scaling (e.g. Gemma 2 with RoPEFreqScales).
+	ropeFreqBuf tensor.DevicePtr
+
 	// Gemma 2 attention config
 	AttentionLogitSoftCap float32 // 0 = disabled, typically 30.0 for Gemma 2
 	HasPostNorms          bool    // Apply post-norms after attn and MLP (before residual)
@@ -334,6 +341,7 @@ func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 	br.geluOps, _ = b.(backend.GELUOps)
 	br.biasOps, _ = b.(backend.BiasOps)
 	br.softCapOps, _ = b.(backend.SoftCapAttentionOps)
+	br.scaledRoPEOps, _ = b.(backend.ScaledRoPEOps)
 
 	// Gemma 2 attention config
 	br.AttentionLogitSoftCap = config.AttentionLogitSoftCap
@@ -369,6 +377,22 @@ func (b *BlockRuntime) effectiveKVLen(layerIdx, totalKVLen int) (kvLen, startPos
 		return b.SlidingWindow, totalKVLen - b.SlidingWindow
 	}
 	return totalKVLen, 0
+}
+
+// SetRoPEFreqBuffer stores a pre-computed inverse frequency buffer for learned RoPE scaling.
+// freqBuf has [headDim/2] float32 values on the device. When set, RoPE dispatch uses
+// the scaled kernel instead of computing frequencies from theta.
+func (b *BlockRuntime) SetRoPEFreqBuffer(freqBuf tensor.DevicePtr) {
+	b.ropeFreqBuf = freqBuf
+}
+
+// applyRoPE dispatches to the appropriate RoPE kernel — learned-frequency (scaled) or standard.
+func (b *BlockRuntime) applyRoPE(qPtr, kPtr tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos int) {
+	if !b.ropeFreqBuf.IsNil() && b.scaledRoPEOps != nil {
+		b.scaledRoPEOps.RoPEWithFreqs(qPtr, kPtr, b.ropeFreqBuf, headDim, numHeads, numKVHeads, seqLen, startPos, b.RoPENeox)
+	} else {
+		b.backend.RoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, startPos, b.RoPEDim, float32(b.RoPETheta), b.RoPENeox)
+	}
 }
 
 // matMulTransposed performs C = A @ W^T, dispatching to quantized kernel if supported.
@@ -526,7 +550,7 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 	}
 
 	// 3. RoPE - Apply to Q and K
-	b.backend.RoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, pos, b.RoPEDim, float32(b.RoPETheta), b.RoPENeox)
+	b.applyRoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, pos)
 
 	// 4. Attention
 	scale := float32(1.0 / sqrt(float64(headDim)))
@@ -708,7 +732,7 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 	}
 
 	// 3. RoPE - Apply to Q and K
-	b.backend.RoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, startPos, b.RoPEDim, float32(b.RoPETheta), b.RoPENeox)
+	b.applyRoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, startPos)
 
 	// 4. Store current K/V in cache and compute attention
 	scale := float32(1.0 / sqrt(float64(headDim)))
@@ -1170,7 +1194,7 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			// FP16 path: apply RoPE directly to FP16 Q and K
 			b.fp16Ops.RoPEF16(qF16Ptr, kF16Ptr, headDim, numHeads, numKVHeads, seqLen, startPos, b.RoPEDim, float32(b.RoPETheta), b.RoPENeox)
 		} else {
-			b.backend.RoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, startPos, b.RoPEDim, float32(b.RoPETheta), b.RoPENeox)
+			b.applyRoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, startPos)
 		}
 	})
 

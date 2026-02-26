@@ -19,6 +19,7 @@ var _ backend.LayerNormOps = (*CPUBackend)(nil)
 var _ backend.GELUOps = (*CPUBackend)(nil)
 var _ backend.BiasOps = (*CPUBackend)(nil)
 var _ backend.SoftCapAttentionOps = (*CPUBackend)(nil)
+var _ backend.ScaledRoPEOps = (*CPUBackend)(nil)
 
 // CPUBackend implements the Backend interface using CPU execution.
 type CPUBackend struct{}
@@ -288,6 +289,78 @@ func (b *CPUBackend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, 
 
 				exp := float64(2*j) / float64(effectiveRopeDim)
 				freq := float32(1.0 / math.Pow(float64(theta), exp))
+				angle := float32(pos) * freq
+				cos := float32(math.Cos(float64(angle)))
+				sin := float32(math.Sin(float64(angle)))
+
+				val1 := kData[offset+idx0]
+				val2 := kData[offset+idx1]
+				kData[offset+idx0] = val1*cos - val2*sin
+				kData[offset+idx1] = val1*sin + val2*cos
+			}
+		}
+	}
+}
+
+// RoPEWithFreqs applies RoPE using pre-computed per-dimension inverse frequencies
+// from a device buffer instead of computing from theta. The freqs buffer has
+// [ropeDim/2] float32 values, one per pair of rotated dimensions.
+func (b *CPUBackend) RoPEWithFreqs(q, k, freqs tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos int, ropeNeox bool) {
+	// ropeDim is inferred from freqs buffer size: halfDim frequencies → ropeDim = 2*halfDim
+	// But we don't know the buffer size from the pointer alone, so we use headDim
+	// (caller ensures freqs has headDim/2 elements when ropeDim == headDim)
+	halfRopeDim := headDim / 2
+	freqData := ptrToFloat32Slice(freqs, halfRopeDim)
+
+	qData := ptrToFloat32Slice(q, seqLen*numHeads*headDim)
+	totalVectors := len(qData) / headDim
+
+	for i := 0; i < totalVectors; i++ {
+		seqPos := i / numHeads
+		pos := startPos + seqPos
+		offset := i * headDim
+
+		for j := 0; j < halfRopeDim; j++ {
+			var idx0, idx1 int
+			if ropeNeox {
+				idx0 = j
+				idx1 = j + halfRopeDim
+			} else {
+				idx0 = j * 2
+				idx1 = j*2 + 1
+			}
+
+			freq := freqData[j]
+			angle := float32(pos) * freq
+			cos := float32(math.Cos(float64(angle)))
+			sin := float32(math.Sin(float64(angle)))
+
+			val1 := qData[offset+idx0]
+			val2 := qData[offset+idx1]
+			qData[offset+idx0] = val1*cos - val2*sin
+			qData[offset+idx1] = val1*sin + val2*cos
+		}
+	}
+
+	if !k.IsNil() {
+		kData := ptrToFloat32Slice(k, seqLen*numKVHeads*headDim)
+		totalVectorsK := len(kData) / headDim
+		for i := 0; i < totalVectorsK; i++ {
+			seqPos := i / numKVHeads
+			pos := startPos + seqPos
+			offset := i * headDim
+
+			for j := 0; j < halfRopeDim; j++ {
+				var idx0, idx1 int
+				if ropeNeox {
+					idx0 = j
+					idx1 = j + halfRopeDim
+				} else {
+					idx0 = j * 2
+					idx1 = j*2 + 1
+				}
+
+				freq := freqData[j]
 				angle := float32(pos) * freq
 				cos := float32(math.Cos(float64(angle)))
 				sin := float32(math.Sin(float64(angle)))

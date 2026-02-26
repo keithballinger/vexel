@@ -196,6 +196,14 @@ type SoftCapAttentionOps interface {
 	SDPAPrefillSoftCap(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale, softcap float32)
 }
 
+// ScaledRoPEOps is an optional interface for backends that support RoPE with
+// pre-computed per-dimension inverse frequencies. Used by Gemma 2 for learned
+// RoPE scaling. freqs is a device buffer of [ropeDim/2] float32 values containing
+// pre-computed inverse frequencies for each pair of rotated dimensions.
+type ScaledRoPEOps interface {
+	RoPEWithFreqs(q, k, freqs tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos int, ropeNeox bool)
+}
+
 // BiasOps is an optional interface for backends that support bias addition.
 // Required for architectures with bias terms in linear projections (Phi, GPT-2).
 type BiasOps interface {

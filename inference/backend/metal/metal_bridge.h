@@ -199,6 +199,13 @@ void metal_rope_gqa_f32(void* queue, void* pipeline,
                         int seqLen, int numQHeads, int numKVHeads, int headDim,
                         int startPos, int ropeDim, float theta, int ropeNeox);
 
+// RoPE for GQA with pre-computed per-dimension inverse frequencies (Gemma 2 learned RoPE)
+// freqs: [headDim/2] float32 pre-computed inverse frequencies
+void metal_rope_gqa_scaled_f32(void* queue, void* pipeline,
+                                void* q, void* k, void* freqs,
+                                int seqLen, int numQHeads, int numKVHeads, int headDim,
+                                int startPos, int ropeNeox);
+
 // RoPE for GQA with FP16 inputs/outputs
 // Computation in FP32 for numerical stability, I/O in FP16
 // ropeDim: dimensions to rotate (can be < headDim for partial RoPE like Phi-2)

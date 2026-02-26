@@ -22,6 +22,7 @@ import (
 
 // Ensure Backend implements the interface
 var _ backend.Backend = (*Backend)(nil)
+var _ backend.ScaledRoPEOps = (*Backend)(nil)
 
 // bufferPool manages a pool of reusable Metal buffers by size.
 type bufferPool struct {
@@ -80,6 +81,7 @@ type Backend struct {
 	addRMSNormPipeline              unsafe.Pointer
 	ropePipeline                    unsafe.Pointer
 	ropeGQAPipeline                 unsafe.Pointer
+	ropeGQAScaledPipeline           unsafe.Pointer // Learned RoPE frequencies (Gemma 2)
 	ropeGQAF16Pipeline              unsafe.Pointer // FP16 version
 	siluPipeline                unsafe.Pointer
 	siluMulPipeline             unsafe.Pointer
@@ -216,6 +218,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.addRMSNormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_rmsnorm_f32"))
 	b.ropePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_f32"))
 	b.ropeGQAPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_gqa_f32"))
+	b.ropeGQAScaledPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_gqa_scaled_f32"))
 	b.ropeGQAF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_gqa_f16"))
 	b.siluPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_f32"))
 	b.siluMulPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_mul_f32"))
@@ -913,6 +916,24 @@ func (b *Backend) RoPEF16(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, 
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		C.int(seqLen), C.int(numHeads), C.int(numKVHeads), C.int(headDim),
 		C.int(startPos), C.int(effectiveRopeDim), C.float(theta), C.int(neoxFlag))
+}
+
+// RoPEWithFreqs applies rotary position encoding using pre-computed per-dimension
+// inverse frequencies from a device buffer. Used for learned RoPE scaling (Gemma 2).
+// freqs: [headDim/2] float32 pre-computed inverse frequencies on device.
+func (b *Backend) RoPEWithFreqs(q, k, freqs tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos int, ropeNeox bool) {
+	b.profiler.RecordDispatch("RoPEScaled")
+	if b.ropeGQAScaledPipeline == nil {
+		panic("RoPEWithFreqs called but pipeline unavailable")
+	}
+	neoxFlag := 0
+	if ropeNeox {
+		neoxFlag = 1
+	}
+	C.metal_rope_gqa_scaled_f32(b.queue, b.ropeGQAScaledPipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()), unsafe.Pointer(freqs.Addr()),
+		C.int(seqLen), C.int(numHeads), C.int(numKVHeads), C.int(headDim),
+		C.int(startPos), C.int(neoxFlag))
 }
 
 // Softmax applies softmax row-wise.

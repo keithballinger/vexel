@@ -2815,6 +2815,80 @@ kernel void rope_gqa_f32(
     }
 }
 
+// RoPE for GQA with pre-computed per-dimension inverse frequencies.
+// Used for learned RoPE scaling (Gemma 2). Reads frequencies from a buffer
+// instead of computing from theta. freqs has [headDim/2] float32 values.
+kernel void rope_gqa_scaled_f32(
+    device float* q [[buffer(0)]],
+    device float* k [[buffer(1)]],
+    const device float* freqs [[buffer(2)]],  // Pre-computed inverse frequencies [headDim/2]
+    constant int& seqLen [[buffer(3)]],
+    constant int& numQHeads [[buffer(4)]],
+    constant int& numKVHeads [[buffer(5)]],
+    constant int& headDim [[buffer(6)]],
+    constant int& startPos [[buffer(7)]],
+    constant int& ropeNeox [[buffer(8)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    int pos = gid.x;
+    int head = gid.y;
+
+    if (pos >= seqLen) return;
+
+    int absPos = startPos + pos;
+    int halfDim = headDim / 2;
+
+    // Process Q heads
+    if (head < numQHeads) {
+        int qOffset = (pos * numQHeads + head) * headDim;
+        for (int j = 0; j < halfDim; j++) {
+            float freq = freqs[j];
+            float angle = float(absPos) * freq;
+            float cos_val = cos(angle);
+            float sin_val = sin(angle);
+
+            int idx0, idx1;
+            if (ropeNeox != 0) {
+                idx0 = j;
+                idx1 = j + halfDim;
+            } else {
+                idx0 = j * 2;
+                idx1 = j * 2 + 1;
+            }
+
+            float q0 = q[qOffset + idx0];
+            float q1 = q[qOffset + idx1];
+            q[qOffset + idx0] = q0 * cos_val - q1 * sin_val;
+            q[qOffset + idx1] = q0 * sin_val + q1 * cos_val;
+        }
+    }
+
+    // Process K heads (fewer due to GQA)
+    if (head < numKVHeads) {
+        int kOffset = (pos * numKVHeads + head) * headDim;
+        for (int j = 0; j < halfDim; j++) {
+            float freq = freqs[j];
+            float angle = float(absPos) * freq;
+            float cos_val = cos(angle);
+            float sin_val = sin(angle);
+
+            int idx0, idx1;
+            if (ropeNeox != 0) {
+                idx0 = j;
+                idx1 = j + halfDim;
+            } else {
+                idx0 = j * 2;
+                idx1 = j * 2 + 1;
+            }
+
+            float k0 = k[kOffset + idx0];
+            float k1 = k[kOffset + idx1];
+            k[kOffset + idx0] = k0 * cos_val - k1 * sin_val;
+            k[kOffset + idx1] = k0 * sin_val + k1 * cos_val;
+        }
+    }
+}
+
 // RoPE for GQA with FP16 inputs/outputs
 // Computation done in FP32 for numerical stability, I/O in FP16
 // Eliminates FP32->FP16 conversions in attention path
@@ -6361,6 +6435,32 @@ void metal_rope_gqa_f32(void* queuePtr, void* pipelinePtr,
     ];
 
     // Dispatch with max(numQHeads, numKVHeads) threads per position
+    int maxHeads = numQHeads > numKVHeads ? numQHeads : numKVHeads;
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(seqLen, maxHeads, 1));
+}
+
+// RoPE with pre-computed per-dimension inverse frequencies (learned RoPE scaling, Gemma 2)
+void metal_rope_gqa_scaled_f32(void* queuePtr, void* pipelinePtr,
+                                void* q, void* k, void* freqs,
+                                int seqLen, int numQHeads, int numKVHeads, int headDim,
+                                int startPos, int ropeNeox) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)q,
+        (__bridge id<MTLBuffer>)k,
+        (__bridge id<MTLBuffer>)freqs
+    ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&seqLen length:sizeof(seqLen)],
+        [NSData dataWithBytes:&numQHeads length:sizeof(numQHeads)],
+        [NSData dataWithBytes:&numKVHeads length:sizeof(numKVHeads)],
+        [NSData dataWithBytes:&headDim length:sizeof(headDim)],
+        [NSData dataWithBytes:&startPos length:sizeof(startPos)],
+        [NSData dataWithBytes:&ropeNeox length:sizeof(ropeNeox)]
+    ];
+
     int maxHeads = numQHeads > numKVHeads ? numQHeads : numKVHeads;
     dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(seqLen, maxHeads, 1));
 }

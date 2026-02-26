@@ -1,7 +1,9 @@
 package runtime
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math"
 	"os"
 	"sync"
 	"unsafe"
@@ -79,6 +81,46 @@ func (m *ModelRuntime) BuildPlan(deviceMeta DeviceMeta, config *PlanConfig) {
 	for _, layer := range m.layers {
 		layer.SetPlan(m.plan)
 	}
+}
+
+// SetupRoPEFreqs creates and uploads the RoPE inverse frequency buffer to the device
+// if the model uses learned RoPE frequencies (RoPEFreqScales in config). This buffer
+// is shared across all layers. If no learned frequencies are configured, this is a no-op.
+func (m *ModelRuntime) SetupRoPEFreqs() {
+	if len(m.config.RoPEFreqScales) == 0 {
+		return // No learned frequencies, use standard theta-based RoPE
+	}
+
+	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	halfDim := headDim / 2
+
+	if len(m.config.RoPEFreqScales) != halfDim {
+		fmt.Printf("[WARNING] RoPEFreqScales length %d != expected %d (headDim/2), ignoring\n",
+			len(m.config.RoPEFreqScales), halfDim)
+		return
+	}
+
+	// Upload frequency buffer to device
+	sizeBytes := halfDim * 4
+	freqBuf := m.backend.Alloc(sizeBytes)
+	if freqBuf.IsNil() {
+		fmt.Printf("[WARNING] Failed to allocate %d bytes for RoPE freq buffer\n", sizeBytes)
+		return
+	}
+
+	// Convert float32 slice to byte slice for ToDevice
+	data := make([]byte, sizeBytes)
+	for i, f := range m.config.RoPEFreqScales {
+		binary.LittleEndian.PutUint32(data[i*4:], math.Float32bits(f))
+	}
+	m.backend.ToDevice(freqBuf, data)
+
+	// Set on all layers
+	for _, layer := range m.layers {
+		layer.SetRoPEFreqBuffer(freqBuf)
+	}
+
+	fmt.Printf("[CONFIG] Loaded %d learned RoPE inverse frequencies\n", halfDim)
 }
 
 // ModelMeta extracts model metadata from the runtime config.
