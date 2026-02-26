@@ -6,16 +6,18 @@ The README documents `./vexel serve` but no unified CLI binary exists. Individua
 `vexel` binary with subcommands.
 
 ## Phase 1: Core CLI Framework
-- [ ] Task: Create `cmd/vexel/main.go`
+- [x] Task: Create `cmd/vexel/main.go`
     - Implement subcommand dispatcher using `flag` (no external deps per product-guidelines).
-    - Subcommands: `serve`, `generate`, `chat`, `bench`, `tokenize`, `debug`.
-    - Global flags: `--model`, `--gpu-layers`, `--verbose`.
+    - Subcommands: `serve`, `generate`, `chat`, `bench`, `tokenize`.
+    - Global flags: `--model`, `--verbose`.
     - Print usage/help when invoked with no subcommand.
-- [ ] Task: Implement `serve` subcommand
+    - Files: `main.go`, `cli.go` (parsing), `commands.go` (runners), `cli_test.go` (10 tests).
+- [x] Task: Implement `serve` subcommand
     - Wire up Metal backend init, GGUF model loading, scheduler creation, and HTTP server.
     - Flags: `--port` (default 8080), `--max-tokens`, `--max-batch-size`.
     - Match the interface documented in README: `./vexel serve --model MODEL --port 8080`.
     - Graceful shutdown on SIGINT/SIGTERM.
+    - Shared `initModel()` helper for model loading (reused by chat/generate).
 
 ## Phase 2: Generation Subcommands
 - [ ] Task: Implement `generate` subcommand

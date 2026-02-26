@@ -3,8 +3,8 @@
 models/
 *.gguf
 *.safetensors
-vexel
-inference/vexel
+/vexel
+/inference/vexel
 vexel_metal
 vexel_old
 .gocache/
