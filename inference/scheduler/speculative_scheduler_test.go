@@ -80,3 +80,55 @@ func TestSpeculativeConfigInSchedulerConfig(t *testing.T) {
 		t.Errorf("expected 0 threshold, got %f", sc.AcceptanceThreshold)
 	}
 }
+
+func TestSpeculativeSchedulerAdaptiveWiring(t *testing.T) {
+	t.Run("adaptive_initialized_from_spec_config", func(t *testing.T) {
+		// Construct a SpeculativeScheduler manually to verify adaptive field
+		specConfig := SpeculativeConfig{NumDraftTokens: 6}
+		adaptiveCfg := AdaptiveConfig{
+			InitialDraftTokens: specConfig.NumDraftTokens,
+			MinDraftTokens:     1,
+			MaxDraftTokens:     8,
+			WindowSize:         10,
+			IncreaseThreshold:  0.80,
+			DecreaseThreshold:  0.40,
+		}
+		ss := &SpeculativeScheduler{
+			specConfig: specConfig,
+			adaptive:   NewAdaptiveDraftLength(adaptiveCfg),
+		}
+
+		if ss.adaptive.NumDraftTokens() != 6 {
+			t.Errorf("adaptive initial = %d, want 6", ss.adaptive.NumDraftTokens())
+		}
+	})
+
+	t.Run("adaptive_adjusts_decoder_config", func(t *testing.T) {
+		// Verify that adaptive can adjust the decoder's NumDraftTokens
+		specConfig := SpeculativeConfig{NumDraftTokens: 4}
+		s := sampler.New(sampler.Config{Temperature: 0}, 42)
+		decoder := &SpeculativeDecoder{
+			sampler: s,
+			config:  specConfig,
+		}
+		adaptiveCfg := AdaptiveConfig{
+			InitialDraftTokens: 4,
+			MinDraftTokens:     1,
+			MaxDraftTokens:     8,
+			WindowSize:         3,
+			IncreaseThreshold:  0.80,
+			DecreaseThreshold:  0.40,
+		}
+		ad := NewAdaptiveDraftLength(adaptiveCfg)
+
+		// Simulate high acceptance window
+		for i := 0; i < 3; i++ {
+			ad.RecordStep(4, 4)
+		}
+		// Adaptive now recommends 5
+		decoder.config.NumDraftTokens = ad.NumDraftTokens()
+		if decoder.config.NumDraftTokens != 5 {
+			t.Errorf("decoder.config.NumDraftTokens = %d, want 5", decoder.config.NumDraftTokens)
+		}
+	})
+}

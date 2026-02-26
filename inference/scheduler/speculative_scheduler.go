@@ -19,6 +19,7 @@ type SpeculativeScheduler struct {
 	decoder      *SpeculativeDecoder
 	specConfig   SpeculativeConfig
 	specMetrics  SpeculativeMetrics
+	adaptive     *AdaptiveDraftLength
 }
 
 // NewSpeculativeScheduler creates a speculative scheduler using a separate draft model.
@@ -37,11 +38,21 @@ func NewSpeculativeScheduler(
 
 	s := sampler.New(config.SamplerConfig, 42)
 
+	adaptiveCfg := AdaptiveConfig{
+		InitialDraftTokens: specConfig.NumDraftTokens,
+		MinDraftTokens:     1,
+		MaxDraftTokens:     8,
+		WindowSize:         10,
+		IncreaseThreshold:  0.80,
+		DecreaseThreshold:  0.40,
+	}
+
 	ss := &SpeculativeScheduler{
 		Scheduler:    base,
 		draftRuntime: draft,
 		specConfig:   specConfig,
 		decoder:      NewSpeculativeDecoder(target, draft, s, specConfig),
+		adaptive:     NewAdaptiveDraftLength(adaptiveCfg),
 	}
 
 	return ss, nil
@@ -126,7 +137,10 @@ func (ss *SpeculativeScheduler) runSpeculativeDecodeStep(ctx context.Context, ba
 
 	startTime := time.Now()
 
-	// Step 1: Generate draft tokens from draft model
+	// Step 1: Adapt draft token count based on recent acceptance rate
+	ss.decoder.config.NumDraftTokens = ss.adaptive.NumDraftTokens()
+
+	// Step 2: Generate draft tokens from draft model
 	draftTokens, draftProbs, err := ss.decoder.GenerateDraftTokensFrom(inputToken, pos)
 	if err != nil {
 		// Fall back to standard decode on error
@@ -138,13 +152,16 @@ func (ss *SpeculativeScheduler) runSpeculativeDecodeStep(ctx context.Context, ba
 		return ss.runDecodeStep(ctx, batch)
 	}
 
-	// Step 2: Verify draft tokens with target model
+	// Step 3: Verify draft tokens with target model
 	numAccepted, finalToken, _, err := ss.decoder.VerifyDraftTokens(pos, inputToken, draftTokens, draftProbs)
 	if err != nil {
 		return ss.runDecodeStep(ctx, batch)
 	}
 
-	// Step 3: Truncate target KV cache to keep only accepted tokens
+	// Step 4: Record acceptance for adaptive draft length tuning
+	ss.adaptive.RecordStep(numAccepted, len(draftTokens))
+
+	// Step 5: Truncate target KV cache to keep only accepted tokens
 	// Verification added (1 + len(draftTokens)) entries to cache.
 	// We want to keep entries up to pos + 1 + numAccepted.
 	if cache := ss.runtime.GPUKVCache(); cache != nil {
@@ -152,7 +169,7 @@ func (ss *SpeculativeScheduler) runSpeculativeDecodeStep(ctx context.Context, ba
 		cache.Truncate(newLen)
 	}
 
-	// Step 4: Truncate draft model KV cache too
+	// Step 6: Truncate draft model KV cache too
 	// Draft generated draftTokens entries starting at pos.
 	// We want to keep entries up to pos + numAccepted.
 	if cache := ss.draftRuntime.GPUKVCache(); cache != nil {
@@ -162,7 +179,7 @@ func (ss *SpeculativeScheduler) runSpeculativeDecodeStep(ctx context.Context, ba
 
 	decodeTime := time.Since(startTime)
 
-	// Step 5: Output accepted draft tokens + final token
+	// Step 7: Output accepted draft tokens + final token
 	acceptedTokens := make([]int, 0, numAccepted+1)
 	for i := 0; i < numAccepted; i++ {
 		acceptedTokens = append(acceptedTokens, draftTokens[i])
