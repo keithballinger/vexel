@@ -23,7 +23,7 @@ server starts. This track completes the implementation and adds production featu
 Checkpoint: 33b398c
 
 ## Phase 2: Production Features
-- [ ] Task: TLS support
+- [x] Task: TLS support
     - Add TLS certificate loading to GRPCServer.
     - Support both mutual TLS and server-only TLS.
     - Add `--grpc-tls-cert` and `--grpc-tls-key` flags to CLI serve subcommand.

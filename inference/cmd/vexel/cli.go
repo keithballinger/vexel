@@ -87,6 +87,8 @@ type ServeFlags struct {
 	Port         int
 	MaxTokens    int
 	MaxBatchSize int
+	GRPCTLSCert  string // Path to TLS certificate for gRPC server
+	GRPCTLSKey   string // Path to TLS private key for gRPC server
 }
 
 // parseServeFlags parses serve-specific flags from the remaining args.
@@ -96,6 +98,8 @@ func parseServeFlags(args []string) (ServeFlags, error) {
 	fs.IntVar(&sf.Port, "port", 8080, "HTTP port to listen on")
 	fs.IntVar(&sf.MaxTokens, "max-tokens", 256, "Max tokens to generate per request")
 	fs.IntVar(&sf.MaxBatchSize, "max-batch-size", 1, "Max batch size for scheduler")
+	fs.StringVar(&sf.GRPCTLSCert, "grpc-tls-cert", "", "Path to TLS certificate for gRPC server")
+	fs.StringVar(&sf.GRPCTLSKey, "grpc-tls-key", "", "Path to TLS private key for gRPC server")
 	if err := fs.Parse(args); err != nil {
 		return ServeFlags{}, err
 	}

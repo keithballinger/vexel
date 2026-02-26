@@ -253,3 +253,33 @@ func TestSubcommandArgsNoSubcmd(t *testing.T) {
 		t.Errorf("expected nil, got %v", sub)
 	}
 }
+
+func TestServeFlagsTLS(t *testing.T) {
+	sf, err := parseServeFlags([]string{
+		"--port", "8080",
+		"--grpc-tls-cert", "/path/to/cert.pem",
+		"--grpc-tls-key", "/path/to/key.pem",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sf.GRPCTLSCert != "/path/to/cert.pem" {
+		t.Errorf("got grpc-tls-cert=%q, want /path/to/cert.pem", sf.GRPCTLSCert)
+	}
+	if sf.GRPCTLSKey != "/path/to/key.pem" {
+		t.Errorf("got grpc-tls-key=%q, want /path/to/key.pem", sf.GRPCTLSKey)
+	}
+}
+
+func TestServeFlagsTLSDefaults(t *testing.T) {
+	sf, err := parseServeFlags(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sf.GRPCTLSCert != "" {
+		t.Errorf("expected empty grpc-tls-cert by default, got %q", sf.GRPCTLSCert)
+	}
+	if sf.GRPCTLSKey != "" {
+		t.Errorf("expected empty grpc-tls-key by default, got %q", sf.GRPCTLSKey)
+	}
+}
