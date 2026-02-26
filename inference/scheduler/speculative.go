@@ -3,9 +3,12 @@ package scheduler
 import (
 	"math"
 	"time"
+	"unsafe"
 
+	"vexel/inference/backend"
 	"vexel/inference/pkg/sampler"
 	"vexel/inference/runtime"
+	"vexel/inference/tensor"
 )
 
 // SpeculativeConfig holds configuration for speculative decoding.
@@ -114,7 +117,7 @@ func (sd *SpeculativeDecoder) GenerateDraftTokens(startPos int) ([]int, []float3
 		}
 
 		// Get logits on CPU
-		logitsData := getLogitsSlice(logits, sd.draftModel.Config().VocabSize)
+		logitsData := getLogitsSlice(logits, sd.draftModel.Backend(), sd.draftModel.Config().VocabSize)
 		if logitsData == nil {
 			break
 		}
@@ -173,7 +176,7 @@ func (sd *SpeculativeDecoder) VerifyDraftTokens(
 
 	// Get all logits
 	vocabSize := sd.targetModel.Config().VocabSize
-	allLogits := getLogitsSlice(logits, len(verifyTokens)*vocabSize)
+	allLogits := getLogitsSlice(logits, sd.targetModel.Backend(), len(verifyTokens)*vocabSize)
 	if allLogits == nil {
 		return 0, 0, nil, nil
 	}
@@ -210,10 +213,26 @@ func (sd *SpeculativeDecoder) VerifyDraftTokens(
 }
 
 // getLogitsSlice extracts logits from a tensor as []float32.
-func getLogitsSlice(logits interface{ NumElements() int }, vocabSize int) []float32 {
-	// This is a simplified version - in practice, need proper tensor handling
-	// The actual implementation would use the backend to copy data
-	return nil // Placeholder - actual implementation would copy from GPU
+// numElements is the total number of float32 values to extract (vocabSize for single-token,
+// seqLen*vocabSize for multi-token verification).
+// If the tensor is on CPU, a direct slice is returned. If on GPU, data is copied to host.
+func getLogitsSlice(logits tensor.Tensor, b backend.Backend, numElements int) []float32 {
+	ptr := logits.DevicePtr()
+	if ptr.IsNil() {
+		return nil
+	}
+
+	// Fast path: tensor already on CPU — return direct slice
+	if ptr.Location() == tensor.CPU {
+		return tensor.ToFloat32Slice(logits)[:numElements]
+	}
+
+	// GPU path: copy to host
+	result := make([]float32, numElements)
+	hostBytes := unsafe.Slice((*byte)(unsafe.Pointer(&result[0])), numElements*4)
+	b.ToHost(hostBytes, ptr)
+
+	return result
 }
 
 // getTokenProbability computes the probability of a token given logits.
