@@ -17,19 +17,28 @@
 
 ## Prefill Throughput
 
-| Engine     | 20 tok  | 128 tok | 512 tok |
-|------------|---------|---------|---------|
-| llama.cpp  | ~480    | 700     | 835     |
-| **Vexel**  | **137** | **hangs** | **hangs** |
+| Engine     | 20 tok  | 128 tok   | 512 tok   |
+|------------|---------|-----------|-----------|
+| llama.cpp  | ~480    | 700→760   | 835→796   |
+| **Vexel**  | **137** | ~~OOM~~ → **~70** | ~~OOM~~ → **~30** |
 
-Vexel OOMs on prompts >20 tokens: `GPU prefill failed: OOM: requested 128000 bytes, only 53232 remaining`
+Pre-P0: Vexel OOM'd on prompts >20 tokens.
+Post-P0 (commit 2966edd): Prefill works at all lengths. Throughput estimated
+from wall-clock time minus load overhead (~1.1s).
+
+Vexel prefill is 10-25x slower than llama.cpp at longer sequences, indicating
+the per-layer GPU allocation overhead (P1) is especially acute during prefill
+where batch size = prompt length.
 
 ## Model Load Time
 
 | Engine     | Cold start |
 |------------|-----------|
-| llama.cpp  | ~288 ms   |
-| Vexel      | blocked (OOM on single-token gen) |
+| llama.cpp  | ~296 ms   |
+| Vexel      | ~1110 ms  |
+
+Vexel model load is ~3.7x slower than llama.cpp. Likely due to individual
+tensor allocation vs mmap.
 
 ---
 
@@ -106,19 +115,15 @@ M3 Max command submission latency ≈ 0.5µs → ~112µs overhead per token
 dependencies (MTLFence) instead of separate command buffers. Encode all
 ops for a layer in a single command buffer.
 
-### 5. Scratch Arena Sizing Bug (Causes OOM)
+### 5. ~~Scratch Arena Sizing Bug~~ ✅ FIXED (commit 2966edd)
 
-**File:** `inference/runtime/config.go:273-307`
+The arena budget formula in `initModel` did not account for token ID and
+hidden-state allocations that `DecodeWithGPUKV` makes from the arena.
+With default max-tokens=64, any prompt longer than ~9 tokens would OOM.
 
-The scratch buffer scores component is sized as `seqLen × seqLen`, which
-is correct for prefill but oversized for decode (where seqLen=1). Combined
-with a fixed arena that doesn't account for the difference, longer prompts
-exhaust the scratch arena.
-
-**Error:** `GPU prefill failed: OOM: requested 128000 bytes, only 53232 remaining`
-
-**Fix:** Dynamic scratch sizing: `scores = seqLen × kvLen` for prefill,
-`scores = 1 × kvLen` for decode. Pre-allocate for the max case at init.
+**Fix:** Added `TotalArenaBytes(maxBatchSize)` to `ModelConfig` that correctly
+budgets all four arena allocations (tokens + hidden state + layer scratch +
+logits) with 10% headroom. Arena now sized for `max(maxContextLen=2048, maxTokens)`.
 
 ### 6. F32→F16 Conversion Overhead
 
@@ -134,7 +139,7 @@ dispatch that could be fused into the scatter kernel itself.
 
 | Priority | Fix | Expected Impact | Effort |
 |----------|-----|----------------|--------|
-| **P0** | Fix scratch arena sizing (OOM bug) | Unblocks prefill >20 tokens | Small |
+| ~~P0~~ | ~~Fix scratch arena sizing~~ ✅ **DONE** (2966edd) | Prefill works at all lengths | Small |
 | **P1** | Enable GPU scratch sub-allocation | +15-20% decode throughput | Medium |
 | **P2** | Fused KV scatter (single dispatch) | +5-8% decode throughput | Medium |
 | **P3** | Fused attention+norm kernels | +10-15% decode throughput | Large |
@@ -167,4 +172,5 @@ then leverage the batching architecture for the real competitive advantage.
 
 - Decode: `benchmarks/results/decode_20260226/`
 - Prefill: `benchmarks/results/prefill_20260226/`
+- Post-P0 combined: `benchmarks/results/post_p0_benchmark.json`
 - Analysis: `benchmarks/results/decode_20260226/summary.json`

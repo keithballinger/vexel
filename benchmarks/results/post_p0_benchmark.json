@@ -1,0 +1,279 @@
+{
+  "llama_decode": [
+    {
+      "wall_time_s": 3.618,
+      "load_time_ms": 306.14,
+      "prefill_ms": 52.9,
+      "prompt_tokens": 12,
+      "prefill_tok_s": 226.85,
+      "decode_ms": 2649.97,
+      "gen_tokens": 199,
+      "decode_tok_s": 75.1
+    },
+    {
+      "wall_time_s": 3.126,
+      "load_time_ms": 294.65,
+      "prefill_ms": 52.31,
+      "prompt_tokens": 12,
+      "prefill_tok_s": 229.41,
+      "decode_ms": 2601.99,
+      "gen_tokens": 199,
+      "decode_tok_s": 76.48
+    },
+    {
+      "wall_time_s": 3.146,
+      "load_time_ms": 267.78,
+      "prefill_ms": 52.4,
+      "prompt_tokens": 12,
+      "prefill_tok_s": 229.03,
+      "decode_ms": 2630.04,
+      "gen_tokens": 199,
+      "decode_tok_s": 75.66
+    },
+    {
+      "wall_time_s": 3.131,
+      "load_time_ms": 305.59,
+      "prefill_ms": 53.84,
+      "prompt_tokens": 12,
+      "prefill_tok_s": 222.87,
+      "decode_ms": 2625.88,
+      "gen_tokens": 199,
+      "decode_tok_s": 75.78
+    },
+    {
+      "wall_time_s": 3.624,
+      "load_time_ms": 284.85,
+      "prefill_ms": 53.54,
+      "prompt_tokens": 12,
+      "prefill_tok_s": 224.14,
+      "decode_ms": 2699.3,
+      "gen_tokens": 199,
+      "decode_tok_s": 73.72
+    }
+  ],
+  "vexel_decode": [
+    {
+      "wall_time_s": 5.816,
+      "approx_tokens": 152,
+      "approx_decode_tok_s": 34.4
+    },
+    {
+      "wall_time_s": 5.81,
+      "approx_tokens": 152,
+      "approx_decode_tok_s": 34.4
+    },
+    {
+      "wall_time_s": 5.788,
+      "approx_tokens": 152,
+      "approx_decode_tok_s": 34.6
+    },
+    {
+      "wall_time_s": 5.799,
+      "approx_tokens": 152,
+      "approx_decode_tok_s": 34.5
+    },
+    {
+      "wall_time_s": 5.801,
+      "approx_tokens": 152,
+      "approx_decode_tok_s": 34.5
+    }
+  ],
+  "llama_prefill128": [
+    {
+      "wall_time_s": 1.096,
+      "load_time_ms": 273.75,
+      "prefill_ms": 221.77,
+      "prompt_tokens": 169,
+      "prefill_tok_s": 762.06,
+      "decode_ms": 119.33,
+      "gen_tokens": 9,
+      "decode_tok_s": 75.42
+    },
+    {
+      "wall_time_s": 1.086,
+      "load_time_ms": 284.96,
+      "prefill_ms": 222.68,
+      "prompt_tokens": 169,
+      "prefill_tok_s": 758.93,
+      "decode_ms": 118.12,
+      "gen_tokens": 9,
+      "decode_tok_s": 76.2
+    },
+    {
+      "wall_time_s": 1.082,
+      "load_time_ms": 278.33,
+      "prefill_ms": 222.54,
+      "prompt_tokens": 169,
+      "prefill_tok_s": 759.42,
+      "decode_ms": 118.05,
+      "gen_tokens": 9,
+      "decode_tok_s": 76.24
+    },
+    {
+      "wall_time_s": 1.079,
+      "load_time_ms": 287.93,
+      "prefill_ms": 223.19,
+      "prompt_tokens": 169,
+      "prefill_tok_s": 757.22,
+      "decode_ms": 118.5,
+      "gen_tokens": 9,
+      "decode_tok_s": 75.95
+    },
+    {
+      "wall_time_s": 1.078,
+      "load_time_ms": 284.1,
+      "prefill_ms": 221.72,
+      "prompt_tokens": 169,
+      "prefill_tok_s": 762.24,
+      "decode_ms": 114.17,
+      "gen_tokens": 9,
+      "decode_tok_s": 78.83
+    }
+  ],
+  "vexel_prefill128": [
+    {
+      "wall_time_s": 3.136,
+      "approx_tokens": 5,
+      "approx_decode_tok_s": 3.2
+    },
+    {
+      "wall_time_s": 3.175,
+      "approx_tokens": 5,
+      "approx_decode_tok_s": 3.2
+    },
+    {
+      "wall_time_s": 3.162,
+      "approx_tokens": 5,
+      "approx_decode_tok_s": 3.2
+    },
+    {
+      "wall_time_s": 3.17,
+      "approx_tokens": 5,
+      "approx_decode_tok_s": 3.2
+    },
+    {
+      "wall_time_s": 3.195,
+      "approx_tokens": 5,
+      "approx_decode_tok_s": 3.1
+    }
+  ],
+  "llama_prefill512": [
+    {
+      "wall_time_s": 1.578,
+      "load_time_ms": 300.22,
+      "prefill_ms": 827.06,
+      "prompt_tokens": 673,
+      "prefill_tok_s": 813.73,
+      "decode_ms": 122.98,
+      "gen_tokens": 9,
+      "decode_tok_s": 73.18
+    },
+    {
+      "wall_time_s": 1.59,
+      "load_time_ms": 291.69,
+      "prefill_ms": 840.72,
+      "prompt_tokens": 673,
+      "prefill_tok_s": 800.51,
+      "decode_ms": 125.01,
+      "gen_tokens": 9,
+      "decode_tok_s": 71.99
+    },
+    {
+      "wall_time_s": 1.608,
+      "load_time_ms": 284.78,
+      "prefill_ms": 844.5,
+      "prompt_tokens": 673,
+      "prefill_tok_s": 796.92,
+      "decode_ms": 125.59,
+      "gen_tokens": 9,
+      "decode_tok_s": 71.66
+    },
+    {
+      "wall_time_s": 1.582,
+      "load_time_ms": 299.71,
+      "prefill_ms": 850.2,
+      "prompt_tokens": 673,
+      "prefill_tok_s": 791.58,
+      "decode_ms": 124.51,
+      "gen_tokens": 9,
+      "decode_tok_s": 72.28
+    },
+    {
+      "wall_time_s": 1.598,
+      "load_time_ms": 300.46,
+      "prefill_ms": 863.63,
+      "prompt_tokens": 673,
+      "prefill_tok_s": 779.27,
+      "decode_ms": 123.15,
+      "gen_tokens": 9,
+      "decode_tok_s": 73.08
+    }
+  ],
+  "vexel_prefill512": [
+    {
+      "wall_time_s": 17.19,
+      "approx_tokens": 5,
+      "approx_decode_tok_s": 0.6
+    },
+    {
+      "wall_time_s": 17.073,
+      "approx_tokens": 5,
+      "approx_decode_tok_s": 0.6
+    },
+    {
+      "wall_time_s": 17.822,
+      "approx_tokens": 5,
+      "approx_decode_tok_s": 0.6
+    },
+    {
+      "wall_time_s": 18.851,
+      "approx_tokens": 5,
+      "approx_decode_tok_s": 0.5
+    },
+    {
+      "wall_time_s": 20.125,
+      "approx_tokens": 5,
+      "approx_decode_tok_s": 0.5
+    }
+  ],
+  "llama_load": [
+    {
+      "wall_time_s": 0.595,
+      "load_time_ms": 276.65,
+      "prefill_ms": 19.54,
+      "prompt_tokens": 2,
+      "prefill_tok_s": 102.38
+    },
+    {
+      "wall_time_s": 0.581,
+      "load_time_ms": 314.96,
+      "prefill_ms": 18.35,
+      "prompt_tokens": 2,
+      "prefill_tok_s": 109.01
+    },
+    {
+      "wall_time_s": 0.586,
+      "load_time_ms": 297.84,
+      "prefill_ms": 18.26,
+      "prompt_tokens": 2,
+      "prefill_tok_s": 109.52
+    }
+  ],
+  "vexel_load": [
+    {
+      "wall_time_s": 1.153,
+      "approx_tokens": 1,
+      "approx_decode_tok_s": 0.9
+    },
+    {
+      "wall_time_s": 1.085,
+      "approx_tokens": 1,
+      "approx_decode_tok_s": 0.9
+    },
+    {
+      "wall_time_s": 1.078,
+      "approx_tokens": 1,
+      "approx_decode_tok_s": 0.9
+    }
+  ]
+}
