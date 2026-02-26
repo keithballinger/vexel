@@ -44,9 +44,13 @@ adds batched quantized matmul for prefill, and benchmarks accuracy/performance t
     - M=1: 55 GFLOPS, M=32: 371 GFLOPS, M=128: 402 GFLOPS at 4096×4096.
     - All 7 production-size correctness tests pass with max_diff < 0.000006.
     - Created `q8_0_matmul_test.go` with basic, batched, prefill, and throughput tests.
-- [ ] Task: BF16 support
-    - Add `MatMulBF16` Metal kernel leveraging hardware BF16 on M3/M4.
-    - Fallback to F16 conversion on M1/M2.
+- [x] Task: BF16 support
+    - Added `matvec_bf16_nr2_f32` (M=1) and `matmul_bf16_batched_f32` (M>1) Metal kernels.
+    - NR2 pattern: 16 outputs per threadgroup. BF16→F32 via bit shift (works on all Apple Silicon).
+    - Added `tensor.BF16` QuantProfile and wired into runtime dispatch + loader.
+    - M=1: 75 GFLOPS, M=64: 654 GFLOPS, M=128: 788 GFLOPS at 4096×4096.
+    - All 7 production-size correctness tests pass with ZERO numerical difference.
+    - Created `bf16_matmul_test.go` with basic, batched, prefill, and throughput tests.
 
 ## Phase 3: Benchmarking & Validation
 - [ ] Task: Accuracy comparison
