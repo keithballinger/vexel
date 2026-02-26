@@ -11,12 +11,12 @@ This track completes the integration and enables speculative decoding for produc
     - Replace the nil stub in `speculative.go` with actual tensor-to-CPU extraction.
     - Read GPU logits via `backend.Sync()` + `backend.ToHost()`, convert to `[]float32`.
     - Handle vocabulary dimension correctly (slice to vocabSize).
-- [~] Task: Wire SpeculativeDecoder into scheduler
+- [x] Task: Wire SpeculativeDecoder into scheduler (30da016)
     - Add `SpeculativeConfig` field to `scheduler.Config`.
     - When a draft model is provided, scheduler uses `GenerateDraftTokens` + `VerifyDraftTokens`
       instead of single-token decode.
     - Update `runDecodeStep` to handle multi-token acceptance (advance position by accepted count).
-- [ ] Task: KV cache management for speculation
+- [~] Task: KV cache management for speculation
     - After verification rejects draft tokens, roll back KV cache to the last accepted position.
     - For simple GPUKVCache: overwrite entries at rejected positions on next forward pass.
     - For PagedKVCache: deallocate blocks beyond the accepted position.
