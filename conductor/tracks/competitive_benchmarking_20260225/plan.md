@@ -30,7 +30,7 @@ Sources:
     - Optionally install `MLC-LLM` if long-context benchmarks are needed.
     - Verify each engine can load and run the same GGUF/MLX model.
     - Document exact versions and build flags used.
-- [ ] Task: Build benchmark harness
+- [x] Task: Build benchmark harness
     - Create `benchmarks/run_benchmark.sh` — automated harness that runs all engines.
     - Standardize: same model, same prompt set, same hardware, same quantization.
     - Collect: decode tok/s, prefill tok/s, TTFT, ITL (P50/P99), peak RSS, model load time.
