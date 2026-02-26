@@ -14,7 +14,7 @@ on M3 Max for LLaMA 2 7B Q4_0) comes from two sources:
 Theoretical max on M3 Max (400 GB/s ÷ 3.6 GB weights) = ~111 tok/s.
 Target: reach 70-80% bandwidth utilization (~78-89 tok/s), competitive with llama.cpp.
 
-## Phase 1: Profiling & Measurement
+## Phase 1: Profiling & Measurement [checkpoint: eedb1ba]
 - [x] Task: Instrument kernel dispatch count
     - Created `dispatch_profiler.go` with DispatchProfiler struct and ForwardPassProfile.
     - Instrumented all 48 kernel dispatch methods in `backend.go` with RecordDispatch calls.
