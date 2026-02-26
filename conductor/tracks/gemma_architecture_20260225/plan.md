@@ -27,7 +27,7 @@ work. The main gaps are GeGLU, architecture detection, and Gemma 2's attention v
     - Config-level detection and GeGLU kernel thoroughly tested.
     - Full forward pass correctness deferred until model file is available.
 
-## Phase 2: Gemma 2 Attention Variants
+## Phase 2: Gemma 2 Attention Variants [checkpoint: 7295d6b]
 - [x] Task: Logit soft-capping
     - Added `AttentionLogitSoftCap float32` to `ModelConfig` (0=disabled, 30.0 for gemma2).
     - Created `SoftCapAttentionOps` optional interface in `backend/backend.go`.
