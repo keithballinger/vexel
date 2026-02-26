@@ -26,7 +26,7 @@
     - **Fix:** Changed both functions to use `get_encoder()`/`finish_encode()` to participate in command buffer batching, matching all other kernel dispatch functions.
     - **Verification:** All 3 prefill regression tests pass (TestPrefillVsSequentialDecode, TestPrefillMinimal, TestPrefillFP32VsFP16). Max logit diff between sequential and prefill: 0.005643.
 
-## Phase 3: Verification
+## Phase 3: Verification [checkpoint: 6df34d5]
 - [x] Task: Throughput Benchmark
     - Measure `tokens/second` improvements for various sequence lengths/batches.
     - **Original results (TinyLlama 1.1B, no longer on disk):**
