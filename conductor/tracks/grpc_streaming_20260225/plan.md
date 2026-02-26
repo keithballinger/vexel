@@ -52,3 +52,5 @@ Checkpoint: bb7fd3a
     - Benchmark gRPC vs HTTP/SSE latency for single-token responses.
     - Benchmark concurrent streaming throughput (10, 50, 100 concurrent streams).
     - Measure gRPC overhead vs direct scheduler access.
+
+Checkpoint: 051eafd
