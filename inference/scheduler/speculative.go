@@ -85,7 +85,15 @@ func (sd *SpeculativeDecoder) Metrics() SpeculativeMetrics {
 
 // GenerateDraftTokens generates K tokens using the draft model.
 // Returns the draft tokens and their probabilities.
+// Deprecated: Use GenerateDraftTokensFrom which accepts the initial input token.
 func (sd *SpeculativeDecoder) GenerateDraftTokens(startPos int) ([]int, []float32, error) {
+	return nil, nil, nil // Use GenerateDraftTokensFrom instead
+}
+
+// GenerateDraftTokensFrom generates K tokens using the draft model,
+// starting from the given input token at the given position.
+// Returns the draft tokens and their probabilities.
+func (sd *SpeculativeDecoder) GenerateDraftTokensFrom(inputToken int, startPos int) ([]int, []float32, error) {
 	draftTokens := make([]int, 0, sd.config.NumDraftTokens)
 	draftProbs := make([]float32, 0, sd.config.NumDraftTokens)
 
@@ -97,21 +105,12 @@ func (sd *SpeculativeDecoder) GenerateDraftTokens(startPos int) ([]int, []float3
 		return nil, nil, nil // No GPU cache, skip speculation
 	}
 
+	currentToken := inputToken
 	currentPos := startPos
 
 	for i := 0; i < sd.config.NumDraftTokens; i++ {
-		// Get the last generated token as input (or prompt token if first)
-		var inputToken int
-		if len(draftTokens) > 0 {
-			inputToken = draftTokens[len(draftTokens)-1]
-		} else {
-			// Use the token at startPos - this would come from the sequence
-			// For now, skip if we don't have context
-			break
-		}
-
 		// Run draft model decode
-		logits, err := sd.draftModel.DecodeWithGPUKV([]int{inputToken}, currentPos)
+		logits, err := sd.draftModel.DecodeWithGPUKV([]int{currentToken}, currentPos)
 		if err != nil {
 			return draftTokens, draftProbs, err
 		}
@@ -129,6 +128,7 @@ func (sd *SpeculativeDecoder) GenerateDraftTokens(startPos int) ([]int, []float3
 		draftTokens = append(draftTokens, tokenID)
 		draftProbs = append(draftProbs, tokenProb)
 
+		currentToken = tokenID
 		currentPos++
 	}
 
