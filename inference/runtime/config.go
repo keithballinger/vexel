@@ -306,6 +306,31 @@ func (c ModelConfig) ScratchBytes(maxBatchSize int) int64 {
 	return peak * bytesPerElem
 }
 
+// TotalArenaBytes calculates the total scratch arena capacity needed for a forward pass
+// with up to maxBatchSize tokens. This accounts for ALL allocations that decode functions
+// (DecodeWithGPUKV, DecodeStep, PrefillWithPagedKV, etc.) make from the scratch arena:
+//
+//   - Token IDs buffer:     maxBatchSize * 4 bytes (int32)
+//   - Hidden state buffer:  maxBatchSize * HiddenSize * 4 bytes (float32)
+//   - Layer scratch buffer: ScratchBytes(maxBatchSize)
+//   - Output logits buffer: VocabSize * 4 bytes (float32, last-token only)
+//
+// The maxBatchSize should be the maximum number of tokens in any single forward pass,
+// including prefill (where batchSize = prompt length). Use max(maxPromptLen, maxGenBatch).
+func (c ModelConfig) TotalArenaBytes(maxBatchSize int) int64 {
+	tokenBytes := int64(maxBatchSize) * 4                          // int32 token IDs
+	stateBytes := int64(maxBatchSize) * int64(c.HiddenSize) * 4   // [batch, hidden] float32
+	scratchBytes := c.ScratchBytes(maxBatchSize)                   // layer scratch (Q/K/V/scores/gate/up)
+	logitsBytes := int64(c.VocabSize) * 4                          // [1, vocab] float32 output logits
+
+	total := tokenBytes + stateBytes + scratchBytes + logitsBytes
+
+	// Add 10% headroom for alignment and minor additional allocations
+	total = total + total/10
+
+	return total
+}
+
 // MemoryPlan aggregates memory usage estimates into a comprehensive plan.
 func (c ModelConfig) MemoryPlan(batchSize int, contextLen int, weightsProfile tensor.QuantProfile) MemoryPlan {
 	weights := c.WeightsBytes(weightsProfile)

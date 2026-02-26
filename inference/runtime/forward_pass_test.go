@@ -42,10 +42,7 @@ func loadTestModel(t *testing.T, maxTokens int) (*ModelRuntime, *metal.Backend, 
 	gf.Close()
 
 	memCtx := memory.NewInferenceContext(tensor.Metal)
-	scratchSize := modelCfg.ScratchBytes(maxTokens)
-	logitsSize := int64(modelCfg.VocabSize) * 4
-	attnSize := int64(maxTokens * maxTokens * 4)
-	totalScratch := scratchSize + logitsSize*2 + attnSize
+	totalScratch := modelCfg.TotalArenaBytes(maxTokens)
 	memCtx.AddArenaWithBackend(memory.Scratch, int(totalScratch), be.Alloc)
 
 	model, err := NewModelRuntime(be, memCtx, nil, modelCfg)

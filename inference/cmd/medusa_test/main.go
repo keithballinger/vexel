@@ -103,11 +103,8 @@ func main() {
 
 	// Create context and runtime
 	memCtx := memory.NewInferenceContext(tensor.Metal)
-	maxPrefillTokens := 256
-	scratchSize := cfg.ScratchBytes(maxPrefillTokens)
-	logitsSize := int64(cfg.VocabSize) * 4
-	attnScoresSize := int64(maxPrefillTokens * maxPrefillTokens * 4)
-	totalScratch := scratchSize + logitsSize*2 + attnScoresSize
+	maxPrefillTokens := 2048 // must cover max prompt length
+	totalScratch := cfg.TotalArenaBytes(maxPrefillTokens)
 	memCtx.AddArenaWithBackend(memory.Scratch, int(totalScratch), gpuBackend.Alloc)
 
 	rt, err := runtime.NewModelRuntime(gpuBackend, memCtx, nil, cfg)

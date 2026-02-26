@@ -46,10 +46,8 @@ func setupModel(t *testing.T, forceFP32KV bool) (*runtime.ModelRuntime, *metal.B
 	}
 
 	memCtx := memory.NewInferenceContext(tensor.Metal)
-	maxTokens := 256
-	scratchSize := cfg.ScratchBytes(maxTokens)
-	logitsSize := int64(cfg.VocabSize) * 4
-	totalScratch := scratchSize + logitsSize*2 + int64(maxTokens*maxTokens*4)
+	maxTokens := 2048 // must cover max prefill prompt length
+	totalScratch := cfg.TotalArenaBytes(maxTokens)
 	memCtx.AddArenaWithBackend(memory.Scratch, int(totalScratch), gpuBackend.Alloc)
 
 	model, err := runtime.NewModelRuntime(gpuBackend, memCtx, nil, cfg)

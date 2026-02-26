@@ -46,11 +46,18 @@ func initModel(modelPath string, maxTokens int, verbose bool) (*runtime.ModelRun
 	modelCfg := runtime.ModelConfigFromGGUF(gf.GetModelConfig())
 	gf.Close()
 
+	// Arena must be sized for the maximum batch size in any forward pass.
+	// During prefill, batchSize = prompt length, which can be up to maxContextLen.
+	// During decode, batchSize = 1 (or small batch for concurrent requests).
+	// Use the KV cache context length as the upper bound for prefill.
+	maxContextLen := 2048 // matches CreateGPUKVCache below
+	maxBatchSize := maxContextLen
+	if maxTokens > maxBatchSize {
+		maxBatchSize = maxTokens
+	}
+
 	memCtx := memory.NewInferenceContext(tensor.Metal)
-	scratchSize := modelCfg.ScratchBytes(maxTokens)
-	logitsSize := int64(modelCfg.VocabSize) * 4
-	attnSize := int64(maxTokens * maxTokens * 4)
-	totalScratch := scratchSize + logitsSize*2 + attnSize
+	totalScratch := modelCfg.TotalArenaBytes(maxBatchSize)
 	memCtx.AddArenaWithBackend(memory.Scratch, int(totalScratch), gpuBackend.Alloc)
 
 	model, err := runtime.NewModelRuntime(gpuBackend, memCtx, nil, modelCfg)
@@ -70,7 +77,7 @@ func initModel(modelPath string, maxTokens int, verbose bool) (*runtime.ModelRun
 		gpuBackend.Close()
 		return nil, nil, nil, fmt.Errorf("copy weights: %w", err)
 	}
-	model.CreateGPUKVCache(2048)
+	model.CreateGPUKVCache(maxContextLen)
 
 	tokPath := filepath.Join(filepath.Dir(modelPath), "tokenizer.json")
 	tok, err := tokenizer.Load(tokPath)
@@ -92,11 +99,14 @@ func loadDraftModel(draftPath string, gpuBackend *metal.Backend, maxTokens int, 
 	draftCfg := runtime.ModelConfigFromGGUF(gf.GetModelConfig())
 	gf.Close()
 
+	maxContextLen := 2048
+	maxBatchSize := maxContextLen
+	if maxTokens > maxBatchSize {
+		maxBatchSize = maxTokens
+	}
+
 	memCtx := memory.NewInferenceContext(tensor.Metal)
-	scratchSize := draftCfg.ScratchBytes(maxTokens)
-	logitsSize := int64(draftCfg.VocabSize) * 4
-	attnSize := int64(maxTokens * maxTokens * 4)
-	totalScratch := scratchSize + logitsSize*2 + attnSize
+	totalScratch := draftCfg.TotalArenaBytes(maxBatchSize)
 	memCtx.AddArenaWithBackend(memory.Scratch, int(totalScratch), gpuBackend.Alloc)
 
 	draft, err := runtime.NewModelRuntime(gpuBackend, memCtx, nil, draftCfg)
