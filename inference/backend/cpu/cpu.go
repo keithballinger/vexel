@@ -379,6 +379,25 @@ func (b *CPUBackend) GELU(x, out tensor.DevicePtr, n int) {
 	}
 }
 
+// GELUMul performs fused gelu(gate) * up operation (GeGLU for Gemma).
+func (b *CPUBackend) GELUMul(gate, up, out tensor.DevicePtr, n int) {
+	gateData := ptrToFloat32Slice(gate, n)
+	upData := ptrToFloat32Slice(up, n)
+	outData := ptrToFloat32Slice(out, n)
+
+	const sqrtTwoPi = 0.7978845608
+	const coeff = 0.044715
+
+	for i := 0; i < n; i++ {
+		val := gateData[i]
+		x3 := val * val * val
+		tanhArg := sqrtTwoPi * (val + coeff*x3)
+		tanhVal := float32(math.Tanh(float64(tanhArg)))
+		geluVal := 0.5 * val * (1.0 + tanhVal)
+		outData[i] = geluVal * upData[i]
+	}
+}
+
 // AddBias performs row-wise bias addition: out[i] = x[i] + bias[i % cols]
 func (b *CPUBackend) AddBias(x, bias, out tensor.DevicePtr, rows, cols int) {
 	xData := ptrToFloat32Slice(x, rows*cols)

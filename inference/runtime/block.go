@@ -527,6 +527,7 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 			b.matMulTransposedWithBias(gatePtr, b.W2, b.W2Bias, normOutPtr, seqLen, w2Dim, intermediateSize)
 		}
 	} else {
+		// Gated MLP: SwiGLU (LLaMA) or GeGLU (Gemma)
 		if !b.W1.DevicePtr().IsNil() {
 			w1Dim := b.W1.Shape().Dims()[0]
 			b.matMulTransposed(normOutPtr, b.W1, gatePtr, seqLen, w1Dim, hiddenSize)
@@ -535,7 +536,13 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 			w3Dim := b.W3.Shape().Dims()[0]
 			b.matMulTransposed(normOutPtr, b.W3, upPtr, seqLen, w3Dim, hiddenSize)
 		}
-		b.backend.SiLUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
+		if b.MLPType == MLPGeGLU {
+			if b.geluOps != nil {
+				b.geluOps.GELUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
+			}
+		} else {
+			b.backend.SiLUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
+		}
 		if !b.W2.DevicePtr().IsNil() {
 			w2Dim := b.W2.Shape().Dims()[0]
 			b.matMulTransposed(gatePtr, b.W2, normOutPtr, seqLen, w2Dim, intermediateSize)
@@ -794,7 +801,8 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 			b.debugBlockTensor(fmt.Sprintf("L%d normOut after W2", layerIdx), normOutPtr, seqLen*hiddenSize)
 		}
 	} else {
-		// LLaMA-style SwiGLU MLP: gate = SiLU(normOut @ W1), up = normOut @ W3, out = (gate * up) @ W2
+		// Gated MLP: gate = activation(normOut @ W1), up = normOut @ W3, out = (gate * up) @ W2
+		// SwiGLU (LLaMA): activation = SiLU; GeGLU (Gemma): activation = GELU
 		if !b.W1.DevicePtr().IsNil() {
 			w1Dim := b.W1.Shape().Dims()[0]
 			b.matMulTransposed(normOutPtr, b.W1, gatePtr, seqLen, w1Dim, hiddenSize)
@@ -803,7 +811,13 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 			w3Dim := b.W3.Shape().Dims()[0]
 			b.matMulTransposed(normOutPtr, b.W3, upPtr, seqLen, w3Dim, hiddenSize)
 		}
-		b.backend.SiLUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
+		if b.MLPType == MLPGeGLU {
+			if b.geluOps != nil {
+				b.geluOps.GELUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
+			}
+		} else {
+			b.backend.SiLUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
+		}
 		if !b.W2.DevicePtr().IsNil() {
 			w2Dim := b.W2.Shape().Dims()[0]
 			b.matMulTransposed(gatePtr, b.W2, normOutPtr, seqLen, w2Dim, intermediateSize)
@@ -1516,11 +1530,12 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			}
 		}
 	} else {
-		// SwiGLU MLP (LLaMA, Mistral): gate = SiLU(x @ W1) * (x @ W3), out = gate @ W2
-		// Fused MLP for FFN (only for RMSNorm + Q4_0 models, decode only)
+		// Gated MLP: SwiGLU (LLaMA/Mistral) or GeGLU (Gemma)
+		// Fused MLP for FFN (only for RMSNorm + Q4_0 SwiGLU models, decode only)
 		fuseMLP := b.plan == nil || b.plan.Fusion.FuseMLP
 		canFuseFFN := fuseMLP && seqLen == 1 && b.fusedOps != nil &&
 			b.NormType == NormRMSNorm &&
+			b.MLPType == MLPSwiGLU && // Fused kernel uses SiLU, not GELU
 			b.W1.QuantProfile() == tensor.Q4_0 &&
 			b.W3.QuantProfile() == tensor.Q4_0
 
@@ -1582,13 +1597,21 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				b.debugBlockTensor(fmt.Sprintf("L%d up after W3", layerIdx), upPtr, seqLen*intermediateSize)
 			}
 
-			profileOp("SiLUMul", func() {
-				b.backend.SiLUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
-			})
+			if b.MLPType == MLPGeGLU {
+				profileOp("GELUMul", func() {
+					if b.geluOps != nil {
+						b.geluOps.GELUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
+					}
+				})
+			} else {
+				profileOp("SiLUMul", func() {
+					b.backend.SiLUMul(gatePtr, upPtr, gatePtr, seqLen*intermediateSize)
+				})
+			}
 		}
 		if debugThisLayerPost {
 			b.backend.Sync()
-			b.debugBlockTensor(fmt.Sprintf("L%d gate after SiLU*Mul", layerIdx), gatePtr, seqLen*intermediateSize)
+			b.debugBlockTensor(fmt.Sprintf("L%d gate after activation*Mul", layerIdx), gatePtr, seqLen*intermediateSize)
 		}
 
 		profileOp("W2", func() {

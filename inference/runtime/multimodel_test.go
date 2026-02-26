@@ -152,6 +152,18 @@ func TestModelConfigFromGGUF_ArchitectureDetection(t *testing.T) {
 			wantNorm: NormLayerNorm, wantMLP: MLPGELU,
 			wantBias: true, wantParallel: false, wantRoPENeox: true,
 		},
+		{
+			name:     "gemma",
+			arch:     "gemma",
+			wantNorm: NormRMSNorm, wantMLP: MLPGeGLU,
+			wantBias: false, wantParallel: false, wantRoPENeox: false,
+		},
+		{
+			name:     "gemma2",
+			arch:     "gemma2",
+			wantNorm: NormRMSNorm, wantMLP: MLPGeGLU,
+			wantBias: false, wantParallel: false, wantRoPENeox: false,
+		},
 	}
 
 	for _, tt := range tests {

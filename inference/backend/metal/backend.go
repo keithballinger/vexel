@@ -73,6 +73,7 @@ type Backend struct {
 	rmsnormPipeline                 unsafe.Pointer
 	layernormPipeline               unsafe.Pointer
 	geluPipeline                    unsafe.Pointer
+	geluMulPipeline                 unsafe.Pointer
 	addBiasPipeline                 unsafe.Pointer
 	addRMSNormPipeline              unsafe.Pointer
 	ropePipeline                    unsafe.Pointer
@@ -206,6 +207,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.rmsnormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_f32"))
 	b.layernormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("layernorm_f32"))
 	b.geluPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("gelu_f32"))
+	b.geluMulPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("gelu_mul_f32"))
 	b.addBiasPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_bias_f32"))
 	b.addRMSNormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_rmsnorm_f32"))
 	b.ropePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_f32"))
@@ -836,6 +838,14 @@ func (b *Backend) GELU(x, out tensor.DevicePtr, n int) {
 	b.profiler.RecordDispatch("GELU")
 	C.metal_gelu_f32(b.queue, b.geluPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
+}
+
+// GELUMul performs fused gelu(gate) * up operation (GeGLU for Gemma).
+func (b *Backend) GELUMul(gate, up, out tensor.DevicePtr, n int) {
+	b.profiler.RecordDispatch("GELUMul")
+	C.metal_gelu_mul_f32(b.queue, b.geluMulPipeline,
+		unsafe.Pointer(gate.Addr()), unsafe.Pointer(up.Addr()),
+		unsafe.Pointer(out.Addr()), C.int(n))
 }
 
 // AddBias adds bias to each row: out[row, col] = x[row, col] + bias[col]

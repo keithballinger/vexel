@@ -38,6 +38,9 @@ const (
 	// MLPGELU uses GELU activation with 2 projections (Phi, GPT-2).
 	// Structure: down(gelu(up(x)))
 	MLPGELU
+	// MLPGeGLU uses GELU-gated linear unit with 3 projections (Gemma).
+	// Structure: down(gelu(gate(x)) * up(x))
+	MLPGeGLU
 )
 
 func (m MLPType) String() string {
@@ -46,6 +49,8 @@ func (m MLPType) String() string {
 		return "SwiGLU"
 	case MLPGELU:
 		return "GELU"
+	case MLPGeGLU:
+		return "GeGLU"
 	default:
 		return "Unknown"
 	}
@@ -120,6 +125,44 @@ func Phi2() ModelConfig {
 		MLPType:           MLPGELU,
 		HasBias:           true,
 		ParallelResidual:  true, // Phi uses parallel residual: x + attn(norm(x)) + mlp(norm(x))
+	}
+}
+
+// Gemma2B returns the configuration for the Gemma 2B model.
+func Gemma2B() ModelConfig {
+	return ModelConfig{
+		HiddenSize:        2048,
+		IntermediateSize:  16384,
+		NumHiddenLayers:   18,
+		NumAttentionHeads: 8,
+		NumKeyValueHeads:  1, // Gemma 2B uses MQA
+		VocabSize:         256128,
+		MaxSeqLen:         8192,
+		RoPETheta:         10000.0,
+		RMSNormEPS:        1e-6,
+		DType:             tensor.Float32,
+		NormType:          NormRMSNorm,
+		MLPType:           MLPGeGLU,
+		HasBias:           false,
+	}
+}
+
+// Gemma7B returns the configuration for the Gemma 7B model.
+func Gemma7B() ModelConfig {
+	return ModelConfig{
+		HiddenSize:        3072,
+		IntermediateSize:  24576,
+		NumHiddenLayers:   28,
+		NumAttentionHeads: 16,
+		NumKeyValueHeads:  16, // Gemma 7B uses MHA
+		VocabSize:         256128,
+		MaxSeqLen:         8192,
+		RoPETheta:         10000.0,
+		RMSNormEPS:        1e-6,
+		DType:             tensor.Float32,
+		NormType:          NormRMSNorm,
+		MLPType:           MLPGeGLU,
+		HasBias:           false,
 	}
 }
 
@@ -279,6 +322,11 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		hasBias = true
 		ropeNeox = true // GPT-NeoX uses NEOX-style RoPE (split pairs)
 		// GPT-2/NeoX use serial residual
+	case "gemma", "gemma2":
+		normType = NormRMSNorm
+		mlpType = MLPGeGLU
+		hasBias = false
+		// Gemma uses LLaMA-style RoPE (interleaved pairs)
 	case "llama", "mistral", "qwen2":
 		// Default LLaMA-family settings
 		normType = NormRMSNorm

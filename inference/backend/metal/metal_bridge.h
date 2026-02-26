@@ -155,6 +155,10 @@ void metal_layernorm_f32(void* queue, void* pipeline,
 void metal_gelu_f32(void* queue, void* pipeline,
                     void* x, void* out, int n);
 
+// Fused GELU-gated multiply: out = GELU(gate) * up (GeGLU for Gemma)
+void metal_gelu_mul_f32(void* queue, void* pipeline,
+                        void* gate, void* up, void* out, int n);
+
 // Add bias: out = x + bias (broadcasted across rows)
 void metal_add_bias_f32(void* queue, void* pipeline,
                         void* x, void* bias, void* out,

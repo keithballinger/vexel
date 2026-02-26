@@ -2196,6 +2196,28 @@ kernel void gelu_f16(
     out[gid] = half(0.5f * val * (1.0f + tanh_val));
 }
 
+// Fused GELU-gated multiply for GeGLU activation (Gemma).
+// out[i] = GELU(gate[i]) * up[i]
+kernel void gelu_mul_f32(
+    device const float* gate [[buffer(0)]],
+    device const float* up [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    float val = gate[gid];
+    float gelu_val;
+    if (val > 10.0f) {
+        gelu_val = val;
+    } else if (val < -10.0f) {
+        gelu_val = 0.0f;
+    } else {
+        float x3 = val * val * val;
+        float tanh_arg = 0.7978845608f * (val + 0.044715f * x3);
+        gelu_val = 0.5f * val * (1.0f + tanh(tanh_arg));
+    }
+    out[gid] = gelu_val * up[gid];
+}
+
 // =============================================================================
 // ADDBIAS KERNEL (for architectures with bias terms)
 // =============================================================================
@@ -6007,6 +6029,20 @@ void metal_gelu_f32(void* queuePtr, void* pipelinePtr,
 
     NSArray* buffers = @[
         (__bridge id<MTLBuffer>)x,
+        (__bridge id<MTLBuffer>)out
+    ];
+
+    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+void metal_gelu_mul_f32(void* queuePtr, void* pipelinePtr,
+                        void* gate, void* up, void* out, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)gate,
+        (__bridge id<MTLBuffer>)up,
         (__bridge id<MTLBuffer>)out
     ];
 

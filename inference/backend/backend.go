@@ -170,12 +170,16 @@ type LayerNormOps interface {
 }
 
 // GELUOps is an optional interface for backends that support GELU activation.
-// Required for Phi, GPT-2, BERT, and other architectures that use GELU instead of SiLU.
+// Required for Phi, GPT-2, BERT, Gemma, and other architectures that use GELU.
 type GELUOps interface {
 	// GELU applies the Gaussian Error Linear Unit activation function.
 	// Uses fast approximation: 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
 	// x: [n], out: [n]
 	GELU(x, out tensor.DevicePtr, n int)
+
+	// GELUMul performs fused gelu(gate) * up operation (for GeGLU activation in Gemma).
+	// gate: [n], up: [n], out: [n]
+	GELUMul(gate, up, out tensor.DevicePtr, n int)
 }
 
 // BiasOps is an optional interface for backends that support bias addition.
