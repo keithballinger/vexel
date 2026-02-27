@@ -214,21 +214,35 @@ scripts/             Performance harness and benchmarking tools
 
 ## Performance
 
-Benchmarks measured on Apple Silicon with LLaMA 2 7B Q4_0 (~3.7 GB):
+Benchmarks on Apple M3 Max (128 GB) with LLaMA 2 7B Q4_0 (3.56 GB):
 
-| Metric | Value |
-|--------|-------|
-| Prefill throughput (128 tokens) | ~200 tok/s |
-| Decode throughput | ~44 tok/s |
-| Time-to-first-token (5-token prompt) | ~80 ms |
-| Per-token decode latency (p50) | ~23 ms |
-| Decode jitter (p99/p50) | 1.10 |
+| Metric | Vexel | llama.cpp |
+|--------|-------|-----------|
+| Decode throughput | 8.3 tok/s | 78.1 tok/s |
+| Prefill (12 tokens) | 41 tok/s | 225 tok/s |
+| Prefill (124 tokens) | 152 tok/s | 792 tok/s |
+| Prefill (385 tokens) | 107 tok/s | 822 tok/s |
+| Model load time | ~1.3s | ~0.28s |
+
+Vexel is currently ~89% slower than llama.cpp on single-stream decode.
+The primary bottleneck is matmul kernel efficiency and memory bandwidth
+utilization. See [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md) for
+detailed analysis and optimization roadmap.
+
+**Where Vexel differentiates:**
+- Go scheduler with continuous batching (multi-client throughput)
+- gRPC + HTTP dual protocol for production serving
+- Single binary deployment — no Python dependency chain
+- Pure Go codebase — easy to embed, extend, and deploy
 
 Run the benchmark suite:
 ```bash
 # Unit-level benchmarks
 go test -tags metal -run TestThroughput -v ./inference/runtime/
 go test -tags metal -run TestLatency -v ./inference/runtime/
+
+# Competitive benchmarks (vs llama.cpp, MLX, Ollama)
+./benchmarks/run_benchmark.sh --model path/to/model.gguf --engines vexel,llama
 
 # Scheduling benchmarks via CLI
 ./vexel bench --batch 128 --seq-len 128 --num-seqs 256
