@@ -14,9 +14,9 @@ import (
 	"vexel/inference/tensor"
 )
 
-// skipMidLayerSync controls whether to skip the mid-layer sync.
-// Set VEXEL_SKIP_MID_SYNC=1 to test without the sync.
-var skipMidLayerSync = os.Getenv("VEXEL_SKIP_MID_SYNC") == "1"
+// skipMidLayerSync is no longer needed — memory barriers replace the mid-layer batch split.
+// Kept for backward compatibility but unused.
+var _ = os.Getenv("VEXEL_SKIP_MID_SYNC")
 
 // debugBlockTensor prints stats about a tensor for block debugging
 func (b *BlockRuntime) debugBlockTensor(name string, ptr tensor.DevicePtr, numElements int) {
@@ -967,21 +967,27 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	}
 
 	// Use command buffer batching if available (and not profiling - profiling needs sync points)
-	// Note: Batching disabled - causes incorrect output due to Metal memory hazards
+	// Batching encodes all operations per layer into one command buffer, reducing ~10
+	// waitUntilCompleted calls per layer to just 1 (via EndBatch). Memory barriers
+	// between dependent dispatches ensure correct scratch buffer visibility.
 	useBatching := b.batcher != nil
 	// Profiler disables batching to measure individual kernel times
 	if os.Getenv("VEXEL_GPU_PROFILE") == "1" {
-		useBatching = false
-	}
-	// Disable batching when scratch allocator is active — all intermediates share one
-	// MTLBuffer and Metal doesn't insert memory barriers within a single command buffer.
-	if b.scratchAlloc != nil {
 		useBatching = false
 	}
 
 	if useBatching {
 		b.batcher.BeginBatch()
 		defer b.batcher.EndBatch()
+	}
+
+	// barrier inserts a buffer-scope memory barrier when batching is active.
+	// Required between dispatches that share scratch buffer data (write→read dependency).
+	// No-op when batching is off (separate command buffers are automatically serialized).
+	barrier := func() {
+		if useBatching {
+			b.batcher.MemoryBarrier()
+		}
 	}
 
 	// Debug Layer 15 specifically at pos >= 4 where NaN appears
@@ -1209,6 +1215,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	}
 
 	// 3. RoPE - Apply to Q and K
+	// Barrier: RoPE reads qPtr, kPtr written by QKV projections above (scratch buffer)
+	barrier()
 	profileOp("RoPE", func() {
 		if useFP16Path {
 			// FP16 path: apply RoPE directly to FP16 Q and K
@@ -1235,15 +1243,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	}
 
 	// 4. Append K/V to GPU cache and get pointers for SDPA
-	// This uses GPU-to-GPU copy - no CPU roundtrip!
-	// NOTE: Mid-layer sync is required for correct output. Without it, the encoder
-	// ordering causes incorrect results. The sync commits the current batch and
-	// starts a new one. Investigation ongoing - see docs/llama_cpp_kernel_analysis.md
-	// Set VEXEL_SKIP_MID_SYNC=1 to test without the sync.
-	if useBatching && !skipMidLayerSync {
-		b.batcher.EndBatch()
-		b.batcher.BeginBatch()
-	}
+	// Barrier: KV cache reads kPtr, vPtr written by RoPE (scratch buffer)
+	barrier()
 
 	var fullKPtr, fullVPtr tensor.DevicePtr
 	var fullSeqLen int
@@ -1414,6 +1415,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		woOutputPtr = upPtr
 	}
 
+	// Barrier: Wo reads attnOutPtr written by SDPA (scratch buffer)
+	barrier()
 	profileOp("Wo", func() {
 		if !b.Wo.DevicePtr().IsNil() {
 			oDim := b.Wo.Shape().Dims()[0]
@@ -1441,6 +1444,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	// For parallel residual, we skip Add1 and do a combined add at the end
 	// For SwiGLU with RMSNorm + fusedOps: defer Add1 to fuse with RMSNorm2
 	// via AddRMSNorm kernel (saves 1 dispatch/layer = 32 dispatches total)
+	// Barrier: Add1/AddRMSNorm reads normOutPtr written by Wo (scratch buffer)
+	barrier()
 	fuseAddRMSNorm := b.plan == nil || b.plan.Fusion.FuseAddRMSNorm
 	canFuseAdd1Norm := fuseAddRMSNorm && !b.ParallelResidual && b.MLPType != MLPGELU &&
 		b.NormType == NormRMSNorm && b.fusedOps != nil
@@ -1472,6 +1477,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			b.debugBlockTensor(fmt.Sprintf("L%d normOutPtr before W1", layerIdx), normOutPtr, seqLen*hiddenSize)
 		}
 
+		// Barrier: W1 reads normOutPtr written by FFNNorm (or shared from AttnNorm)
+		barrier()
 		profileOp("W1", func() {
 			if !b.W1.DevicePtr().IsNil() {
 				w1Dim := b.W1.Shape().Dims()[0]
@@ -1512,6 +1519,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			}
 		}
 
+		// Barrier: GELU reads gatePtr written by W1
+		barrier()
 		profileOp("GELU", func() {
 			if b.geluOps != nil {
 				b.geluOps.GELU(gatePtr, gatePtr, seqLen*intermediateSize)
@@ -1640,6 +1649,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				}
 			}
 		}
+		// Barrier: W2 reads gatePtr written by GELU
+		barrier()
 		profileOp("W2", func() {
 			if !b.W2.DevicePtr().IsNil() {
 				w2Dim := b.W2.Shape().Dims()[0]
@@ -1707,6 +1718,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 					b.backend.RMSNorm(xPtr, b.FFNNorm.DevicePtr(), normOutPtr, 1, hiddenSize, float32(b.RMSNormEPS))
 				})
 			}
+			// Barrier: FusedMLP reads normOutPtr written by AddRMSNorm/RMSNorm2
+			barrier()
 			profileOp("FusedMLP", func() {
 				b.fusedOps.MatMulQ4_0_FusedMLP(normOutPtr, b.W1.DevicePtr(), b.W3.DevicePtr(), gatePtr, 1, w1Dim, hiddenSize)
 			})
@@ -1729,6 +1742,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				b.debugBlockTensor(fmt.Sprintf("L%d FFN normOut (after RMSNorm2)", layerIdx), normOutPtr, seqLen*hiddenSize)
 			}
 
+			// Barrier: W1/W3 read normOutPtr written by AddRMSNorm/RMSNorm2
+			barrier()
 			profileOp("W1", func() {
 				if !b.W1.DevicePtr().IsNil() {
 					w1Dim := b.W1.Shape().Dims()[0]
@@ -1751,6 +1766,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				b.debugBlockTensor(fmt.Sprintf("L%d up after W3", layerIdx), upPtr, seqLen*intermediateSize)
 			}
 
+			// Barrier: SiLUMul/GELUMul reads gatePtr, upPtr written by W1, W3
+			barrier()
 			if b.MLPType == MLPGeGLU {
 				profileOp("GELUMul", func() {
 					if b.geluOps != nil {
@@ -1768,6 +1785,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			b.debugBlockTensor(fmt.Sprintf("L%d gate after activation*Mul", layerIdx), gatePtr, seqLen*intermediateSize)
 		}
 
+		// Barrier: W2 reads gatePtr written by FusedMLP or SiLUMul/GELUMul
+		barrier()
 		profileOp("W2", func() {
 			if !b.W2.DevicePtr().IsNil() {
 				w2Dim := b.W2.Shape().Dims()[0]
@@ -1789,6 +1808,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	}
 
 	// 10. Final residual add
+	// Barrier: Add2 reads normOutPtr written by W2 (scratch buffer)
+	barrier()
 	// For parallel residual (Phi): x = x + attn_output + mlp_output (combined add)
 	// For serial residual (LLaMA): x = x + mlp_output (attn was already added in Add1)
 	if b.ParallelResidual {
@@ -1797,9 +1818,9 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		// mlpOutput is in normOutPtr
 		profileOp("Add2_Parallel", func() {
 			b.backend.Add(xPtr, woOutputPtr, xPtr, seqLen*hiddenSize) // x += attn_output
-			// Sync required: second Add reads x which was just written by first Add
-			// Without this sync, race condition causes NaN (observed at L12 pos=6 for Phi-2)
-			b.backend.Sync()
+			// Barrier required: second Add reads x which was just written by first Add.
+			// Without this barrier, race condition causes NaN (observed at L12 pos=6 for Phi-2).
+			barrier()
 			b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize) // x += mlp_output
 		})
 	} else {

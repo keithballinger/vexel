@@ -27,6 +27,10 @@ type Batcher interface {
 	BeginBatch()
 	// EndBatch commits all batched operations.
 	EndBatch()
+	// MemoryBarrier inserts a buffer-scope memory barrier in the current batch.
+	// Required between dependent dispatches that share the same MTLBuffer
+	// (e.g., scratch allocator). No-op outside batch mode.
+	MemoryBarrier()
 }
 
 // BufferCopier is an optional interface for backends that support GPU-to-GPU buffer copies.

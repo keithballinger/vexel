@@ -5475,6 +5475,16 @@ void metal_end_batch(void) {
     g_batchQueue = nil;
 }
 
+// Insert a buffer-scope memory barrier on the current batch encoder.
+// This ensures all buffer writes from preceding dispatches are visible to subsequent reads.
+// Required when multiple dispatches share the same MTLBuffer (scratch allocator).
+// No-op when not in batch mode (separate command buffers already serialize).
+void metal_memory_barrier(void) {
+    if (g_batchEncoder != nil) {
+        [g_batchEncoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    }
+}
+
 // GPU Profiling functions
 void metal_get_gpu_profile(uint64_t* totalTimeNs, uint64_t* batchCount, uint64_t* kernelCount, uint64_t* syncTimeNs) {
     if (totalTimeNs) *totalTimeNs = g_gpuTotalTime;

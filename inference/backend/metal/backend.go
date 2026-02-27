@@ -449,6 +449,13 @@ func (b *Backend) EndBatch() {
 	C.metal_end_batch()
 }
 
+// MemoryBarrier inserts a buffer-scope memory barrier in the current batch encoder.
+// This ensures all prior buffer writes are visible to subsequent reads. Required when
+// multiple dispatches share the same MTLBuffer (scratch allocator). No-op outside batch mode.
+func (b *Backend) MemoryBarrier() {
+	C.metal_memory_barrier()
+}
+
 // CopyBuffer copies data from one GPU buffer to another (GPU-to-GPU).
 func (b *Backend) CopyBuffer(src tensor.DevicePtr, srcOffset int, dst tensor.DevicePtr, dstOffset int, size int) {
 	C.metal_copy_buffer(b.queue, unsafe.Pointer(src.Addr()), C.size_t(srcOffset),

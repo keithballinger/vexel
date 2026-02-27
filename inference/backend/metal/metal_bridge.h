@@ -39,6 +39,9 @@ void metal_sync(void* commandQueue);
 // Command Buffer Batching - reduce commit overhead by batching operations
 void metal_begin_batch(void* commandQueue);
 void metal_end_batch(void);
+// Memory barrier within a batch — ensures all prior writes are visible to subsequent reads.
+// Only effective when in batch mode (no-op otherwise, since non-batch dispatches are serialized).
+void metal_memory_barrier(void);
 
 // GPU Profiling - enable with VEXEL_GPU_PROFILE=1
 void metal_get_gpu_profile(uint64_t* totalTimeNs, uint64_t* batchCount, uint64_t* kernelCount, uint64_t* syncTimeNs);
