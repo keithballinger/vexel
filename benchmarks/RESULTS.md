@@ -2,7 +2,7 @@
 
 > Hardware: Apple M3 Max, 128 GB Unified Memory, 400 GB/s bandwidth
 > Model: LLaMA 2 7B Q4_0 (3.56 GB)
-> Last updated: 2026-02-26 (post P0+P1)
+> Last updated: 2026-02-27 (post command buffer batching)
 
 ## Decode Throughput
 
@@ -11,33 +11,36 @@
 | llama.cpp  | 78.13 | 0.60    | 84.0%     | baseline     |
 | Ollama     | 81.23 | 2.78    | 87.3%     | +4.0%        |
 | MLX        | ~80*  | —       | ~86%      | ~+2%         |
-| **Vexel**  | **8.3** | **0.04** | **8.9%** | **-89.4%** |
+| **Vexel**  | **61.3** | **0.2** | **65.9%** | **-21.5%** |
 
 *MLX estimated from published benchmarks (HF auth required for direct test)
 
-**Note:** Vexel 8.3 tok/s is measured with verbose timing which uses greedy sampling.
-Previous measurement of 43.38 tok/s was from the original benchmark harness which
-measures wall-clock inclusive of all overhead. The llama.cpp numbers are pure eval
-time reported by the engine itself. Vexel's internal decode loop includes per-token
-overhead from Go runtime, pool management, and synchronization that llama.cpp avoids
-by batching C++ internally. The gap is primarily in the matmul kernel efficiency and
-memory bandwidth utilization, not allocation overhead.
+**Post-batching update:** Command buffer batching with memory barriers
+eliminated ~320 per-dispatch `waitUntilCompleted` CPU-GPU roundtrips per
+token. Vexel now achieves 61.3 tok/s (65.9% of M3 Max theoretical bandwidth)
+vs the previous 7.7 tok/s (8.3%). The remaining 21.5% gap to llama.cpp is
+primarily in matmul kernel efficiency and kernel fusion.
+
+Historical decode performance:
+- Pre-P0+P1: 8.3 tok/s (per-dispatch sync, no batching)
+- Pre-batching: 7.7 tok/s (per-layer sync removed, same kernel)
+- **Post-batching: 61.3 tok/s (8x speedup, memory barriers)**
 
 ## Prefill Throughput
 
 | Engine     | ~12 tok  | ~124 tok  | ~385 tok  |
 |------------|----------|-----------|-----------|
 | llama.cpp  | 225      | 792       | 822       |
-| **Vexel**  | **41**   | **152**   | **107**   |
+| **Vexel**  | **~103** | **TBD**   | **TBD**   |
 
-Post-P0+P1: Prefill works at all lengths without OOM. Vexel prefill is
-5.2-7.7x slower than llama.cpp. The gap widens at longer sequences,
-suggesting Vexel's matmul kernels are less efficient at larger batch sizes.
+Post-batching: Short prefill improved from ~48 tok/s to ~103 tok/s (2x).
+Longer sequence lengths TBD — batching should help all lengths.
 
 Historical comparison:
 - Pre-P0: OOM'd on prompts >20 tokens
 - Post-P0: ~137 tok/s at 20 tokens (estimated)
 - Post-P0+P1: 41-152 tok/s (measured directly, varies by sequence length)
+- Post-batching: ~103 tok/s at ~12 tokens (2x improvement)
 
 ## Model Load Time
 
@@ -138,32 +141,34 @@ dispatch that could be fused into the scatter kernel itself.
 |----------|-----|----------------|--------|
 | ~~P0~~ | ~~Fix scratch arena sizing~~ | Prefill works at all lengths | ✅ DONE (2966edd) |
 | ~~P1~~ | ~~GPU scratch sub-allocation~~ | Within noise (pool was efficient) | ✅ DONE (675b962) |
+| ~~P4~~ | ~~Command buffer batching~~ | **8x decode speedup (7.7→61.3 tok/s)** | ✅ DONE (4fc581c) |
 | **P2** | Fused KV scatter (single dispatch) | +5-8% decode throughput | Open |
 | **P3** | Fused attention+norm kernels | +10-15% decode throughput | Open |
-| **P4** | Command buffer batching | +3-5% decode throughput | Open |
 | **P5** | F32→F16 fusion in scatter | +1-2% decode throughput | Open |
 
-**Key finding:** The allocation overhead (P1) was not the primary bottleneck.
-The dominant gap is in the matmul kernel efficiency and memory bandwidth
-utilization — Vexel achieves ~9% of M3 Max theoretical bandwidth vs
-llama.cpp's ~84%. The remaining P2-P5 optimizations target kernel dispatch
-overhead, but the core performance gap requires matmul kernel tuning:
-- Quantized matmul kernel tuning (tiling, threadgroup sizing for M3 Max)
-- Memory access pattern optimization (ensure coalesced reads)
-- Pipeline overlap (prefetch next layer's weights while current layer computes)
+**Key finding:** The dominant bottleneck was per-dispatch synchronization.
+`finish_encode()` called `[cmdBuf waitUntilCompleted]` on every kernel
+dispatch (~320 per token). Command buffer batching with `memoryBarrier(scope:
+.buffers)` between dependent dispatches reduced this to ~32 waits per token
+(one per layer). This single change closed the gap from -89.4% to -21.5%.
+
+The remaining 21.5% gap is in:
+- Matmul kernel efficiency (Q4_0 NR2 tested, not faster than multi_output)
+- Kernel fusion (separate RoPE, norm, activation dispatches vs fused)
+- Quantized weight dequantization bandwidth
 
 ## Vexel's Competitive Advantages (Not Captured in Single-Stream)
 
-The decode throughput gap is real, but Vexel has architectural advantages
-that don't show up in single-stream benchmarks:
+The remaining decode gap (~21%) puts Vexel in competitive range.
+Vexel also has architectural advantages not captured in single-stream:
 
 1. **Go scheduler with continuous batching** — multi-client throughput
    scaling that llama.cpp can't do natively
 2. **gRPC + HTTP dual protocol** — production serving with streaming
 3. **Single binary deployment** — no Python dependency chain
-4. **Paged KV cache** — long-context efficiency (once OOM is fixed)
+4. **Paged KV cache** — long-context efficiency
 
-The path forward: fix the P0-P2 issues to close the single-stream gap,
+The path forward: P2-P3 kernel fusion to close the remaining gap,
 then leverage the batching architecture for the real competitive advantage.
 
 ## Raw Data

@@ -148,35 +148,37 @@ Still separate:
     - E2E: identical model output with fused vs unfused.
     - Benchmark: expect +10-15% decode throughput from reduced memory I/O.
 
-## Phase 5: Command Buffer Batching (P4)
+## Phase 5: Command Buffer Batching (P4) [checkpoint: 4fc581c]
 
-Vexel submits separate command buffers for each of the ~7 operations per layer.
-At 32 layers, that's ~224 command buffer submissions per token. Each submission has
-~0.5us overhead on M3 Max.
+Vexel submitted separate command buffers for each dispatch (~320/token), each
+calling `[cmdBuf waitUntilCompleted]`. This CPU-GPU roundtrip dominated all
+other overhead. The fix: encode all operations per layer into one command buffer
+with `memoryBarrierWithScope:MTLBarrierScopeBuffers` between dependent dispatches.
 
-Key code:
-- `inference/runtime/block.go:969-985` — batching setup (disabled when scratch active)
-- `inference/backend/metal/backend.go:440-450` — BeginBatch/EndBatch
-- `metal_bridge_darwin.m` — `metal_begin_batch` / `metal_end_batch`
+Key changes:
+- `metal_bridge_darwin.m`: Added `metal_memory_barrier()` (memoryBarrierWithScope)
+- `backend.go`: Added `MemoryBarrier()` to Metal backend
+- `backend/backend.go`: Added `MemoryBarrier()` to Batcher interface
+- `block.go`: Removed scratch-disables-batching guard, inserted ~7-8 barrier()
+  calls per layer at all scratch write→read dependency points, replaced mid-layer
+  EndBatch/BeginBatch with a single barrier.
 
-Current status: batching exists but is disabled when scratch allocator is active
-(line 978) due to Metal memory hazards with shared buffer. Need either:
-(a) Use MTLFence between dependent operations within a single command buffer, or
-(b) Use separate command encoders with explicit resource dependencies.
+**Result: 8x decode speedup (7.7 → 61.3 tok/s), 2x prefill (48 → 103 tok/s)**
 
-- [ ] Task: Re-enable command buffer batching with scratch allocator
-    - Add MTLFence-based barriers between dependent operations within a batch.
-    - Or: use `makeComputeCommandEncoder(descriptor:)` with resource barriers.
-    - Ensure scratch allocator's single MTLBuffer has proper memory barriers.
-    - Test: output correctness with scratch + batching enabled.
-- [ ] Task: Optimize batch boundaries
-    - Currently: entire layer in one batch with mid-layer sync (line 1243).
-    - Profile: determine if mid-layer sync can be eliminated with proper fencing.
-    - Test: `VEXEL_SKIP_MID_SYNC=1` with fence-based batching for correctness.
-- [ ] Task: Benchmark command buffer batching impact
-    - Measure per-token latency with batching ON vs OFF.
-    - Expect +3-5% from reduced command submission overhead.
-    - Test at both decode (seqLen=1) and prefill (seqLen=128) batch sizes.
+- [x] Task: Re-enable command buffer batching with scratch allocator
+    - Used `[encoder memoryBarrierWithScope:MTLBarrierScopeBuffers]` instead of MTLFence.
+    - Barrier inserted at every scratch write→read dependency point.
+    - Output correctness verified: identical text output pre/post batching.
+    - All Metal backend tests pass (53 tests including paged SDPA).
+- [x] Task: Replace mid-layer batch split with memory barrier
+    - Old approach: EndBatch/BeginBatch mid-layer (commits + waits on first half).
+    - New approach: single barrier() call — stays in same command buffer.
+    - Eliminated unnecessary batch split overhead.
+- [x] Task: Benchmark command buffer batching impact
+    - Decode: 7.7 → 61.3 tok/s (8x improvement, 65.9% BW utilization)
+    - Prefill (~12 tok): ~48 → ~103 tok/s (2x improvement)
+    - Gap to llama.cpp: -89.4% → -21.5%
+    - Variance: ±0.2 tok/s over 5 runs (very consistent)
 
 ## Phase 6: Final Benchmarks & Reporting
 
