@@ -17,7 +17,7 @@ Optimization targets from `benchmarks/RESULTS.md` (post P0+P1 analysis):
 
 ---
 
-## Phase 1: Server Timeout Fix
+## Phase 1: Server Timeout Fix [checkpoint: cdec69e]
 
 The `/generate` endpoint has a hardcoded 30-second timeout (`inference/serve/server.go:110`)
 that prevents batched throughput benchmarks from completing. This is a quick fix that
