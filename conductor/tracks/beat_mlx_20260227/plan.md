@@ -100,7 +100,7 @@ Key design choices:
 - Vectorized Q dot K using half4 loads
 - Cooperative V accumulation across simdgroup lanes
 
-- [ ] Task 1.1: Write Flash Attention SDPA kernel (Metal)
+- [x] Task 1.1: Write Flash Attention SDPA kernel (Metal)
     - New kernel `sdpa_flash_decode_f16` with tiled KV iteration
     - Online softmax (running max + running sum)
     - TILE_K=32 for M3 Max threadgroup memory budget (32KB)
@@ -108,17 +108,17 @@ Key design choices:
     - Cooperative V tile accumulation using simd_sum
     - Support GQA head mapping (headsPerKV ratio)
     - Accept same buffer layout as existing sdpa_decode_f16
-- [ ] Task 1.2: Wire Flash SDPA into Go dispatch path
+- [x] Task 1.2: Wire Flash SDPA into Go dispatch path
     - New pipeline state: `sdpaFlashDecodePipeline`
     - Route decode SDPA to new kernel (keep old kernel for fallback)
     - Threadgroup memory sized to TILE_K * headDim * sizeof(float) + reduction scratch
     - Same Go-side API: `backend.SDPADecode(Q, K, V, out, kvLen, ...)`
-- [ ] Task 1.3: Correctness tests — token-exact match vs reference
+- [x] Task 1.3: Correctness tests — token-exact match vs reference
     - Test against existing sdpa_decode_f16 output at ctx=16, 64, 128, 256, 512, 1024
     - Test GQA configurations: 32Q/8KV (LLaMA2 7B), 32Q/32KV (no GQA), 32Q/4KV
     - Test edge cases: kvLen < TILE_K, kvLen = exact multiple of TILE_K
     - Verify numerical stability of online softmax (compare max/sum values)
-- [ ] Task 1.4: Context scaling benchmark
+- [x] Task 1.4: Context scaling benchmark
     - Run TestThroughputContextScaling at ctx=16, 64, 128, 256, 512
     - Target: <5% degradation from ctx=16 to ctx=512 (currently 24.5%)
     - Compare against MLX's 2.5% degradation
