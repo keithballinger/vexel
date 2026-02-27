@@ -1820,9 +1820,11 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	// Debug harness: capture final output
 	capture("output", "x", xPtr, seqLen*hiddenSize)
 
-	// Ensure this layer's writes are visible before next layer reads
-	// Without this sync, next layer may read stale data from x (race condition)
-	b.backend.Sync()
+	// No per-layer sync needed: Metal command queues guarantee FIFO execution.
+	// All dispatches go to the same queue, so layer N's writes complete before
+	// layer N+1's reads begin. Scratch buffer reuse is safe for the same reason.
+	// The final sync point is in DecodeWithGPUKV after all layers + logits computation.
+	// Set VEXEL_SYNC_DISPATCH=1 for per-dispatch synchronous mode (debugging).
 
 	return x, nil
 }

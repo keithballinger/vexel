@@ -5426,7 +5426,7 @@ void metal_sync(void* commandQueue) {
         g_batchCmdBuffer = [g_batchQueue commandBuffer];
         g_batchEncoder = [g_batchCmdBuffer computeCommandEncoder];
     } else {
-        // Not in batch mode - original behavior
+        // Not in batch mode — commit an empty buffer as a FIFO barrier.
         id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)commandQueue;
         id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
         [cmdBuffer commit];
@@ -5510,7 +5510,11 @@ static id<MTLComputeCommandEncoder> get_encoder(id<MTLCommandQueue> queue, id<MT
     return [cmdBuf computeCommandEncoder];
 }
 
-// Helper: finish encoding and possibly commit
+// Helper: finish encoding and possibly commit.
+// Always waits for completion — required for correct memory visibility between
+// separate command buffers on Apple Silicon. The proper way to avoid per-dispatch
+// waiting is command buffer batching (metal_begin_batch/metal_end_batch), which
+// encodes multiple operations into a single command buffer with one wait.
 static inline void finish_encode(id<MTLComputeCommandEncoder> encoder, id<MTLCommandBuffer> cmdBuf, bool shouldCommit) {
     if (shouldCommit) {
         uint64_t start = mach_absolute_time();
@@ -6631,6 +6635,38 @@ void metal_matvec_q4_0_multi_output_f32_offset(void* queuePtr, void* pipelinePtr
     [encoder setBytes:&K length:sizeof(K) atIndex:4];
 
     int outputsPerTG = 8;
+    int threadgroupSize = 256;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
+
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Q4_0 NR2 matvec offset-aware: 16 outputs per threadgroup (2 per simdgroup)
+// A and C use offsets (scratch-allocated), B (weights) always at offset 0.
+void metal_matvec_q4_0_nr2_f32_offset(void* queuePtr, void* pipelinePtr,
+                                       void* A, uint64_t aOff,
+                                       void* B,
+                                       void* C, uint64_t cOff,
+                                       int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:aOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:cOff atIndex:2];
+    [encoder setBytes:&N length:sizeof(N) atIndex:3];
+    [encoder setBytes:&K length:sizeof(K) atIndex:4];
+
+    int outputsPerTG = 16;
     int threadgroupSize = 256;
     int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
 

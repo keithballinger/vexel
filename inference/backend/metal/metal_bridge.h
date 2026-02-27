@@ -253,6 +253,12 @@ void metal_matvec_q4_0_multi_output_f32_offset(void* queue, void* pipeline,
                                                 void* C, uint64_t cOff,
                                                 int N, int K);
 
+void metal_matvec_q4_0_nr2_f32_offset(void* queue, void* pipeline,
+                                       void* A, uint64_t aOff,
+                                       void* B,
+                                       void* C, uint64_t cOff,
+                                       int N, int K);
+
 void metal_matmul_q4_0_batched_f32_offset(void* queue, void* pipeline,
                                            void* A, uint64_t aOff,
                                            void* B,

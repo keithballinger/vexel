@@ -558,8 +558,10 @@ func (b *Backend) MatMulQ4_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 				C.int(n), C.int(k))
 			return
 		}
-		// Single row (decode) - use multi-output matvec (8 outputs per threadgroup)
-		C.metal_matvec_q4_0_multi_output_f32(b.queue, b.matvecQ4MultiOutputPipeline,
+		// Single row (decode) - use NR2 matvec (16 outputs per threadgroup, 2 per simdgroup)
+		// NR2 amortizes activation vector loads across 2 output rows per simdgroup,
+		// matching the approach used by Q6_K, Q4_K, Q8_0, and BF16 formats.
+		C.metal_matvec_q4_0_nr2_f32(b.queue, b.matvecQ4NR2Pipeline,
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(n), C.int(k))
 	} else if m >= 8 && b.matmulQ4SimdgroupPipeline != nil {
@@ -1056,7 +1058,8 @@ func (b *Backend) MatMulQ4_0Offset(a, bMat, out tensor.DevicePtr, m, n, k int) {
 				C.int(n), C.int(k))
 			return
 		}
-		C.metal_matvec_q4_0_multi_output_f32_offset(b.queue, b.matvecQ4MultiOutputPipeline,
+		// NR2: 16 outputs per threadgroup (2 per simdgroup), better activation reuse
+		C.metal_matvec_q4_0_nr2_f32_offset(b.queue, b.matvecQ4NR2Pipeline,
 			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
 			unsafe.Pointer(bMat.Addr()),
 			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
