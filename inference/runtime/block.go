@@ -282,6 +282,9 @@ type BlockRuntime struct {
 	// Cached interface for learned RoPE frequency scaling (Gemma 2)
 	scaledRoPEOps backend.ScaledRoPEOps
 
+	// Cached interface for scratch buffer sub-allocation (Metal GPU)
+	scratchAlloc backend.ScratchAllocator
+
 	// Pre-computed RoPE inverse frequency buffer on device ([headDim/2] float32).
 	// Non-nil when using learned RoPE scaling (e.g. Gemma 2 with RoPEFreqScales).
 	ropeFreqBuf tensor.DevicePtr
@@ -342,6 +345,7 @@ func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 	br.biasOps, _ = b.(backend.BiasOps)
 	br.softCapOps, _ = b.(backend.SoftCapAttentionOps)
 	br.scaledRoPEOps, _ = b.(backend.ScaledRoPEOps)
+	br.scratchAlloc, _ = b.(backend.ScratchAllocator)
 
 	// Gemma 2 attention config
 	br.AttentionLogitSoftCap = config.AttentionLogitSoftCap
@@ -969,6 +973,11 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	if os.Getenv("VEXEL_GPU_PROFILE") == "1" {
 		useBatching = false
 	}
+	// Disable batching when scratch allocator is active — all intermediates share one
+	// MTLBuffer and Metal doesn't insert memory barriers within a single command buffer.
+	if b.scratchAlloc != nil {
+		useBatching = false
+	}
 
 	if useBatching {
 		b.batcher.BeginBatch()
@@ -1024,9 +1033,9 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 
 	// Allocate intermediate buffers.
 	// For CPU: sub-allocate from scratch buffer (pointer arithmetic handles offsets correctly).
-	// For GPU: use individual Alloc() calls because Metal kernel dispatches use
-	// setBuffer:offset:0 and don't pass DevicePtr offsets — sub-allocating from a single
-	// MTLBuffer would cause all intermediates to alias offset 0, corrupting prefill.
+	// For GPU: use ScratchAlloc (bump allocation from pre-allocated MTLBuffer) when available,
+	// falling back to pool Alloc. Scratch-allocated DevicePtrs have non-zero offsets which
+	// are transparently handled by auto-detecting offset-aware kernel dispatch.
 	var normOutPtr, qPtr, kPtr, vPtr, attnOutPtr, gatePtr, upPtr tensor.DevicePtr
 
 	if scratchPtr.Location() == tensor.CPU {
@@ -1045,7 +1054,18 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		offset += uintptr(gateBytes)
 		upPtr = tensor.DevicePtrOffset(scratchPtr, offset)
 		_ = upBytes
+	} else if b.scratchAlloc != nil {
+		// Reset scratch allocator for this layer (reuses the same pre-allocated buffer).
+		b.scratchAlloc.ScratchReset()
+		normOutPtr = b.scratchAlloc.ScratchAlloc(normOutBytes)
+		qPtr = b.scratchAlloc.ScratchAlloc(qBytes)
+		kPtr = b.scratchAlloc.ScratchAlloc(kvBytes)
+		vPtr = b.scratchAlloc.ScratchAlloc(kvBytes)
+		attnOutPtr = b.scratchAlloc.ScratchAlloc(attnOutBytes)
+		gatePtr = b.scratchAlloc.ScratchAlloc(gateBytes)
+		upPtr = b.scratchAlloc.ScratchAlloc(upBytes)
 	} else {
+		// Fallback: individual pool allocations (no scratch allocator available).
 		normOutPtr = b.backend.Alloc(normOutBytes)
 		qPtr = b.backend.Alloc(qBytes)
 		kPtr = b.backend.Alloc(kvBytes)

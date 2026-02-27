@@ -87,3 +87,23 @@ Sources:
     - Prefill should now work at 128/512 tokens.
 - [ ] Task: Run batched throughput benchmarks (Phase 3)
     - Now unblocked by P0 fix.
+
+## Phase 6: P1 GPU Scratch Sub-Allocation
+- [x] Task: Implement GPU scratch sub-allocation (P1)
+    - Bump allocator backed by single pre-allocated MTLBuffer with 256-byte alignment.
+    - 13 offset-aware C bridge functions + Go auto-detect wrappers for all hot-path kernels
+      (MatMulQ4_0, RMSNorm, RoPE, SDPA, Add, SiLUMul, ConvertF16ToF32, ConvertF32ToF16, etc.).
+    - ScratchAllocator optional interface on backend with fallback to pool.
+    - Wired into ExecuteWithGPUKV: 7 scratch allocs per layer + 1 reset (replaces 7 pool allocs).
+    - Fixed FP16 conversion bug: ConvertF16ToF32 was not offset-aware, writing to scratch offset 0
+      instead of the actual allocation offset — caused garbled decode output.
+    - Batching disabled when scratch is active (Metal memory hazards with shared buffer).
+    - 15 unit tests (creation, alignment, reset, OOM, data isolation, kernel correctness).
+    - E2E verified: identical output with scratch ON vs OFF.
+- [x] Task: Benchmark P1 impact
+    - Scratch ON:  ~7.8 tok/s decode (avg over 3 runs, 200 tokens, LLaMA 2 7B Q4_0).
+    - Scratch OFF: ~8.0 tok/s decode (avg over 3 runs, same config).
+    - Result: **within noise** (~0-3% difference). Pool allocator was already efficient.
+    - Estimated +15-20% did not materialize for single-stream decode. The benefit is
+      reduced pool fragmentation under concurrent load, not single-stream throughput.
+    - Prefill unaffected (falls back to pool — scratch sized for decode batch=1 only).

@@ -9,6 +9,17 @@ type PoolResetter interface {
 	ResetPool()
 }
 
+// ScratchAllocator is an optional interface for backends that support scratch
+// buffer sub-allocation. Instead of per-layer pool Alloc() calls, all
+// intermediate activations are bump-allocated from a single pre-allocated buffer.
+// Call ScratchReset() at the start of each layer to reclaim space, then
+// ScratchAlloc() for each intermediate tensor. Returned DevicePtrs have
+// non-zero offsets which are handled by offset-aware kernel dispatch.
+type ScratchAllocator interface {
+	ScratchReset()
+	ScratchAlloc(bytes int) tensor.DevicePtr
+}
+
 // Batcher is an optional interface for backends that support command buffer batching.
 // Batching reduces dispatch overhead by combining multiple operations into one commit.
 type Batcher interface {

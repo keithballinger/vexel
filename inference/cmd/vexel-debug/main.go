@@ -132,6 +132,12 @@ func main() {
 	gpuCache := model.CreateGPUKVCache(2048)
 	defer gpuCache.Free()
 
+	// Initialize GPU scratch allocator for decode-path bump allocation.
+	decodeScratchBytes := modelCfg.ScratchBytes(1) + 7*256
+	if err := gpuBackend.InitScratch(int(decodeScratchBytes)); err != nil {
+		log.Printf("[WARNING] GPU scratch init failed: %v", err)
+	}
+
 	debug.SetModel(*modelPath)
 	debug.SetPrompt(*prompt)
 

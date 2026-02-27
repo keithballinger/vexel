@@ -539,6 +539,13 @@ func (b *Backend) MatMulTransposed(a, bMat, out tensor.DevicePtr, m, n, k int) {
 // MatMulQ4_0 performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q4_0 format.
 // B contains raw Q4_0 data (18 bytes per 32 elements).
 func (b *Backend) MatMulQ4_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	// Auto-detect scratch-allocated DevicePtrs (non-zero offset) and dispatch
+	// to offset-aware C functions. Pool-allocated ptrs have offset=0 so this
+	// is a no-op for the traditional path.
+	if a.Offset() != 0 || out.Offset() != 0 {
+		b.MatMulQ4_0Offset(a, bMat, out, m, n, k)
+		return
+	}
 	b.profiler.RecordDispatch("MatMulQ4_0")
 	if b.matvecQ4NR2Pipeline == nil {
 		panic("MatMulQ4_0 called but no matvecQ4NR2Pipeline available")
@@ -784,6 +791,14 @@ func (b *Backend) MatMulQ4_0_FusedRMSNorm(x, normWeight, wMat, out tensor.Device
 	if b.matvecQ4FusedRMSNormPipeline == nil {
 		panic("MatMulQ4_0_FusedRMSNorm called but pipeline unavailable")
 	}
+	if out.Offset() != 0 {
+		C.metal_matvec_q4_0_fused_rmsnorm_f32_offset(b.queue, b.matvecQ4FusedRMSNormPipeline,
+			unsafe.Pointer(x.Addr()), unsafe.Pointer(normWeight.Addr()),
+			unsafe.Pointer(wMat.Addr()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			C.int(n), C.int(k), C.float(eps))
+		return
+	}
 	C.metal_matvec_q4_0_fused_rmsnorm_f32(b.queue, b.matvecQ4FusedRMSNormPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(normWeight.Addr()),
 		unsafe.Pointer(wMat.Addr()), unsafe.Pointer(out.Addr()),
@@ -816,6 +831,14 @@ func (b *Backend) MatMulQ4_0_FusedMLP(x, w1, w3, out tensor.DevicePtr, m, n, k i
 	if b.matvecQ4FusedMLPPipeline == nil {
 		panic("MatMulQ4_0_FusedMLP called but pipeline unavailable")
 	}
+	if x.Offset() != 0 || out.Offset() != 0 {
+		C.metal_matvec_q4_0_fused_mlp_f32_offset(b.queue, b.matvecQ4FusedMLPPipeline,
+			unsafe.Pointer(x.Addr()), C.uint64_t(x.Offset()),
+			unsafe.Pointer(w1.Addr()), unsafe.Pointer(w3.Addr()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			C.int(n), C.int(k))
+		return
+	}
 	C.metal_matvec_q4_0_fused_mlp_f32(b.queue, b.matvecQ4FusedMLPPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(w1.Addr()),
 		unsafe.Pointer(w3.Addr()), unsafe.Pointer(out.Addr()),
@@ -824,6 +847,10 @@ func (b *Backend) MatMulQ4_0_FusedMLP(x, w1, w3, out tensor.DevicePtr, m, n, k i
 
 // RMSNorm performs RMS normalization.
 func (b *Backend) RMSNorm(x, weight, out tensor.DevicePtr, rows, cols int, eps float32) {
+	if x.Offset() != 0 || out.Offset() != 0 {
+		b.RMSNormOffset(x, weight, out, rows, cols, eps)
+		return
+	}
 	b.profiler.RecordDispatch("RMSNorm")
 	C.metal_rmsnorm_f32(b.queue, b.rmsnormPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(weight.Addr()), unsafe.Pointer(out.Addr()),
@@ -869,6 +896,15 @@ func (b *Backend) AddBias(x, bias, out tensor.DevicePtr, rows, cols int) {
 // This saves one memory round-trip compared to separate Add + RMSNorm.
 func (b *Backend) AddRMSNorm(x, residual, weight, out tensor.DevicePtr, rows, cols int, eps float32) {
 	b.profiler.RecordDispatch("AddRMSNorm")
+	if residual.Offset() != 0 || out.Offset() != 0 {
+		C.metal_add_rmsnorm_f32_offset(b.queue, b.addRMSNormPipeline,
+			unsafe.Pointer(x.Addr()),
+			unsafe.Pointer(residual.Addr()), C.uint64_t(residual.Offset()),
+			unsafe.Pointer(weight.Addr()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			C.int(rows), C.int(cols), C.float(eps))
+		return
+	}
 	C.metal_add_rmsnorm_f32(b.queue, b.addRMSNormPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(residual.Addr()),
 		unsafe.Pointer(weight.Addr()), unsafe.Pointer(out.Addr()),
@@ -879,6 +915,10 @@ func (b *Backend) AddRMSNorm(x, residual, weight, out tensor.DevicePtr, rows, co
 // ropeDim: dimensions to rotate (0 = full headDim). For partial RoPE like Phi-2.
 // ropeNeox: true = NEOX-style (split pairs), false = LLaMA-style (interleaved pairs)
 func (b *Backend) RoPE(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos, ropeDim int, theta float32, ropeNeox bool) {
+	if q.Offset() != 0 || k.Offset() != 0 {
+		b.RoPEOffset(q, k, headDim, numHeads, numKVHeads, seqLen, startPos, ropeDim, theta, ropeNeox)
+		return
+	}
 	b.profiler.RecordDispatch("RoPE")
 	// If ropeDim is 0 or equals headDim, rotate all dimensions
 	effectiveRopeDim := ropeDim
@@ -954,6 +994,10 @@ func (b *Backend) SiLU(x, out tensor.DevicePtr, n int) {
 
 // SiLUMul performs fused silu(gate) * up operation.
 func (b *Backend) SiLUMul(gate, up, out tensor.DevicePtr, n int) {
+	if gate.Offset() != 0 || up.Offset() != 0 || out.Offset() != 0 {
+		b.SiLUMulOffset(gate, up, out, n)
+		return
+	}
 	b.profiler.RecordDispatch("SiLUMul")
 	C.metal_silu_mul_f32(b.queue, b.siluMulPipeline,
 		unsafe.Pointer(gate.Addr()), unsafe.Pointer(up.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
@@ -961,6 +1005,10 @@ func (b *Backend) SiLUMul(gate, up, out tensor.DevicePtr, n int) {
 
 // Add performs element-wise addition.
 func (b *Backend) Add(a, bIn, out tensor.DevicePtr, n int) {
+	if a.Offset() != 0 || bIn.Offset() != 0 || out.Offset() != 0 {
+		b.AddOffset(a, bIn, out, n)
+		return
+	}
 	b.profiler.RecordDispatch("Add")
 	C.metal_add_f32(b.queue, b.addPipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bIn.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
@@ -993,6 +1041,81 @@ func (b *Backend) SiLUMulOffset(gate, up, out tensor.DevicePtr, n int) {
 		unsafe.Pointer(gate.Addr()), C.uint64_t(gate.Offset()),
 		unsafe.Pointer(up.Addr()), C.uint64_t(up.Offset()),
 		unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()), C.int(n))
+}
+
+// MatMulQ4_0Offset performs Q4_0 quantized matmul with offset-aware dispatch.
+// A and out use offsets (scratch-allocated), bMat (weights) always at offset 0.
+func (b *Backend) MatMulQ4_0Offset(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	b.profiler.RecordDispatch("MatMulQ4_0")
+	if m == 1 {
+		if k%32 != 0 && b.matvecQ4Pipeline != nil {
+			C.metal_matvec_q4_0_transposed_f32_offset(b.queue, b.matvecQ4Pipeline,
+				unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+				unsafe.Pointer(bMat.Addr()),
+				unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+				C.int(n), C.int(k))
+			return
+		}
+		C.metal_matvec_q4_0_multi_output_f32_offset(b.queue, b.matvecQ4MultiOutputPipeline,
+			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+			unsafe.Pointer(bMat.Addr()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			C.int(n), C.int(k))
+	} else if m >= 8 && b.matmulQ4SimdgroupPipeline != nil {
+		C.metal_matmul_q4_0_simdgroup_f32_offset(b.queue, b.matmulQ4SimdgroupPipeline,
+			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+			unsafe.Pointer(bMat.Addr()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			C.int(m), C.int(n), C.int(k))
+	} else {
+		C.metal_matmul_q4_0_batched_f32_offset(b.queue, b.matmulQ4BatchedPipeline,
+			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+			unsafe.Pointer(bMat.Addr()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			C.int(m), C.int(n), C.int(k))
+	}
+}
+
+// RoPEOffset applies rotary position encoding with offset-aware dispatch.
+// Q and K use offsets (scratch-allocated activations).
+func (b *Backend) RoPEOffset(q, k tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos, ropeDim int, theta float32, ropeNeox bool) {
+	b.profiler.RecordDispatch("RoPE")
+	effectiveRopeDim := ropeDim
+	if effectiveRopeDim == 0 {
+		effectiveRopeDim = headDim
+	}
+	neoxFlag := 0
+	if ropeNeox {
+		neoxFlag = 1
+	}
+	C.metal_rope_gqa_f32_offset(b.queue, b.ropeGQAPipeline,
+		unsafe.Pointer(q.Addr()), C.uint64_t(q.Offset()),
+		unsafe.Pointer(k.Addr()), C.uint64_t(k.Offset()),
+		C.int(seqLen), C.int(numHeads), C.int(numKVHeads), C.int(headDim),
+		C.int(startPos), C.int(effectiveRopeDim), C.float(theta), C.int(neoxFlag))
+}
+
+// SDPAOffset performs SDPA with offset-aware dispatch.
+// Q and out use offsets (scratch-allocated), K/V (KV cache) at offset 0.
+func (b *Backend) SDPAOffset(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
+	b.profiler.RecordDispatch("SDPA")
+	useFlash := b.sdpaFlashDecodePipeline != nil && kvLen >= 16
+
+	if useFlash {
+		C.metal_sdpa_flash_decode_f32_offset(b.queue, b.sdpaFlashDecodePipeline,
+			unsafe.Pointer(q.Addr()), C.uint64_t(q.Offset()),
+			unsafe.Pointer(k.Addr()), unsafe.Pointer(v.Addr()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+			C.float(scale), C.int(kvHeadStride))
+	} else {
+		C.metal_sdpa_decode_f32_offset(b.queue, b.sdpaDecodePipeline,
+			unsafe.Pointer(q.Addr()), C.uint64_t(q.Offset()),
+			unsafe.Pointer(k.Addr()), unsafe.Pointer(v.Addr()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+			C.float(scale), C.int(kvHeadStride))
+	}
 }
 
 // Mul performs element-wise multiplication.
@@ -1112,6 +1235,10 @@ func (b *Backend) Embedding(ids tensor.DevicePtr, numTokens int, table, out tens
 // SDPA performs scaled dot-product attention for decode (single query token).
 // Uses Flash Decoding for longer sequences, naive for short ones.
 func (b *Backend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
+	if q.Offset() != 0 || out.Offset() != 0 {
+		b.SDPAOffset(q, k, v, out, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+		return
+	}
 	b.profiler.RecordDispatch("SDPA")
 	// Use Flash Decoding for longer KV lengths where parallelism helps
 	// For short sequences, the overhead of threadgroup sync isn't worth it
@@ -1289,16 +1416,30 @@ func (b *Backend) SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKV
 
 // ConvertF32ToF16 converts FP32 data to FP16.
 // in: [n] in FP32, out: [n] in FP16 (out buffer must be n*2 bytes)
+// Auto-detects scratch-allocated buffers and uses offset-aware dispatch.
 func (b *Backend) ConvertF32ToF16(in, out tensor.DevicePtr, n int) {
 	b.profiler.RecordDispatch("Convert")
+	if in.Offset() != 0 || out.Offset() != 0 {
+		C.metal_convert_f32_to_f16_offset(b.queue, b.convertF32ToF16Pipeline,
+			unsafe.Pointer(in.Addr()), C.uint64_t(in.Offset()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()), C.int(n))
+		return
+	}
 	C.metal_convert_f32_to_f16(b.queue, b.convertF32ToF16Pipeline,
 		unsafe.Pointer(in.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
 
 // ConvertF16ToF32 converts FP16 data to FP32.
 // in: [n] in FP16, out: [n] in FP32 (out buffer must be n*4 bytes)
+// Auto-detects scratch-allocated buffers and uses offset-aware dispatch.
 func (b *Backend) ConvertF16ToF32(in, out tensor.DevicePtr, n int) {
 	b.profiler.RecordDispatch("Convert")
+	if in.Offset() != 0 || out.Offset() != 0 {
+		C.metal_convert_f16_to_f32_offset(b.queue, b.convertF16ToF32Pipeline,
+			unsafe.Pointer(in.Addr()), C.uint64_t(in.Offset()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()), C.int(n))
+		return
+	}
 	C.metal_convert_f16_to_f32(b.queue, b.convertF16ToF32Pipeline,
 		unsafe.Pointer(in.Addr()), unsafe.Pointer(out.Addr()), C.int(n))
 }
@@ -1325,6 +1466,14 @@ func (b *Backend) ScatterKVF32ToF16(src, dst tensor.DevicePtr, newTokens, numKVH
 
 func (b *Backend) ScatterKV(src, dst tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int) {
 	b.profiler.RecordDispatch("ScatterKV")
+	if src.Offset() != 0 {
+		C.metal_scatter_kv_f32_offset(b.queue, b.scatterKVF32Pipeline,
+			unsafe.Pointer(src.Addr()), C.uint64_t(src.Offset()),
+			unsafe.Pointer(dst.Addr()),
+			C.int(newTokens), C.int(numKVHeads), C.int(headDim),
+			C.int(maxSeqLen), C.int(seqPos))
+		return
+	}
 	C.metal_scatter_kv_f32(b.queue, b.scatterKVF32Pipeline,
 		unsafe.Pointer(src.Addr()), unsafe.Pointer(dst.Addr()),
 		C.int(newTokens), C.int(numKVHeads), C.int(headDim),

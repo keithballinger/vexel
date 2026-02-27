@@ -246,6 +246,78 @@ void metal_silu_mul_f32_offset(void* queue, void* pipeline,
                                void* up, uint64_t upOff,
                                void* out, uint64_t outOff, int n);
 
+// Offset-aware Q4_0 matmul variants: A and C have offsets, B (weights) at offset 0.
+void metal_matvec_q4_0_multi_output_f32_offset(void* queue, void* pipeline,
+                                                void* A, uint64_t aOff,
+                                                void* B,
+                                                void* C, uint64_t cOff,
+                                                int N, int K);
+
+void metal_matmul_q4_0_batched_f32_offset(void* queue, void* pipeline,
+                                           void* A, uint64_t aOff,
+                                           void* B,
+                                           void* C, uint64_t cOff,
+                                           int M, int N, int K);
+
+void metal_matmul_q4_0_simdgroup_f32_offset(void* queue, void* pipeline,
+                                             void* A, uint64_t aOff,
+                                             void* B,
+                                             void* C, uint64_t cOff,
+                                             int M, int N, int K);
+
+void metal_matvec_q4_0_transposed_f32_offset(void* queue, void* pipeline,
+                                              void* A, uint64_t aOff,
+                                              void* B,
+                                              void* C, uint64_t cOff,
+                                              int N, int K);
+
+// Offset-aware RoPE: Q and K have offsets (scratch-allocated activations).
+void metal_rope_gqa_f32_offset(void* queue, void* pipeline,
+                                void* q, uint64_t qOff,
+                                void* k, uint64_t kOff,
+                                int seqLen, int numQHeads, int numKVHeads, int headDim,
+                                int startPos, int ropeDim, float theta, int ropeNeox);
+
+// Offset-aware SDPA decode: Q and out have offsets, K/V (KV cache) at offset 0.
+void metal_sdpa_decode_f32_offset(void* queue, void* pipeline,
+                                   void* Q, uint64_t qOff,
+                                   void* K, void* V,
+                                   void* out, uint64_t outOff,
+                                   int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                   float scale, int kvHeadStride);
+
+void metal_sdpa_flash_decode_f32_offset(void* queue, void* pipeline,
+                                         void* Q, uint64_t qOff,
+                                         void* K, void* V,
+                                         void* out, uint64_t outOff,
+                                         int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                         float scale, int kvHeadStride);
+
+// Offset-aware fused kernels: activation buffers have offsets, weights at offset 0.
+void metal_matvec_q4_0_fused_rmsnorm_f32_offset(void* queue, void* pipeline,
+                                                  void* x, void* normWeight, void* wMat,
+                                                  void* out, uint64_t outOff,
+                                                  int n, int k, float eps);
+
+void metal_add_rmsnorm_f32_offset(void* queue, void* pipeline,
+                                   void* x,
+                                   void* residual, uint64_t residualOff,
+                                   void* weight,
+                                   void* out, uint64_t outOff,
+                                   int batchSize, int dim, float eps);
+
+void metal_scatter_kv_f32_offset(void* queue, void* pipeline,
+                                  void* src, uint64_t srcOff,
+                                  void* dst,
+                                  int newTokens, int numKVHeads, int headDim,
+                                  int maxSeqLen, int seqPos);
+
+void metal_matvec_q4_0_fused_mlp_f32_offset(void* queue, void* pipeline,
+                                             void* x, uint64_t xOff,
+                                             void* W1, void* W3,
+                                             void* out, uint64_t outOff,
+                                             int N, int K);
+
 void metal_mul_f32(void* queue, void* pipeline,
                    void* a, void* b, void* out, int n);
 
@@ -368,10 +440,16 @@ void metal_rmsnorm_f16(void* queue, void* pipeline,
 // FP32 to FP16 conversion
 void metal_convert_f32_to_f16(void* queue, void* pipeline,
                                void* in, void* out, int n);
+void metal_convert_f32_to_f16_offset(void* queue, void* pipeline,
+                               void* in, uint64_t inOff,
+                               void* out, uint64_t outOff, int n);
 
 // FP16 to FP32 conversion
 void metal_convert_f16_to_f32(void* queue, void* pipeline,
                                void* in, void* out, int n);
+void metal_convert_f16_to_f32_offset(void* queue, void* pipeline,
+                               void* in, uint64_t inOff,
+                               void* out, uint64_t outOff, int n);
 
 // KV Cache scatter: transpose from [newTokens, numKVHeads, headDim] to [numKVHeads, maxSeqLen, headDim]
 // Used for efficient GPU-side KV cache layout transformation

@@ -79,6 +79,16 @@ func initModel(modelPath string, maxTokens int, verbose bool) (*runtime.ModelRun
 	}
 	model.CreateGPUKVCache(maxContextLen)
 
+	// Initialize GPU scratch allocator for decode-path bump allocation.
+	// Sized for one layer's intermediates at decode (seqLen=1): normOut + Q + K + V + attnOut + gate + up,
+	// plus alignment padding (7 allocations × 256 bytes).
+	decodeScratchBytes := modelCfg.ScratchBytes(1) + 7*256
+	if os.Getenv("VEXEL_NO_SCRATCH") != "1" {
+		if err := gpuBackend.InitScratch(int(decodeScratchBytes)); err != nil {
+			log.Printf("[WARNING] GPU scratch allocator init failed, falling back to pool alloc: %v", err)
+		}
+	}
+
 	tokPath := filepath.Join(filepath.Dir(modelPath), "tokenizer.json")
 	tok, err := tokenizer.Load(tokPath)
 	if err != nil {
