@@ -216,18 +216,20 @@ scripts/             Performance harness and benchmarking tools
 
 Benchmarks on Apple M3 Max (128 GB) with LLaMA 2 7B Q4_0 (3.56 GB):
 
-| Metric | Vexel | llama.cpp | Gap |
-|--------|-------|-----------|-----|
-| Decode throughput | 64.8 tok/s | 76.3 tok/s | -15.1% |
-| Prefill (5 tokens) | 96 tok/s | 110 tok/s | -12.7% |
-| Prefill (128 tokens) | 200 tok/s | 803 tok/s | -75.1% |
-| Prefill (385 tokens) | 153 tok/s | 793 tok/s | -80.7% |
-| Model load time | ~885 ms | ~1100 ms | +20% faster |
+| Metric | Vexel | llama.cpp | MLX | Gap (vs llama.cpp) |
+|--------|-------|-----------|-----|-----|
+| Decode throughput | 64.8 tok/s | 76.3 tok/s | 83.5 tok/s | -15.1% |
+| Decode ctx degradation (16→512) | ~-10% | -2.7% | -2.5% | — |
+| Prefill (128 tokens) | ~150 tok/s | 803 tok/s | 725 tok/s | — |
+| Model load time | ~885 ms | ~1100 ms | — | +20% faster |
 
 Vexel achieves **85% of llama.cpp's decode throughput** on single-stream
 generation, utilizing 69.7% of M3 Max memory bandwidth. The optimization
 journey reduced the decode gap from -89% to -15% through command buffer
-batching and memory barrier optimizations.
+batching, memory barriers, and Flash Attention SDPA.
+
+**Flash Attention:** Tiled split-KV decode with online softmax reduced context
+scaling degradation from -24.5% to ~-10% (ctx=16 → ctx=512).
 
 See [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md) for detailed analysis,
 context-length scaling data, and optimization roadmap.

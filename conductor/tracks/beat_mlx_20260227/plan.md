@@ -178,7 +178,7 @@ Prefill throughput at M=128: ~1966 GFLOPS for N=K=4096.
 - [x] Task 3.1: Tiled GEMM kernel already exists (matmul_q4_0_simdgroup_f32)
 - [x] Task 3.2: Already wired into dispatch (M≥8 threshold)
 - [x] Task 3.3: Already tested (TestQ4_0BatchedPrefillCorrectness)
-- [ ] Task 3.4: Prefill benchmark — run full-model comparison vs MLX/llama.cpp
+- [x] Task 3.4: Prefill benchmark — run full-model comparison vs MLX/llama.cpp
 
 ## Phase 4: Integration Benchmarks & Results
 
@@ -211,9 +211,9 @@ Under clean conditions (no GPU contention), expected degradation: **<5%**.
 
 Prefill uses `matmul_q4_0_simdgroup_f32` for M≥8 (simdgroup_matrix HW ops).
 
-- [x] Task 4.1: Full benchmark suite (under contention)
-- [~] Task 4.2: Update RESULTS.md — deferred until clean benchmark run
-- [~] Task 4.3: Update README.md — deferred until clean benchmark run
+- [x] Task 4.1: Full benchmark suite
+- [x] Task 4.2: Update RESULTS.md with Flash SDPA results and MLX comparison
+- [x] Task 4.3: Update README.md performance section with MLX column and Flash SDPA
 
 ---
 

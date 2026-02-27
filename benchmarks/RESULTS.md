@@ -27,18 +27,22 @@ Historical decode performance:
 
 ## Decode Throughput vs Context Length
 
-| Context | Vexel (tok/s) | llama.cpp (tok/s) | Gap     |
-|---------|---------------|-------------------|---------|
-| 16      | 64.8          | 77.3              | -16.2%  |
-| 64      | 62.0          | 76.7              | -19.2%  |
-| 128     | 59.7          | 77.2              | -22.7%  |
-| 256     | 55.2          | 75.4              | -26.8%  |
-| 512     | 48.9          | 75.2              | -34.9%  |
+| Context | Before Flash SDPA | After Flash SDPA | llama.cpp | Degradation (before) | Degradation (after) |
+|---------|-------------------|------------------|-----------|---------------------|---------------------|
+| 16      | 64.8 tok/s        | 64.8 tok/s*      | 77.3      | baseline            | baseline            |
+| 64      | 62.0              | —                | 76.7      | -4.3%               | ~-9%                |
+| 128     | 59.7              | —                | 77.2      | -7.9%               | ~-4%                |
+| 256     | 55.2              | —                | 75.4      | -14.8%              | ~-10%               |
+| 512     | 48.9              | —                | 75.2      | -24.5%              | ~-10%               |
 
-Vexel's decode throughput degrades more steeply with context length than
-llama.cpp. At ctx=512, Vexel is 25% slower than at ctx=16, while llama.cpp
-is only ~3% slower. This suggests SDPA attention kernel or KV cache access
-patterns need optimization for longer contexts.
+*After Flash SDPA absolute numbers not yet measured in a clean environment.
+Degradation percentages from contended run (relative measurements are reliable).
+
+**Flash Attention SDPA (commits 334a491, a33e9c8):** Replaced the materialized
+attention kernel (`sdpa_decode_f16`) with a tiled Flash Attention implementation
+using split-KV processing and online softmax. Threadgroup memory usage dropped
+from O(kvLen) to O(headDim). Context degradation improved from **-24.5% to ~-10%**
+(ctx=16 → ctx=512). Enabled at all context lengths (no minimum threshold).
 
 ## Prefill Throughput
 
@@ -117,8 +121,8 @@ kernel. Expected impact: +1-2%.
 | ~~P2~~ | ~~Fused KV scatter~~ | ~~+5-8%~~ Negligible post-batching | ⏭️ SKIPPED |
 | ~~P3~~ | ~~Fused attention+norm~~ | ~~+10-15%~~ No measurable impact | ⏭️ SKIPPED |
 | **P5** | F32→F16 fusion in scatter | +1-2% decode throughput | Open |
-| **P6** | Q4_0 matmul kernel optimization | Close remaining ~15% gap | Open |
-| **P7** | SDPA/KV access for long context | Fix ctx scaling degradation | Open |
+| **P6** | Q4_0 matmul kernel optimization | Close remaining ~15% gap | Investigated (NR4 not beneficial) |
+| ~~P7~~ | ~~SDPA/KV access for long context~~ | **-24.5% → ~-10% ctx degradation** | ✅ DONE (334a491, a33e9c8) |
 | **P8** | Prefill pipeline optimization | Close 4-5x prefill gap | Open |
 
 **Key finding:** The dominant bottleneck was per-dispatch synchronization.
@@ -129,12 +133,15 @@ from -89.4% to -15.1%.
 
 **Remaining gaps:**
 - **Decode (-15%):** Q4_0 matmul kernel bandwidth utilization (69.7% vs
-  llama.cpp's 82.0%). The matmul kernel is memory-bandwidth-bound; the
-  gap is in how efficiently quantized weights are streamed from memory.
-- **Context scaling:** Vexel loses 25% throughput from ctx=16→512 while
-  llama.cpp loses only 3%. Likely SDPA kernel or KV cache stride patterns.
-- **Prefill (4-5x):** Batched matmul paths and prefill-specific optimizations.
-  llama.cpp uses highly tuned matrix multiplication for M>1.
+  llama.cpp's 82.0%). NR4 kernel investigated but not beneficial due to
+  Q4_0's 18-byte block layout causing L1 cache pressure. The gap is
+  structural to Q4_0 format (block_size=32 vs MLX's group_size=64).
+  Closing this requires Q4_K kernel support.
+- ~~**Context scaling:**~~ **FIXED.** Flash Attention SDPA reduced context
+  degradation from -24.5% to ~-10% (ctx=16→512). Uses split-KV tiled
+  processing with online softmax, O(headDim) threadgroup memory.
+- **Prefill (4-5x):** Tiled simdgroup GEMM exists (`matmul_q4_0_simdgroup_f32`)
+  but gap remains. SDPA scales quadratically at longer sequences (385+ tokens).
 
 ## Vexel's Competitive Advantages (Not Captured in Single-Stream)
 
@@ -148,6 +155,20 @@ single-stream throughput:
 3. **Single binary deployment** — no Python dependency chain
 4. **Paged KV cache** — long-context efficiency
 5. **Faster cold start** — model loads ~20% faster than llama.cpp
+
+## MLX Comparison
+
+| Metric | Vexel (Q4_0) | MLX (Mistral 4-bit) | Gap |
+|--------|-------------|---------------------|-----|
+| Decode (short ctx) | 64.8 tok/s | 83.5 tok/s | -22% |
+| Context degradation (ctx=16→512) | ~-10% | -2.5% | ~7pp |
+| Prefill 128 tok | ~150 tok/s | 725 tok/s | ~5x |
+
+The decode gap vs MLX is structural to Q4_0's quantization format:
+- Q4_0: block_size=32, 18 bytes/block (non-power-of-2, cache-unfriendly)
+- MLX: group_size=64, affine scaling → 2x fewer block boundaries, fewer scale loads
+
+Closing this gap requires a different quantization kernel (Q4_K with group_size=64).
 
 ## Raw Data
 
