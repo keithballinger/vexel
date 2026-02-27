@@ -1,19 +1,20 @@
 # Track Plan: Kernel Optimization & Server Hardening
 
-Close the 89% single-stream decode gap against llama.cpp by optimizing Metal kernel
-efficiency, reducing dispatch overhead, and unblocking batched benchmarks. Vexel currently
-achieves ~9% of M3 Max theoretical memory bandwidth (8.3 tok/s) vs llama.cpp's ~84%
-(78.1 tok/s). The matmul kernel is the dominant bottleneck.
+Close the single-stream decode gap against llama.cpp by optimizing Metal kernel
+efficiency, reducing dispatch overhead, and unblocking batched benchmarks.
+
+**Current state (post Phase 5):** Vexel achieves **61.3 tok/s** (65.9% BW utilization)
+vs llama.cpp's 78.1 tok/s (84.0%). Gap: **-21.5%** (down from -89.4%).
 
 Optimization targets from `benchmarks/RESULTS.md` (post P0+P1 analysis):
 
-| Priority | Fix | Expected Impact |
-|----------|-----|-----------------|
-| **Server timeout** | Configurable request timeout | Unblocks batched benchmarks |
-| **Matmul kernel tuning** | Tiling, threadgroup sizing, coalesced reads | Largest single-stream impact |
-| **P2: Fused KV scatter** | Single dispatch for K+V per layer | +5-8% decode throughput |
-| **P3: Fused attention+norm** | Fused SDPA+RoPE, RMSNorm+residual | +10-15% decode throughput |
-| **P4: Command buffer batching** | Encode all per-layer ops in one buffer | +3-5% decode throughput |
+| Priority | Fix | Expected Impact | Status |
+|----------|-----|-----------------|--------|
+| **Server timeout** | Configurable request timeout | Unblocks batched benchmarks | ✅ DONE |
+| **Matmul kernel tuning** | NR2 tested (neutral), per-layer sync removed | Profile insights | ✅ DONE |
+| ~~P2: Fused KV scatter~~ | ~~Single dispatch for K+V per layer~~ | ~~+5-8%~~ | ⏭️ SKIPPED |
+| ~~P3: Fused attention+norm~~ | ~~Fused SDPA+RoPE, RMSNorm+residual~~ | ~~+10-15%~~ | ⏭️ SKIPPED |
+| **P4: Command buffer batching** | Encode all per-layer ops in one buffer | **8x decode speedup** | ✅ DONE |
 
 ---
 
@@ -81,72 +82,64 @@ Tuning targets:
     - Would have eliminated ~320 synchronous waits per token.
     - Failed: memory coherency between separate command buffers requires explicit wait.
     - Proper fix is command buffer batching (Phase 5), not per-dispatch async.
-- [ ] Task: Re-benchmark and measure improvement
-    - Run decode throughput (200 tokens, LLaMA 2 7B Q4_0, M3 Max).
-    - Run prefill at 12, 124, 385 tokens.
-    - Compare against baseline 8.3 tok/s decode, 41/152/107 tok/s prefill.
-    - Update `benchmarks/RESULTS.md` with new numbers.
+- [x] Task: Re-benchmark and measure improvement
+    - Superseded by Phase 5 benchmarking: decode 7.7→61.3 tok/s, prefill ~48→~103 tok/s.
+    - NR2 kernel was neutral vs multi_output for Q4_0 (both 7.6-7.7 tok/s pre-batching).
+    - Per-layer Sync removal was neutral (within noise).
+    - Real bottleneck was per-dispatch synchronization (fixed in Phase 5).
 
-## Phase 3: Fused KV Scatter (P2)
+## Phase 3: Fused KV Scatter (P2) — SKIPPED
 
-KV cache uses separate K and V buffers per layer (64 total for 32 layers). Each
-decode step dispatches 2 scatter kernels per layer (one for K, one for V). Fusing
-into a single dispatch halves the kernel dispatch count.
+**Decision: Not worth implementing.** With command buffer batching (Phase 5), the 64
+scatter dispatches per token are effectively free (~0.5-1µs CPU encoding per dispatch,
+~16-32µs total). Fusion would save below the noise floor.
 
-Key code:
-- `inference/runtime/gpu_kv_cache.go:155-242` (AppendKV — 2x ScatterKV calls)
-- `inference/backend/metal/backend.go:1449-1481` (ScatterKV, ScatterKVF16, ScatterKVF32ToF16)
-- Metal kernels: `scatter_kv_f32`, `scatter_kv_f16`, `scatter_kv_f32_to_f16`
+Analysis:
+- Pre-batching: each dispatch cost ~10-50µs (waitUntilCompleted roundtrip) → 64 × 50µs = 3.2ms
+- Post-batching: each dispatch costs ~0.5µs (encode only) → 64 × 0.5µs = 32µs
+- `TestFusionABComparison` confirmed: dispatch count reduction does NOT translate to
+  measurable throughput improvement. Bottleneck is memory bandwidth in Q4_0 matmul kernels.
 
-Design: Interleave K/V in a single buffer per layer `[K_row0, V_row0, K_row1, V_row1, ...]`
-or pass both K and V pointers to a single kernel that writes both.
+- [x] Task: Analyze whether fusion is worth implementing → NO
+    - Research concluded dispatches are free with batching.
+    - The intermediate memory I/O saved (K+V scatter: ~64 KB/layer) is negligible
+      compared to weight reads (~114 MB/layer).
 
-- [ ] Task: Create fused scatter kernel (Metal + C bridge)
-    - New Metal kernel: `scatter_kv_fused_f32` — takes K, V source and K, V dest pointers.
-    - Single dispatch writes both K and V for all heads in one pass.
-    - Add corresponding C bridge function and Go wrapper.
-    - Support both F32 and FP16 variants.
-- [ ] Task: Wire fused scatter into GPUKVCache.AppendKV
-    - Add backend interface method for fused scatter.
-    - Update AppendKV to call fused scatter when available, fallback to 2x scatter.
-    - Preserve existing FP16 and Q8_0 KV cache paths.
-- [ ] Task: Test correctness and benchmark
-    - Unit test: fused scatter output matches 2x separate scatter output.
-    - E2E: identical model output with fused vs unfused scatter.
-    - Benchmark: measure per-token overhead reduction (expect ~32-64 fewer dispatches).
+## Phase 4: Fused Attention+Norm Kernels (P3) — PARTIALLY DONE / DEPRIORITIZED
 
-## Phase 4: Fused Attention+Norm Kernels (P3)
+Two of three fusion targets were already implemented before this track:
+- ✅ `AddRMSNorm` — fused Add1 + RMSNorm2 (saves 1 dispatch/layer = 32 total)
+- ✅ `FusedMLP` — fused SiLU(x@W1)*(x@W3) (saves 2 dispatches/layer = 64 total)
 
-Attention, RoPE, layer norm, and residual add are separate kernel dispatches.
-Fusing reduces memory I/O by keeping intermediates in registers/threadgroup memory.
+**Decision: Remaining fusion (RoPE into matmul) deprioritized.** Analysis shows:
+- RoPE intermediate memory I/O: ~128 KB per layer × 32 = 4 MB total
+- Weight reads: ~3.56 GB per token → intermediates are 0.1% of total I/O
+- `TestFusionABComparison` proved fusion has NO measurable throughput impact
+- The remaining 21.5% gap is entirely in Q4_0 matmul kernel bandwidth utilization
+  (65.9% vs llama.cpp's 84%), not in dispatch overhead or intermediate memory I/O
 
-Key code:
-- `inference/runtime/block.go:1100-1140` — RMSNorm+QKV projection (already partially fused for Q4_0)
-- `inference/runtime/block.go:1237-1246` — mid-layer sync point
-- Per-layer ops: RMSNorm, Q/K/V matmul, RoPE, SDPA, output projection, residual add, FFN
+Current decode pipeline (12 dispatches/layer × 32 layers + 3 = 387 total):
+1. 3× FusedRMSNorm+MatMul (Q, K, V)
+2. RoPE
+3. 2× ScatterKV (K, V)
+4. SDPA
+5. MatMulQ4_0 (Wo)
+6. AddRMSNorm (fused Add1+RMSNorm2) ← already fused
+7. FusedMLP (fused W1+W3+SiLUMul) ← already fused
+8. MatMulQ4_0 (W2)
+9. Add (residual)
 
-Currently fused (for decode, Q4_0 only):
-- `MatMulQ4_0_FusedRMSNorm` — RMSNorm + MatMul in one dispatch
-- `MatMulQ4_0_FusedRMSNormF16` — same but outputs FP16
-
-Still separate:
-- RoPE applied after Q/K projection
-- Residual add after attention output projection
-- FFN norm + gate/up projection
-
-- [ ] Task: Fuse RoPE into attention projection
-    - Current: QKV projection, then separate RoPE kernel on Q and K.
-    - New: `FusedRMSNorm+MatMul+RoPE` kernel that applies RoPE in the same dispatch.
-    - Or: fuse RoPE into SDPA kernel input path.
-    - Choose approach based on profiling data from Phase 2.
-- [ ] Task: Fuse residual add + RMSNorm for FFN
-    - Current: separate `Add(residual, attnOut)` then `RMSNorm(ffnInput)`.
-    - New: `FusedAddRMSNorm` kernel — single read of both inputs, one write.
-    - File: new Metal kernel + C bridge + Go backend method.
-- [ ] Task: Test correctness and benchmark
-    - Unit test: fused kernel output matches unfused pipeline (within FP32 tolerance).
-    - E2E: identical model output with fused vs unfused.
-    - Benchmark: expect +10-15% decode throughput from reduced memory I/O.
+- [x] Task: Fuse residual add + RMSNorm for FFN → ALREADY DONE
+    - `AddRMSNorm` kernel: x += attn_output, normOut = RMSNorm(x) in single dispatch.
+    - Implemented in prior track, wired in block.go for SwiGLU models.
+- [~] Task: Fuse RoPE into attention projection → DEPRIORITIZED
+    - Feasible: apply rotation in matvec kernel after computing output pairs.
+    - Estimated savings: ~4 MB memory I/O (~0.01ms at 400 GB/s) = negligible.
+    - Not worth the code complexity given the minimal throughput impact.
+- [x] Task: Test correctness and benchmark
+    - `TestFusionABComparison`: fused (387 dispatches) vs unfused (451 dispatches).
+    - Result: no measurable throughput difference.
+    - `TestFusionCorrectness`: token-for-token identical output between fused and unfused paths.
 
 ## Phase 5: Command Buffer Batching (P4) [checkpoint: 4fc581c]
 
@@ -182,12 +175,20 @@ Key changes:
 
 ## Phase 6: Final Benchmarks & Reporting
 
+Run comprehensive benchmarks to establish final competitive positioning.
+Post-batching decode: 61.3 tok/s (-21.5% vs llama.cpp). Prefill, batched, and
+longer-context benchmarks still need measurement.
+
 - [ ] Task: Run full competitive benchmark suite
-    - Decode throughput: Vexel vs llama.cpp vs Ollama (same harness as Phase 5 benchmarks).
-    - Prefill throughput at 12, 124, 385 tokens.
-    - Model load time.
-    - Batched throughput with `run_batched.sh` (now unblocked by Phase 1).
-- [ ] Task: Update RESULTS.md and README.md
-    - Update performance table with post-optimization numbers.
-    - Update optimization roadmap status.
-    - Update competitive positioning based on new gap.
+    - Decode throughput: Vexel vs llama.cpp vs Ollama (200 tokens, M3 Max).
+    - Prefill throughput at 12, 124, 385 tokens (Vexel vs llama.cpp).
+    - Model load time comparison.
+    - Decode throughput at varying context lengths (50, 200, 500, 1000 tokens).
+- [ ] Task: Update RESULTS.md
+    - Fill in TBD prefill numbers (124, 385 tokens).
+    - Add context length scaling data.
+    - Update optimization roadmap with final status (P2/P3 skipped, P4 done).
+- [ ] Task: Update README.md performance section
+    - Update headline performance numbers.
+    - Update competitive positioning (from -89% to -21.5%).
+    - Document the optimization journey and key insights.
