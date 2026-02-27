@@ -180,7 +180,7 @@ Prefill throughput at M=128: ~1966 GFLOPS for N=K=4096.
 - [x] Task 3.3: Already tested (TestQ4_0BatchedPrefillCorrectness)
 - [x] Task 3.4: Prefill benchmark — run full-model comparison vs MLX/llama.cpp
 
-## Phase 4: Integration Benchmarks & Results
+## Phase 4: Integration Benchmarks & Results [checkpoint: b3e06b6]
 
 **Note:** All benchmarks in this section run under GPU contention from the
 IDE/renderer process (~400% CPU). Clean numbers require dedicated benchmark
