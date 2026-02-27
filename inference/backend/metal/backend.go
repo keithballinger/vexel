@@ -1420,10 +1420,11 @@ func (b *Backend) MatMulQ4_0_F16(a, bMat, out tensor.DevicePtr, n, k int) {
 // kvHeadStride: stride between KV heads in elements (maxSeqLen * headDim).
 func (b *Backend) SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
 	b.profiler.RecordDispatch("SDPA")
-	// Use Flash Attention split-KV kernel for long contexts where split-KV parallelism
-	// outweighs online softmax overhead. O(headDim) shared memory instead of O(kvLen).
-	// At short contexts the vec kernel is faster due to simpler per-position arithmetic.
-	if b.sdpaFlashDecodeF16Pipeline != nil && headDim%32 == 0 && kvLen >= 256 {
+	// Use Flash Attention split-KV kernel when available. The split-KV approach with
+	// online softmax has O(headDim) shared memory instead of O(kvLen), providing flat
+	// context scaling. Enabled at all context lengths since the correctness tests
+	// pass down to kvLen=1 and the overhead vs vec kernel is negligible at short contexts.
+	if b.sdpaFlashDecodeF16Pipeline != nil && headDim%32 == 0 {
 		C.metal_sdpa_flash_decode_f16(b.queue, b.sdpaFlashDecodeF16Pipeline,
 			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 			unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
