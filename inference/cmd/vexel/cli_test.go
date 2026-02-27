@@ -312,3 +312,33 @@ func TestUsageContainsGRPCPort(t *testing.T) {
 		t.Error("usage output missing --grpc-port flag reference")
 	}
 }
+
+func TestServeFlagsTimeout(t *testing.T) {
+	sf, err := parseServeFlags([]string{"--timeout", "60"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sf.RequestTimeout != 60 {
+		t.Errorf("got timeout=%d, want 60", sf.RequestTimeout)
+	}
+}
+
+func TestServeFlagsTimeoutDefault(t *testing.T) {
+	sf, err := parseServeFlags(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sf.RequestTimeout != 120 {
+		t.Errorf("default timeout: got %d, want 120", sf.RequestTimeout)
+	}
+}
+
+func TestServeFlagsTimeoutZero(t *testing.T) {
+	sf, err := parseServeFlags([]string{"--timeout", "0"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sf.RequestTimeout != 0 {
+		t.Errorf("got timeout=%d, want 0", sf.RequestTimeout)
+	}
+}

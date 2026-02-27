@@ -84,12 +84,13 @@ func subcommandArgs(args []string) []string {
 
 // ServeFlags holds flags for the serve subcommand.
 type ServeFlags struct {
-	Port         int
-	GRPCPort     int    // Port for gRPC server (default 9090)
-	MaxTokens    int
-	MaxBatchSize int
-	GRPCTLSCert  string // Path to TLS certificate for gRPC server
-	GRPCTLSKey   string // Path to TLS private key for gRPC server
+	Port           int
+	GRPCPort       int    // Port for gRPC server (default 9090)
+	MaxTokens      int
+	MaxBatchSize   int
+	GRPCTLSCert    string // Path to TLS certificate for gRPC server
+	GRPCTLSKey     string // Path to TLS private key for gRPC server
+	RequestTimeout int    // Request timeout in seconds (0 = no timeout)
 }
 
 // parseServeFlags parses serve-specific flags from the remaining args.
@@ -102,6 +103,7 @@ func parseServeFlags(args []string) (ServeFlags, error) {
 	fs.IntVar(&sf.MaxBatchSize, "max-batch-size", 1, "Max batch size for scheduler")
 	fs.StringVar(&sf.GRPCTLSCert, "grpc-tls-cert", "", "Path to TLS certificate for gRPC server")
 	fs.StringVar(&sf.GRPCTLSKey, "grpc-tls-key", "", "Path to TLS private key for gRPC server")
+	fs.IntVar(&sf.RequestTimeout, "timeout", 120, "Request timeout in seconds (0 = no timeout)")
 	if err := fs.Parse(args); err != nil {
 		return ServeFlags{}, err
 	}

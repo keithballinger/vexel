@@ -23,19 +23,23 @@ The `/generate` endpoint has a hardcoded 30-second timeout (`inference/serve/ser
 that prevents batched throughput benchmarks from completing. This is a quick fix that
 unblocks the `run_batched.sh` harness.
 
-- [ ] Task: Make server request timeout configurable
-    - Add `--timeout` flag to serve subcommand (default 120s, 0 = no timeout).
-    - Wire through `serve.Config` to `handleGenerate` and `handleStream`.
-    - Replace hardcoded `30*time.Second` with configurable value.
-    - Files: `inference/serve/server.go`, `inference/cmd/vexel/commands.go`.
-- [ ] Task: Add /health endpoint
-    - Return 200 OK with `{"status":"ok"}` JSON body.
+- [x] Task: Make server request timeout configurable
+    - Added `--timeout` flag to serve subcommand (default 120s, 0 = no timeout).
+    - Added `serve.Config` with `RequestTimeout` and `NewServerWithConfig` constructor.
+    - Replaced hardcoded `30*time.Second` with configurable value.
+    - Fixed concurrent sequence ID collisions (atomic counter replaces `time.Now().UnixNano()`).
+    - Files: `inference/serve/server.go`, `inference/cmd/vexel/commands.go`, `inference/cmd/vexel/cli.go`.
+- [x] Task: Add /health endpoint
+    - Returns 200 OK with `{"status":"ok"}` JSON body and `application/json` content type.
+    - Registered at `/health` route, logged on server startup.
     - Used by `run_batched.sh` to detect running servers.
     - File: `inference/serve/server.go`.
-- [ ] Task: Test and verify
-    - Unit test for configurable timeout (mock scheduler, verify context deadline).
-    - Unit test for /health endpoint.
-    - E2E: start server with `--timeout 120`, run `run_batched.sh` with N=1,2 clients.
+- [x] Task: Test and verify
+    - 6 new unit tests: default timeout, custom timeout, zero timeout (unlimited),
+      short timeout (triggers 408), health response, health content-type.
+    - 3 CLI flag tests: --timeout 60, default 120, --timeout 0.
+    - Pre-existing flakey E2E concurrent test now passes (atomic counter fix).
+    - All serve + CLI tests pass.
 
 ## Phase 2: Matmul Kernel Tuning
 

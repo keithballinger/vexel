@@ -193,7 +193,10 @@ func runServe(globals GlobalFlags, args []string) error {
 		}
 	}()
 
-	srv := serve.NewServer(baseSched)
+	srvCfg := serve.Config{
+		RequestTimeout: time.Duration(sf.RequestTimeout) * time.Second,
+	}
+	srv := serve.NewServerWithConfig(baseSched, srvCfg)
 	addr := fmt.Sprintf(":%d", sf.Port)
 	httpServer := &http.Server{Addr: addr, Handler: srv}
 
@@ -209,6 +212,7 @@ func runServe(globals GlobalFlags, args []string) error {
 	log.Printf("Vexel server listening on http://localhost%s", addr)
 	log.Printf("  POST /generate  — blocking text generation")
 	log.Printf("  POST /stream    — SSE token streaming")
+	log.Printf("  GET  /health    — health check")
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		return fmt.Errorf("server: %w", err)
 	}
