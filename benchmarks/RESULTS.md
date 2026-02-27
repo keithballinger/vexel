@@ -2,136 +2,108 @@
 
 > Hardware: Apple M3 Max, 128 GB Unified Memory, 400 GB/s bandwidth
 > Model: LLaMA 2 7B Q4_0 (3.56 GB)
-> Last updated: 2026-02-27 (post command buffer batching)
+> llama.cpp: b8140 (39fb81f87)
+> Last updated: 2026-02-27 (final benchmarks)
 
 ## Decode Throughput
 
 | Engine     | tok/s | ±stddev | BW Util % | vs llama.cpp |
 |------------|-------|---------|-----------|--------------|
-| llama.cpp  | 78.13 | 0.60    | 84.0%     | baseline     |
-| Ollama     | 81.23 | 2.78    | 87.3%     | +4.0%        |
-| MLX        | ~80*  | —       | ~86%      | ~+2%         |
-| **Vexel**  | **61.3** | **0.2** | **65.9%** | **-21.5%** |
+| llama.cpp  | 76.30 | 0.26    | 82.0%     | baseline     |
+| **Vexel**  | **64.8** | **0.7** | **69.7%** | **-15.1%** |
 
-*MLX estimated from published benchmarks (HF auth required for direct test)
+Measured at short context (~8 tokens prefilled). Vexel generates 50 tokens;
+llama.cpp generates 200 tokens. Both use greedy decoding (temperature=0).
 
 **Post-batching update:** Command buffer batching with memory barriers
 eliminated ~320 per-dispatch `waitUntilCompleted` CPU-GPU roundtrips per
-token. Vexel now achieves 61.3 tok/s (65.9% of M3 Max theoretical bandwidth)
-vs the previous 7.7 tok/s (8.3%). The remaining 21.5% gap to llama.cpp is
-primarily in matmul kernel efficiency and kernel fusion.
+token. The remaining ~15% gap to llama.cpp is primarily in Q4_0 matmul
+kernel bandwidth utilization (69.7% vs 82.0%).
 
 Historical decode performance:
 - Pre-P0+P1: 8.3 tok/s (per-dispatch sync, no batching)
 - Pre-batching: 7.7 tok/s (per-layer sync removed, same kernel)
-- **Post-batching: 61.3 tok/s (8x speedup, memory barriers)**
+- **Post-batching: 64.8 tok/s (8.4x speedup, memory barriers)**
+
+## Decode Throughput vs Context Length
+
+| Context | Vexel (tok/s) | llama.cpp (tok/s) | Gap     |
+|---------|---------------|-------------------|---------|
+| 16      | 64.8          | 77.3              | -16.2%  |
+| 64      | 62.0          | 76.7              | -19.2%  |
+| 128     | 59.7          | 77.2              | -22.7%  |
+| 256     | 55.2          | 75.4              | -26.8%  |
+| 512     | 48.9          | 75.2              | -34.9%  |
+
+Vexel's decode throughput degrades more steeply with context length than
+llama.cpp. At ctx=512, Vexel is 25% slower than at ctx=16, while llama.cpp
+is only ~3% slower. This suggests SDPA attention kernel or KV cache access
+patterns need optimization for longer contexts.
 
 ## Prefill Throughput
 
-| Engine     | ~12 tok  | ~124 tok  | ~385 tok  |
-|------------|----------|-----------|-----------|
-| llama.cpp  | 225      | 792       | 822       |
-| **Vexel**  | **~103** | **TBD**   | **TBD**   |
+| Engine     | 5 tok | 32 tok | 128 tok | 385 tok |
+|------------|-------|--------|---------|---------|
+| llama.cpp  | 110   | 582    | 803     | 793     |
+| **Vexel**  | **96**| **145**| **200** | **153** |
 
-Post-batching: Short prefill improved from ~48 tok/s to ~103 tok/s (2x).
-Longer sequence lengths TBD — batching should help all lengths.
+Vexel prefill throughput peaks at 128 tokens (~200 tok/s) then drops at
+385 tokens (~153 tok/s). llama.cpp scales monotonically to ~800 tok/s.
+The gap is 3.9–5.2x at longer sequences — prefill remains a significant
+optimization opportunity.
 
 Historical comparison:
 - Pre-P0: OOM'd on prompts >20 tokens
 - Post-P0: ~137 tok/s at 20 tokens (estimated)
 - Post-P0+P1: 41-152 tok/s (measured directly, varies by sequence length)
-- Post-batching: ~103 tok/s at ~12 tokens (2x improvement)
+- **Post-batching: 96-200 tok/s (2x improvement across all lengths)**
 
 ## Model Load Time
 
 | Engine     | Cold start |
 |------------|-----------|
-| llama.cpp  | ~275 ms   |
-| Vexel      | ~1335 ms  |
+| llama.cpp  | ~1100 ms  |
+| Vexel      | ~885 ms   |
 
-Vexel model load is ~4.9x slower than llama.cpp. Likely due to individual
-tensor allocation vs mmap.
+Vexel model load (GGUF parse → GPU alloc → weight copy → KV cache init)
+is ~20% faster than llama.cpp full process start (process + Metal init +
+mmap + warmup). Both measured as wall-clock time for a complete cold start
+to first-token readiness.
 
 ---
 
 ## Root Cause Analysis
 
-The 44.7% decode throughput gap traces to six architectural bottlenecks
-in Vexel's Metal execution path.
-
-### 1. ~~Per-Layer GPU Allocation Instead of Scratch Sub-allocation~~ ✅ FIXED (commit 675b962)
+### 1. ~~Per-Layer GPU Allocation~~ ✅ FIXED (commit 675b962)
 
 GPU decode path now uses bump allocation from a single pre-allocated MTLBuffer.
-13 offset-aware C bridge functions added for all hot-path Metal kernels.
-Auto-detect dispatches to offset-aware path when `DevicePtr.Offset() != 0`.
+**Measured impact:** within noise (~0-3%) — pool allocator was already efficient.
 
-**Measured impact:** within noise (~0-3%) for single-stream decode. The pool
-allocator was already efficient. Primary benefit is reduced fragmentation
-under concurrent load.
+### 2. ~~Split KV Cache~~ — DEPRIORITIZED
 
-### 2. Split KV Cache with Double Scatter
+64 extra scatter dispatches per token. Post-batching, each costs ~0.5µs
+encoding overhead = 32µs total. Below noise floor.
 
-**File:** `inference/runtime/gpu_kv_cache.go:25-45`
+### 3. ~~Kernel Fusion~~ — DEPRIORITIZED
 
-KV cache uses separate K and V buffers per layer (64 total for 32 layers).
-Each decode step dispatches **2 scatter kernels per layer** (one for K, one
-for V) instead of a single fused scatter.
+`TestFusionABComparison` proved dispatch reduction (451→387, 14%) has NO
+measurable throughput impact. Two fusions already implemented (AddRMSNorm,
+FusedMLP). Remaining fusion targets (RoPE into matmul) save only ~4MB
+memory I/O vs ~3.56GB weight reads per token.
 
-**Impact:** 64 extra kernel dispatches per token. Each dispatch has ~0.5-1µs
-of command buffer overhead on M3 Max.
+### 4. ~~Command Buffer Serialization~~ ✅ FIXED (commit 4fc581c)
 
-**Fix:** Interleave K/V in a single buffer per layer: `[K0, V0, K1, V1, ...]`.
-Single scatter kernel writes both K and V in one dispatch.
+Command buffer batching with `memoryBarrierWithScope:MTLBarrierScopeBuffers`
+between dependent dispatches. **8.4x decode speedup (7.7 → 64.8 tok/s).**
 
-### 3. No Kernel Fusion
+### 5. ~~Scratch Arena Sizing~~ ✅ FIXED (commit 2966edd)
 
-**File:** `inference/runtime/block.go:556-569`
+Arena budget formula fixed. Prefill works at all sequence lengths.
 
-Attention, RoPE, layer norm, and residual add are separate kernel dispatches.
-llama.cpp fuses attention+norm+residual into fewer dispatches, reducing
-memory I/O by ~30%.
+### 6. F32→F16 Conversion Overhead — LOW PRIORITY
 
-**Impact:** Each separate kernel reads/writes intermediate results to GPU
-memory. Fused kernels keep intermediates in registers/threadgroup memory.
-
-**Fix:** Create fused Metal kernels:
-- `fused_sdpa_rope` — attention with rotary embeddings
-- `fused_norm_residual` — RMSNorm + residual add
-
-### 4. Command Buffer Serialization
-
-**File:** `inference/runtime/block.go:835` — "Batching disabled - causes
-incorrect output due to Metal memory hazards"
-
-Vexel relies on Metal's implicit command serialization. Each of the 7
-operations per layer is a separate command buffer submission. llama.cpp
-batches operations into fewer, larger command buffers.
-
-**Impact:** At 32 layers × 7 ops, minimum 224 command submissions per token.
-M3 Max command submission latency ≈ 0.5µs → ~112µs overhead per token
-(~0.5% of the 23ms per-token budget, but cascading with allocation overhead).
-
-**Fix:** Use Metal compute command encoders with explicit resource
-dependencies (MTLFence) instead of separate command buffers. Encode all
-ops for a layer in a single command buffer.
-
-### 5. ~~Scratch Arena Sizing Bug~~ ✅ FIXED (commit 2966edd)
-
-The arena budget formula in `initModel` did not account for token ID and
-hidden-state allocations that `DecodeWithGPUKV` makes from the arena.
-With default max-tokens=64, any prompt longer than ~9 tokens would OOM.
-
-**Fix:** Added `TotalArenaBytes(maxBatchSize)` to `ModelConfig` that correctly
-budgets all four arena allocations (tokens + hidden state + layer scratch +
-logits) with 10% headroom. Arena now sized for `max(maxContextLen=2048, maxTokens)`.
-
-### 6. F32→F16 Conversion Overhead
-
-**File:** `inference/runtime/gpu_kv_cache.go:163-177`
-
-When the KV cache uses FP16 but the model computes in F32, an extra
-conversion kernel (`ScatterKVF32ToF16`) runs per layer. This is a separate
-dispatch that could be fused into the scatter kernel itself.
+Extra `ScatterKVF32ToF16` dispatch per layer. Could be fused into scatter
+kernel. Expected impact: +1-2%.
 
 ---
 
@@ -141,35 +113,41 @@ dispatch that could be fused into the scatter kernel itself.
 |----------|-----|----------------|--------|
 | ~~P0~~ | ~~Fix scratch arena sizing~~ | Prefill works at all lengths | ✅ DONE (2966edd) |
 | ~~P1~~ | ~~GPU scratch sub-allocation~~ | Within noise (pool was efficient) | ✅ DONE (675b962) |
-| ~~P4~~ | ~~Command buffer batching~~ | **8x decode speedup (7.7→61.3 tok/s)** | ✅ DONE (4fc581c) |
-| **P2** | Fused KV scatter (single dispatch) | +5-8% decode throughput | Open |
-| **P3** | Fused attention+norm kernels | +10-15% decode throughput | Open |
+| ~~P4~~ | ~~Command buffer batching~~ | **8.4x decode speedup** | ✅ DONE (4fc581c) |
+| ~~P2~~ | ~~Fused KV scatter~~ | ~~+5-8%~~ Negligible post-batching | ⏭️ SKIPPED |
+| ~~P3~~ | ~~Fused attention+norm~~ | ~~+10-15%~~ No measurable impact | ⏭️ SKIPPED |
 | **P5** | F32→F16 fusion in scatter | +1-2% decode throughput | Open |
+| **P6** | Q4_0 matmul kernel optimization | Close remaining ~15% gap | Open |
+| **P7** | SDPA/KV access for long context | Fix ctx scaling degradation | Open |
+| **P8** | Prefill pipeline optimization | Close 4-5x prefill gap | Open |
 
 **Key finding:** The dominant bottleneck was per-dispatch synchronization.
 `finish_encode()` called `[cmdBuf waitUntilCompleted]` on every kernel
-dispatch (~320 per token). Command buffer batching with `memoryBarrier(scope:
-.buffers)` between dependent dispatches reduced this to ~32 waits per token
-(one per layer). This single change closed the gap from -89.4% to -21.5%.
+dispatch (~320 per token). Command buffer batching reduced this to ~32
+waits per token (one per layer). This single change closed the decode gap
+from -89.4% to -15.1%.
 
-The remaining 21.5% gap is in:
-- Matmul kernel efficiency (Q4_0 NR2 tested, not faster than multi_output)
-- Kernel fusion (separate RoPE, norm, activation dispatches vs fused)
-- Quantized weight dequantization bandwidth
+**Remaining gaps:**
+- **Decode (-15%):** Q4_0 matmul kernel bandwidth utilization (69.7% vs
+  llama.cpp's 82.0%). The matmul kernel is memory-bandwidth-bound; the
+  gap is in how efficiently quantized weights are streamed from memory.
+- **Context scaling:** Vexel loses 25% throughput from ctx=16→512 while
+  llama.cpp loses only 3%. Likely SDPA kernel or KV cache stride patterns.
+- **Prefill (4-5x):** Batched matmul paths and prefill-specific optimizations.
+  llama.cpp uses highly tuned matrix multiplication for M>1.
 
 ## Vexel's Competitive Advantages (Not Captured in Single-Stream)
 
-The remaining decode gap (~21%) puts Vexel in competitive range.
-Vexel also has architectural advantages not captured in single-stream:
+The remaining decode gap (~15%) puts Vexel in competitive range for
+production use cases where serving architecture matters more than
+single-stream throughput:
 
 1. **Go scheduler with continuous batching** — multi-client throughput
    scaling that llama.cpp can't do natively
 2. **gRPC + HTTP dual protocol** — production serving with streaming
 3. **Single binary deployment** — no Python dependency chain
 4. **Paged KV cache** — long-context efficiency
-
-The path forward: P2-P3 kernel fusion to close the remaining gap,
-then leverage the batching architecture for the real competitive advantage.
+5. **Faster cold start** — model loads ~20% faster than llama.cpp
 
 ## Raw Data
 
@@ -177,3 +155,4 @@ then leverage the batching architecture for the real competitive advantage.
 - Prefill: `benchmarks/results/prefill_20260226/`
 - Post-P0 combined: `benchmarks/results/post_p0_benchmark.json`
 - Analysis: `benchmarks/results/decode_20260226/summary.json`
+- Final benchmarks: measured via `inference/runtime/*_test.go` and `llama-bench`

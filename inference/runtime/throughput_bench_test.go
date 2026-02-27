@@ -37,6 +37,10 @@ func TestThroughputPrefill(t *testing.T) {
 			name: "128_tokens",
 			tokens: generateTokenSequence(128), // BOS + 127 repeated tokens
 		},
+		{
+			name: "385_tokens",
+			tokens: generateTokenSequence(385), // BOS + 384 repeated tokens
+		},
 	}
 
 	results := make([]prefillResult, 0, len(cases))
@@ -116,6 +120,7 @@ func TestThroughputPrefill(t *testing.T) {
 		5:   40,  // Short prefill: dominated by per-call overhead (~60ms)
 		32:  60,  // Medium: amortizes some overhead
 		128: 100, // Long: representative prefill throughput
+		385: 100, // Longer: should maintain throughput
 	}
 	for _, r := range results {
 		minTPS, ok := minTokPerSec[r.seqLen]
@@ -207,7 +212,7 @@ func TestThroughputDecode(t *testing.T) {
 func TestThroughputDecodeContextScaling(t *testing.T) {
 	// Measure decode throughput at various context lengths.
 	// Each subtest creates a fresh model, fills context, then measures.
-	contextLengths := []int{16, 64, 128}
+	contextLengths := []int{16, 64, 128, 256, 512}
 
 	type decodeResult struct {
 		ctxLen    int
@@ -485,6 +490,29 @@ func TestFusionCorrectness(t *testing.T) {
 		t.Logf("  Fused tokens:   %v", fusedTokens[:10])
 	} else {
 		t.Errorf("%d/%d token mismatches — fused kernels produce different output!", mismatches, numTokens)
+	}
+}
+
+// TestModelLoadTime measures the time to load the model from disk, copy weights
+// to GPU, and create the KV cache. This captures the cold-start latency.
+func TestModelLoadTime(t *testing.T) {
+	const runs = 3
+	times := make([]time.Duration, runs)
+
+	for i := 0; i < runs; i++ {
+		start := time.Now()
+		m, b, c := setupModel(t, false)
+		times[i] = time.Since(start)
+		c.Free()
+		b.Close()
+		_ = m
+	}
+
+	sortDurations(times)
+	median := times[runs/2]
+	t.Logf("Model load time (median of %d runs): %.0f ms", runs, float64(median.Microseconds())/1000)
+	for i, d := range times {
+		t.Logf("  Run %d: %.0f ms", i+1, float64(d.Microseconds())/1000)
 	}
 }
 

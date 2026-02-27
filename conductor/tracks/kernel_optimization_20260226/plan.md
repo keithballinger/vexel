@@ -3,8 +3,8 @@
 Close the single-stream decode gap against llama.cpp by optimizing Metal kernel
 efficiency, reducing dispatch overhead, and unblocking batched benchmarks.
 
-**Current state (post Phase 5):** Vexel achieves **61.3 tok/s** (65.9% BW utilization)
-vs llama.cpp's 78.1 tok/s (84.0%). Gap: **-21.5%** (down from -89.4%).
+**Current state (post Phase 6):** Vexel achieves **64.8 tok/s** (69.7% BW utilization)
+vs llama.cpp's 76.3 tok/s (82.0%). Gap: **-15.1%** (down from -89.4%).
 
 Optimization targets from `benchmarks/RESULTS.md` (post P0+P1 analysis):
 
@@ -173,22 +173,26 @@ Key changes:
     - Gap to llama.cpp: -89.4% → -21.5%
     - Variance: ±0.2 tok/s over 5 runs (very consistent)
 
-## Phase 6: Final Benchmarks & Reporting
+## Phase 6: Final Benchmarks & Reporting [checkpoint: TBD]
 
-Run comprehensive benchmarks to establish final competitive positioning.
-Post-batching decode: 61.3 tok/s (-21.5% vs llama.cpp). Prefill, batched, and
-longer-context benchmarks still need measurement.
+Comprehensive benchmarks establishing final competitive positioning.
+Post-batching decode: 64.8 tok/s (-15.1% vs llama.cpp 76.3 tok/s).
 
-- [ ] Task: Run full competitive benchmark suite
-    - Decode throughput: Vexel vs llama.cpp vs Ollama (200 tokens, M3 Max).
-    - Prefill throughput at 12, 124, 385 tokens (Vexel vs llama.cpp).
-    - Model load time comparison.
-    - Decode throughput at varying context lengths (50, 200, 500, 1000 tokens).
-- [ ] Task: Update RESULTS.md
-    - Fill in TBD prefill numbers (124, 385 tokens).
-    - Add context length scaling data.
-    - Update optimization roadmap with final status (P2/P3 skipped, P4 done).
-- [ ] Task: Update README.md performance section
-    - Update headline performance numbers.
-    - Update competitive positioning (from -89% to -21.5%).
-    - Document the optimization journey and key insights.
+- [x] Task: Run full competitive benchmark suite
+    - Decode: Vexel 64.8 tok/s vs llama.cpp 76.3 tok/s (-15.1%).
+    - Prefill: Vexel 96-200 tok/s vs llama.cpp 110-803 tok/s (large gap at longer seqs).
+    - Model load: Vexel ~885ms vs llama.cpp ~1100ms (Vexel 20% faster).
+    - Context scaling: Vexel degrades 25% from ctx=16→512; llama.cpp degrades 3%.
+    - Extended throughput_bench_test.go with 385-token prefill and ctx=256/512 scaling.
+    - Added TestModelLoadTime to measure cold-start latency.
+- [x] Task: Update RESULTS.md
+    - Replaced TBD prefill numbers with measured data (5/32/128/385 tokens).
+    - Added context-length scaling table (16/64/128/256/512).
+    - Updated decode throughput from 61.3→64.8 tok/s, gap from -21.5%→-15.1%.
+    - Updated optimization roadmap: P2/P3 skipped, added P6-P8 future priorities.
+    - Updated model load time comparison.
+- [x] Task: Update README.md performance section
+    - Updated headline: 64.8 tok/s decode, -15.1% gap (was 8.3 tok/s, -89%).
+    - Added prefill numbers at 5/128/385 tokens with gaps.
+    - Updated model load: Vexel now 20% faster than llama.cpp.
+    - Added "faster cold start" to competitive advantages.

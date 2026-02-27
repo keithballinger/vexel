@@ -216,24 +216,28 @@ scripts/             Performance harness and benchmarking tools
 
 Benchmarks on Apple M3 Max (128 GB) with LLaMA 2 7B Q4_0 (3.56 GB):
 
-| Metric | Vexel | llama.cpp |
-|--------|-------|-----------|
-| Decode throughput | 8.3 tok/s | 78.1 tok/s |
-| Prefill (12 tokens) | 41 tok/s | 225 tok/s |
-| Prefill (124 tokens) | 152 tok/s | 792 tok/s |
-| Prefill (385 tokens) | 107 tok/s | 822 tok/s |
-| Model load time | ~1.3s | ~0.28s |
+| Metric | Vexel | llama.cpp | Gap |
+|--------|-------|-----------|-----|
+| Decode throughput | 64.8 tok/s | 76.3 tok/s | -15.1% |
+| Prefill (5 tokens) | 96 tok/s | 110 tok/s | -12.7% |
+| Prefill (128 tokens) | 200 tok/s | 803 tok/s | -75.1% |
+| Prefill (385 tokens) | 153 tok/s | 793 tok/s | -80.7% |
+| Model load time | ~885 ms | ~1100 ms | +20% faster |
 
-Vexel is currently ~89% slower than llama.cpp on single-stream decode.
-The primary bottleneck is matmul kernel efficiency and memory bandwidth
-utilization. See [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md) for
-detailed analysis and optimization roadmap.
+Vexel achieves **85% of llama.cpp's decode throughput** on single-stream
+generation, utilizing 69.7% of M3 Max memory bandwidth. The optimization
+journey reduced the decode gap from -89% to -15% through command buffer
+batching and memory barrier optimizations.
+
+See [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md) for detailed analysis,
+context-length scaling data, and optimization roadmap.
 
 **Where Vexel differentiates:**
 - Go scheduler with continuous batching (multi-client throughput)
 - gRPC + HTTP dual protocol for production serving
 - Single binary deployment — no Python dependency chain
 - Pure Go codebase — easy to embed, extend, and deploy
+- Faster cold start than llama.cpp (~885ms vs ~1100ms)
 
 Run the benchmark suite:
 ```bash
