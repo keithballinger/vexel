@@ -611,6 +611,17 @@ func (b *Backend) MatVecQ4_0MultiOutput(a, bMat, out tensor.DevicePtr, n, k int)
 	}
 }
 
+// MatVecQ4_0NR4 directly calls the NR4 matvec kernel (4 outputs per simdgroup,
+// 32 outputs per threadgroup). Used for A/B testing against multi_output.
+func (b *Backend) MatVecQ4_0NR4(a, bMat, out tensor.DevicePtr, n, k int) {
+	if b.matvecQ4NR4Pipeline == nil {
+		panic("MatVecQ4_0NR4 called but no matvecQ4NR4Pipeline available")
+	}
+	C.metal_matvec_q4_0_nr4_f32(b.queue, b.matvecQ4NR4Pipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(n), C.int(k))
+}
+
 // MatMulQ6_K performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q6_K format.
 // B contains raw Q6_K data (210 bytes per 256 elements).
 // Currently only supports M=1 (matvec) natively, uses loop for M>1.

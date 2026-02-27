@@ -124,102 +124,61 @@ Key design choices:
     - Compare against MLX's 2.5% degradation
     - Measure absolute throughput improvement at each context length
 
-## Phase 2: Q4_0 Matmul NR4 Kernel
+## Phase 2: Q4_0 Matmul NR4 Kernel — INVESTIGATED, NOT BENEFICIAL
 
-Increase outputs per simdgroup from 2 (NR2) to 4 (NR4) in the quantized
-matvec kernel. This doubles activation data reuse, directly improving
-memory bandwidth utilization from ~70% toward ~85%.
+**Finding:** NR4 kernel already exists (`matvec_q4_0_nr4_f32`, line 453) but
+was never dispatched because `multi_output` (8 out/TG, 1 out/SG) is already
+the fastest Q4_0 decode kernel. NR4 produces bit-identical output to
+multi_output (confirmed by TestQ4_0NR4_vs_MultiOutput) but is NOT faster.
 
-**Design:**
-- 4 outputs per simdgroup → 32 outputs per threadgroup (8 simdgroups)
-- Load activations once per block, compute 4 dot products
-- Weight loads: 4 row pointers instead of 2
-- Same Q4_0 block format (32 values, 18 bytes: 2B scale + 16B nibbles)
-- Activation loads remain float4 vectors (lines 365-367 pattern)
-- Consider packed uint4 weight loads for better bandwidth
+**A/B benchmark results (NR4 vs multi_output):**
 
-```
-// NR4 structure per simdgroup:
-int base_output = gid * 32 + simd_group * 4;
-float sum0=0, sum1=0, sum2=0, sum3=0;
+| Layer | Multi-Output | NR4 | Speedup |
+|-------|-------------|-----|---------|
+| attn 4096×4096 | ~330 µs | ~340 µs | ~0.97x |
+| mlp_up 11008×4096 | ~450 µs | ~450 µs | ~1.00x |
+| mlp_down 4096×11008 | ~470 µs | ~510 µs | ~0.92x |
+| lm_head 32000×4096 | ~850 µs | ~850 µs | ~1.00x |
 
-for (block = simd_lane; block < numBlocks; block += 32) {
-    float4 a0..a7 = load_activations(A, block);   // shared across 4 outputs
-    dequant_and_dot(B_row0[block], a0..a7, &sum0); // 4 weight rows
-    dequant_and_dot(B_row1[block], a0..a7, &sum1);
-    dequant_and_dot(B_row2[block], a0..a7, &sum2);
-    dequant_and_dot(B_row3[block], a0..a7, &sum3);
-}
-```
+**Root cause:** Q4_0's 18-byte block layout causes L1 cache pressure when
+4 weight rows share a simdgroup (NR4). The activation reuse savings (~75%
+fewer activation loads per output) are offset by the 4x increase in weight
+cache footprint. This was already identified in the codebase comment:
+"Benchmarked: multi_output (8 out/TG) is faster than NR2 (16 out/TG) for Q4_0
+because Q4_0's 18-byte block layout causes cache pressure when 2 rows share
+a simdgroup." NR4 (4 rows/SG) makes this worse.
 
-Register pressure: 4 accumulators + 8 activation float4s + 4 sets of weight
-temporaries ≈ 48 registers. Well within M3 Max's register file (~128 per thread).
+**Remaining decode gap:** The ~22% gap vs MLX (64.8 vs 83.5 tok/s) is
+structural to Q4_0's block layout. MLX uses group_size=64 quantization with
+affine scaling, which inherently has 2x fewer block boundaries and scale loads.
+Closing this gap requires either a different quantization format (Q4_K) or
+a fundamentally different kernel architecture.
 
-- [ ] Task 2.1: Write NR4 Q4_0 matvec kernel
-    - New kernel `matvec_q4_0_nr4_f32`
-    - 4 outputs per simdgroup, 32 per threadgroup
-    - Shared activation loads, 4 independent weight streams
-    - Same Q4_0 dequantization (scale * (nibble - 8))
-    - Grid sizing: ceil(N / 32) threadgroups
-- [ ] Task 2.2: Write offset-aware NR4 variant for scratch allocator
-    - `matvec_q4_0_nr4_f32_offset` with A/C byte offsets
-    - Same kernel logic, offset-adjusted buffer pointers
-- [ ] Task 2.3: Wire NR4 into dispatch path with fallback
-    - New pipeline state: `matmulQ4NR4Pipeline`
-    - Route M=1 Q4_0 dispatches to NR4 kernel
-    - Keep NR2 as fallback for N not divisible by 32
-    - Update both `MatMulQ4_0` and `MatMulQ4_0Offset` dispatch functions
-- [ ] Task 2.4: Correctness tests — bit-exact match vs NR2
-    - Test all LLaMA 2 7B layer sizes: [4096, 11008, 14336, 32000]
-    - Test N not divisible by 32 (fallback to NR2)
-    - Test with K not divisible by Q4_BLOCK_SIZE (partial blocks)
-    - Verify full model decode produces identical tokens
-- [ ] Task 2.5: Benchmark decode throughput
-    - Run TestThroughputDecode (5 runs, median)
-    - Target: >75 tok/s at short context (currently 64.8)
-    - Measure BW utilization improvement via TestThroughputGPUProfile
-    - Compare against llama.cpp 76.3 tok/s and MLX 83.5 tok/s
+- [x] Task 2.1: NR4 kernel already exists — verified correctness
+    - Tests: `TestQ4_0NR4_Correctness` — 12 subtests, all LLaMA 2 7B sizes
+    - Tests: `TestQ4_0NR4_vs_MultiOutput` — bit-identical to multi_output
+- [x] Task 2.2: A/B benchmark NR4 vs multi_output
+    - Tests: `TestQ4_0_NR4_vs_MultiOutput_Throughput` + `BenchmarkQ4_0_NR4_vs_MultiOutput`
+    - Result: NR4 is NOT faster, multi_output remains the optimal Q4_0 matvec kernel
+- [~] Tasks 2.3-2.5: Skipped — NR4 not wired into dispatch (no benefit)
 
-## Phase 3: Tiled Prefill GEMM
+## Phase 3: Tiled Prefill GEMM — ALREADY EXISTS
 
-Replace the naive prefill matmul with a tiled GEMM using `simdgroup_matrix`
-hardware instructions. This targets the 4-5x prefill gap vs MLX/llama.cpp.
+**Finding:** A tiled Q4_0 prefill GEMM using `simdgroup_matrix` operations
+already exists as `matmul_q4_0_simdgroup_f32` (line 756). It uses:
+- TILE_M=32, TILE_N=64, TILE_K=32 (matches Q4_0 block size)
+- 8 simdgroups in 2×4 layout, each computing 16×16 output tile = 32×64 total
+- Cooperative A and B tile loading into threadgroup memory
+- `simdgroup_multiply_accumulate` hardware-accelerated 8×8 matrix multiply
+- Dispatched for M≥8 in `MatMulQ4_0` and `MatMulQ4_0Offset`
 
-**Design (STEEL-inspired tiled GEMM for quantized weights):**
-- Use `simdgroup_matrix<float, 8, 8>` for 8x8 tiles
-- Block sizes: BM=32, BN=32, BK=32 (tunable for M3 Max L1 cache)
-- Cooperative loading: simdgroups load A tiles and dequantized B tiles into
-  threadgroup memory, then compute using hardware matrix multiply
-- A (activations): FP32, loaded as tiles into shared memory
-- B (weights): Q4_0, dequantized on-the-fly into FP32 shared memory tiles
-- C (output): FP32, accumulated in registers then written to device memory
+This kernel was implemented in Track 4 Phase 1 (Quantization Expansion).
+Prefill throughput at M=128: ~1966 GFLOPS for N=K=4096.
 
-Key implementation notes:
-- Q4_0 dequantization during load: read 18-byte blocks, expand to 32 floats
-- M3 Max has 32KB threadgroup memory → fits BM*BK + BK*BN = 32*32*2 = 8KB
-- simdgroup_matrix multiply: `C_tile = A_tile * B_tile` (hardware 8x8 FMA)
-- Need separate kernel from M=1 path — dispatched when M > threshold (e.g., M>=4)
-
-- [ ] Task 3.1: Write tiled Q4_0 GEMM kernel with simdgroup_matrix
-    - New kernel `gemm_q4_0_tiled_f32`
-    - Tile sizes BM=32, BN=32, BK=32 (configurable via constants)
-    - Cooperative A and B tile loading into threadgroup memory
-    - Q4_0 dequantization during B tile load
-    - simdgroup_matrix<float,8,8> multiply-accumulate
-    - Handle edge tiles where M/N/K not divisible by block size
-- [ ] Task 3.2: Wire tiled GEMM into dispatch path
-    - Dispatch condition: use tiled GEMM when M >= 4
-    - Keep existing batched kernel for M=1 (matvec) and M=2-3 (small batch)
-    - Threadgroup memory: (BM*BK + BK*BN) * sizeof(float)
-    - Grid: ceil(M/BM) * ceil(N/BN) threadgroups
-- [ ] Task 3.3: Correctness tests
-    - Compare output vs existing batched kernel at M=4, 8, 16, 32, 64, 128, 256, 385
-    - Test all weight matrix sizes in LLaMA 2 7B
-    - Verify prefill generates correct logits (full model test)
-- [ ] Task 3.4: Prefill benchmark
-    - Run TestThroughputPrefill at 5, 32, 128, 385 tokens
-    - Target: >500 tok/s at 128 tokens (currently 200)
-    - Compare against MLX (725) and llama.cpp (803)
+- [x] Task 3.1: Tiled GEMM kernel already exists (matmul_q4_0_simdgroup_f32)
+- [x] Task 3.2: Already wired into dispatch (M≥8 threshold)
+- [x] Task 3.3: Already tested (TestQ4_0BatchedPrefillCorrectness)
+- [ ] Task 3.4: Prefill benchmark — run full-model comparison vs MLX/llama.cpp
 
 ## Phase 4: Integration Benchmarks & Results Update
 
