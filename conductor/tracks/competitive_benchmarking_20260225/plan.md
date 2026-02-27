@@ -88,7 +88,7 @@ Sources:
 - [ ] Task: Run batched throughput benchmarks (Phase 3)
     - Now unblocked by P0 fix.
 
-## Phase 6: P1 GPU Scratch Sub-Allocation
+## Phase 6: P1 GPU Scratch Sub-Allocation [checkpoint: 675b962]
 - [x] Task: Implement GPU scratch sub-allocation (P1)
     - Bump allocator backed by single pre-allocated MTLBuffer with 256-byte alignment.
     - 13 offset-aware C bridge functions + Go auto-detect wrappers for all hot-path kernels
