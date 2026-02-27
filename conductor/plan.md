@@ -24,3 +24,6 @@ This plan tracks all major tracks for the project. Each track has its own detail
 - [x] **Track: Documentation & Examples: Comprehensive docs and usage examples.**
 *Link: [./tracks/documentation_examples_20260212/](./tracks/documentation_examples_20260212/)*
 *Status: Phase 1 complete. Examples (client, server, direct generate), godoc for client and scheduler packages, README updated with competitive benchmarks.*
+
+- [ ] **Track: Kernel Optimization & Server Hardening: Close the 89% decode gap against llama.cpp via matmul kernel tuning, fused kernels, command buffer batching, and server timeout fix.**
+*Link: [./tracks/kernel_optimization_20260226/](./tracks/kernel_optimization_20260226/)*
