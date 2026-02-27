@@ -173,7 +173,7 @@ Key changes:
     - Gap to llama.cpp: -89.4% → -21.5%
     - Variance: ±0.2 tok/s over 5 runs (very consistent)
 
-## Phase 6: Final Benchmarks & Reporting [checkpoint: TBD]
+## Phase 6: Final Benchmarks & Reporting [checkpoint: 8f9a053]
 
 Comprehensive benchmarks establishing final competitive positioning.
 Post-batching decode: 64.8 tok/s (-15.1% vs llama.cpp 76.3 tok/s).
