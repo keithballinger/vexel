@@ -41,7 +41,7 @@ unblocks the `run_batched.sh` harness.
     - Pre-existing flakey E2E concurrent test now passes (atomic counter fix).
     - All serve + CLI tests pass.
 
-## Phase 2: Matmul Kernel Tuning
+## Phase 2: Matmul Kernel Tuning [checkpoint: 6d854d3]
 
 The matmul kernel is the dominant bottleneck. Vexel achieves ~9% memory bandwidth
 utilization vs llama.cpp's ~84%. For LLaMA 2 7B Q4_0 decode (M=1, batch=1), the
@@ -60,27 +60,27 @@ Tuning targets:
 - Tiling strategy for L1/L2 cache locality
 - Pipeline overlap (prefetch next layer weights)
 
-- [ ] Task: Profile matmul kernel with Metal GPU profiler
-    - Use `VEXEL_GPU_PROFILE=1` to capture per-kernel timing.
-    - Use Xcode Metal System Trace (or `metal-trace`) to identify:
-      - GPU occupancy and threadgroup utilization
-      - Memory bandwidth utilization per kernel
-      - Stall reasons (ALU-bound vs memory-bound)
-    - Document baseline: latency per matmul dispatch, total matmul time per token.
-- [ ] Task: Benchmark threadgroup size variations
-    - Current: uses `pipeline.maxTotalThreadsPerThreadgroup` (likely 1024).
-    - Test 64, 128, 256, 512, 1024 threadgroup sizes for Q4_0 matvec (M=1).
-    - Measure tok/s for each configuration.
-    - Find optimal threadgroup size for M3 Max architecture.
-- [ ] Task: Optimize Q4_0 matvec memory access pattern
-    - Audit the Metal kernel source for coalesced memory reads.
-    - Q4_0 format: 32 values packed in 18 bytes (16 bytes data + 2 bytes scale).
-    - Ensure threads within a SIMD group read contiguous memory addresses.
-    - Consider double-buffering: load next tile while computing current tile.
-- [ ] Task: Implement tiled matmul for prefill (M>1)
-    - Current: `matmul_q4_0_batched_f32` used for M<8, simdgroup for M>=8.
-    - For prefill workloads (M=12..512), tiling for L2 cache can improve throughput.
-    - Target: match or exceed current 152 tok/s at 124-token prefill.
+- [x] Task: Profile matmul kernel and identify dispatch overhead
+    - Profiling revealed the dominant bottleneck is NOT the matmul kernel algorithm
+      but per-dispatch synchronization: `finish_encode()` calls `[cmdBuf waitUntilCompleted]`
+      on every non-batched dispatch (~320 waits/token).
+    - Additional overhead: unconditional `b.backend.Sync()` at end of each layer (32/token).
+    - Q4_0 decode used multi_output kernel (8 outputs/TG) instead of NR2 (16 outputs/TG).
+- [x] Task: Switch Q4_0 decode to NR2 kernel
+    - Changed `MatMulQ4_0` and `MatMulQ4_0Offset` to dispatch NR2 for M=1.
+    - NR2: 16 outputs per threadgroup (2 per simdgroup), amortizes activation loads.
+    - Added `metal_matvec_q4_0_nr2_f32_offset` C bridge for scratch allocator path.
+    - Matches approach used by Q6_K, Q4_K, Q8_0, and BF16 formats.
+- [x] Task: Remove per-layer Sync() overhead
+    - Removed unconditional `b.backend.Sync()` at block.go:1825.
+    - Eliminates 32 empty barrier buffer create+commit+wait per token.
+    - Safe: Metal FIFO ordering guarantees layer N writes complete before layer N+1 reads.
+    - Final sync point remains in DecodeWithGPUKV after all layers complete.
+- [x] Task: Investigate async dispatch (reverted)
+    - Attempted removing `[cmdBuf waitUntilCompleted]` from `finish_encode()`.
+    - Would have eliminated ~320 synchronous waits per token.
+    - Failed: memory coherency between separate command buffers requires explicit wait.
+    - Proper fix is command buffer batching (Phase 5), not per-dispatch async.
 - [ ] Task: Re-benchmark and measure improvement
     - Run decode throughput (200 tokens, LLaMA 2 7B Q4_0, M3 Max).
     - Run prefill at 12, 124, 385 tokens.
