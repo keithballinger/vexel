@@ -1824,7 +1824,6 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	// All dispatches go to the same queue, so layer N's writes complete before
 	// layer N+1's reads begin. Scratch buffer reuse is safe for the same reason.
 	// The final sync point is in DecodeWithGPUKV after all layers + logits computation.
-	// Set VEXEL_SYNC_DISPATCH=1 for per-dispatch synchronous mode (debugging).
 
 	return x, nil
 }
