@@ -28,3 +28,7 @@ This plan tracks all major tracks for the project. Each track has its own detail
 - [x] **Track: Kernel Optimization & Server Hardening: Close the decode gap against llama.cpp via command buffer batching, matmul kernel analysis, and server timeout fix.**
 *Link: [./tracks/kernel_optimization_20260226/](./tracks/kernel_optimization_20260226/)*
 *Status: All 6 phases complete. Decode gap closed from -89% to -15% (64.8 vs 76.3 tok/s). 8.4x speedup from command buffer batching with memory barriers. Kernel fusion analysis showed dispatch overhead is negligible post-batching. Remaining gap is Q4_0 matmul BW utilization (69.7% vs 82.0%). Model load 20% faster than llama.cpp.*
+
+- [ ] **Track: Beat MLX: Close the decode gap against MLX (83.5 tok/s) via Flash Attention SDPA, NR4 matmul, and tiled prefill GEMM.**
+*Link: [./tracks/beat_mlx_20260227/](./tracks/beat_mlx_20260227/)*
+*Status: Plan created. MLX benchmarked at 83.5 tok/s decode (Mistral 7B 4-bit, M3 Max). Three optimization targets: Flash Attention SDPA (fix 24.5% context scaling degradation), Q4_0 NR4 matmul (close 22% short-context gap), tiled prefill GEMM (close 4-5x prefill gap).*
