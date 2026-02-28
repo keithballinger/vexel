@@ -108,10 +108,15 @@ on prefill (26.4 → 157.8 tok/s at 128 tokens).**
 
 ## Phase 3: Integration & Benchmarks
 
-- [ ] Task 3.1: Full model correctness (TestFusionCorrectness with Q4_K_M)
-- [ ] Task 3.2: Full benchmark suite (decode + context scaling + prefill)
-- [ ] Task 3.3: Update RESULTS.md with Q4_K_M numbers
-- [ ] Task 3.4: Update README.md if Q4_K_M beats Q4_0
+- [x] Task 3.1: Full model correctness (TestFusionCorrectness with Q4_K_M)
+    - PASS: 20 tokens match between fused and unfused paths
+- [x] Task 3.2: Full benchmark suite (decode + context scaling + prefill)
+    - Q4_K_M decode: 52.8 tok/s (0.84x Q4_0's 62.9)
+    - Q4_K_M prefill 128: 157.6 tok/s (0.79x Q4_0's 200.2)
+    - Q4_K_M prefill 385: 123.5 tok/s (0.81x Q4_0's 151.7)
+    - Q4_K_M ctx scaling: 54.3→48.4 tok/s (-10.9% at 512)
+- [x] Task 3.3: Update RESULTS.md with Q4_K_M numbers
+- [x] Task 3.4: Update README.md with Q4_K_M performance table
 
 ---
 
