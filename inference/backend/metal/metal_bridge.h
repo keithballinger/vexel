@@ -133,6 +133,13 @@ void metal_matmul_q4k_batched_f32(void* queue, void* pipeline,
                                    void* C, uint64_t cOff,
                                    int M, int N, int K);
 
+// Q4_K simdgroup tiled matmul: uses simdgroup_matrix for prefill (M>=8)
+void metal_matmul_q4k_simdgroup_f32(void* queue, void* pipeline,
+                                     void* A, uint64_t aOff,
+                                     void* B, uint64_t bOff,
+                                     void* C, uint64_t cOff,
+                                     int M, int N, int K);
+
 // Q5_K multi-output matvec
 void metal_matvec_q5k_multi_output_f32(void* queue, void* pipeline,
                                         void* A, uint64_t aOff,

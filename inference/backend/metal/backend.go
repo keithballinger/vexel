@@ -104,6 +104,7 @@ type Backend struct {
 		
 			matvecQ5KNR2Pipeline        unsafe.Pointer
 			matmulQ4KBatchedPipeline    unsafe.Pointer
+			matmulQ4KSimdgroupPipeline  unsafe.Pointer
 		
 	// FP16 (Half-Precision) pipelines
 	addF16Pipeline          unsafe.Pointer
@@ -241,6 +242,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matvecQ5KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q5k_multi_output_f32"))
 	b.matvecQ5KNR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q5k_nr2_f32"))
 	b.matmulQ4KBatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4k_batched_f32"))
+	b.matmulQ4KSimdgroupPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4k_simdgroup_f32"))
 
 	// Q8_0 matmul pipelines
 	b.matvecQ8_0NR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q8_0_nr2_f32"))
@@ -684,8 +686,16 @@ func (b *Backend) MatMulQ4_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
 			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
 			C.int(n), C.int(k))
+	} else if m >= 8 && b.matmulQ4KSimdgroupPipeline != nil {
+		// Prefill (M>=8): use simdgroup_matrix tiled kernel (hardware 8×8 matmul)
+		// 32×64 tiled kernel with 8 simdgroups, same structure as Q4_0 simdgroup.
+		C.metal_matmul_q4k_simdgroup_f32(b.queue, b.matmulQ4KSimdgroupPipeline,
+			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			C.int(m), C.int(n), C.int(k))
 	} else {
-		// Prefill: use batched kernel
+		// Small batch (M<8) or no simdgroup pipeline: use batched NR2 kernel
 		if b.matmulQ4KBatchedPipeline == nil {
 			panic("MatMulQ4_K called with M>1 but no matmulQ4KBatchedPipeline available")
 		}
