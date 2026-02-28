@@ -1,0 +1,121 @@
+# Track Plan: Q4_K Kernel Optimization
+
+Close the Q4_K performance gap vs Q4_0. Currently Q4_K runs at 14.2 tok/s
+decode and ~16 tok/s prefill vs Q4_0's 39.2 tok/s and 150 tok/s — a 3x
+decode and 9x prefill penalty despite identical bytes-per-element (0.5625).
+
+**Root cause:** Q4_K kernels use scalar element processing with no
+vectorization, and Q4_K prefill has no simdgroup_matrix tiled GEMM.
+
+**Target:** Q4_K_M decode ≥ 35 tok/s, prefill ≥ 100 tok/s at 128 tokens.
+
+## Current State (LLaMA 2 7B, M3 Max 128GB)
+
+| Metric | Q4_0 | Q4_K_M | Q4_K/Q4_0 |
+|--------|------|--------|-----------|
+| Decode (50 tok) | 39.2 tok/s | 14.2 tok/s | 0.36x |
+| Prefill 5 tok | 51.4 | 16.6 | 0.32x |
+| Prefill 128 tok | 149.7 | 16.6 | 0.11x |
+| Prefill 385 tok | 106.4 | 15.9 | 0.15x |
+
+## Bottleneck Analysis
+
+### Decode (matvec_q4k_nr2_f32)
+
+1. **Scalar element processing**: Each lane processes 1 element per iteration
+   (`A[base_k + i]`). Q4_0 uses `float4` vector loads (4 elements/load).
+   **Impact: ~4x throughput loss.**
+
+2. **Serial block loop**: `for (block = 0; block < numBlocks; block++)` —
+   all 32 lanes execute the same block. Q4_0 strides blocks across lanes:
+   `for (block = simd_lane; block < numBlocks; block += 32)`.
+   **Impact: Poor instruction-level parallelism.**
+
+3. **6-bit scale/min unpacking**: 16 assignment ops per 256-element block
+   to extract 8 scales + 8 mins from packed 12-byte header. Q4_0 reads
+   a single f16 scale per 32-element block.
+   **Impact: ~3% overhead + serialization.**
+
+### Prefill (matmul_q4k_batched_f32)
+
+1. **No simdgroup_matrix ops**: Uses scalar NR2 loop instead of
+   `simdgroup_multiply_accumulate`. Q4_0 has `matmul_q4_0_simdgroup_f32`
+   with TILE_M=32, TILE_N=64, TILE_K=32 and hardware 8x8 matrix multiply.
+   **Impact: ~9x throughput loss.**
+
+2. **No shared memory**: Q4_K batched kernel uses 0 bytes threadgroup
+   memory vs Q4_0's ~12KB for cooperative tile loading.
+
+3. **1D grid topology**: `(ceil(N/16), M)` — only tiles in N dimension.
+   Q4_0 simdgroup GEMM uses 2D `(N_tiles, M_tiles)` with full tiling.
+
+---
+
+## Phase 1: Vectorized Q4_K Decode Kernel
+
+Rewrite `matvec_q4k_nr2_f32` with vectorized loads and parallel block
+processing. Target: 2.5x speedup (14.2 → ~35 tok/s).
+
+- [ ] Task 1.1: Write vectorized Q4_K multi_output decode kernel
+    - Load activations as float4 (4 elements per vector load)
+    - Process 4 nibbles in parallel per iteration
+    - Precompute `d * scale` and `dmin * min` per sub-block (amortize)
+    - 8 outputs per threadgroup (1 per simdgroup), matching Q4_0 pattern
+    - Stride blocks across lanes: `for (block = simd_lane; ...)`
+- [ ] Task 1.2: Wire into dispatch path
+    - New pipeline: `matvecQ4KMultiOutputPipeline`
+    - Route M=1 to new kernel, keep NR2 as fallback
+    - C bridge function with correct grid/threadgroup sizes
+- [ ] Task 1.3: Correctness tests
+    - Compare new kernel output vs existing NR2 kernel (bit-level parity)
+    - Test at all LLaMA 2 7B dimensions: 4096×4096, 11008×4096, 4096×11008, 32000×4096
+    - Edge cases: K not multiple of 256, N < 8
+- [ ] Task 1.4: A/B throughput benchmark
+    - Compare new multi_output vs existing NR2 at LLaMA 2 7B layer sizes
+    - Run full-model decode with VEXEL_TEST_MODEL=Q4_K_M
+    - Target: ≥ 30 tok/s decode
+
+## Phase 2: Q4_K Simdgroup Tiled Prefill GEMM
+
+Port `matmul_q4_0_simdgroup_f32` to Q4_K format. Target: 8x+ speedup
+on prefill (16.6 → ~130+ tok/s at 128 tokens).
+
+- [ ] Task 2.1: Write Q4_K simdgroup GEMM kernel
+    - Adapt Q4_0 tiling: TILE_M=32, TILE_N=64, TILE_K=32
+    - Q4_K dequantization in B tile loading (256-elem blocks → load 32 at a time)
+    - 8 simdgroups in 2×4 layout, each computing 16×16 output tile
+    - Cooperative A and B tile loading into threadgroup memory
+    - simdgroup_multiply_accumulate for hardware 8x8 matrix ops
+- [ ] Task 2.2: Wire into dispatch path
+    - New pipeline: `matmulQ4KSimdgroupPipeline`
+    - Route M≥8 to simdgroup kernel, keep batched NR2 for M<8
+    - Threadgroup memory: ~12KB (A[32×32] + B[64×32])
+    - 2D grid: `(ceil(N/TILE_N), ceil(M/TILE_M))`
+- [ ] Task 2.3: Correctness tests
+    - Compare simdgroup kernel vs batched NR2 at M=8,16,32,64,128
+    - Test Q4_K partial blocks (K not multiple of 256)
+    - Verify at all LLaMA 2 7B dimensions
+- [ ] Task 2.4: Full-model prefill benchmark
+    - Run TestThroughputPrefill with VEXEL_TEST_MODEL=Q4_K_M
+    - Compare vs Q4_0 prefill numbers
+    - Target: ≥ 100 tok/s at 128 tokens
+
+## Phase 3: Integration & Benchmarks
+
+- [ ] Task 3.1: Full model correctness (TestFusionCorrectness with Q4_K_M)
+- [ ] Task 3.2: Full benchmark suite (decode + context scaling + prefill)
+- [ ] Task 3.3: Update RESULTS.md with Q4_K_M numbers
+- [ ] Task 3.4: Update README.md if Q4_K_M beats Q4_0
+
+---
+
+## Reference: Key Files
+
+- Metal kernels: `inference/backend/metal/metal_bridge_darwin.m`
+  - Q4_K NR2: `matvec_q4k_nr2_f32` (line ~1428)
+  - Q4_K multi_output: `matvec_q4k_multi_output_f32` (line ~1323)
+  - Q4_K batched: `matmul_q4k_batched_f32` (line ~1697)
+  - Q4_0 multi_output: `matvec_q4_0_multi_output_f32` (line ~238)
+  - Q4_0 simdgroup: `matmul_q4_0_simdgroup_f32` (line ~756)
+- Dispatch: `inference/backend/metal/backend.go` → `MatMulQ4_K()` (line ~671)
+- Tests: `inference/backend/metal/q4k_kernel_test.go`, `q4k_test.go`
