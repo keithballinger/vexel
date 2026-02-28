@@ -16,9 +16,16 @@ import (
 	"vexel/inference/tensor"
 )
 
-// modelPath returns the path to the LLaMA 2 7B model, or skips the test.
+// modelPath returns the path to a GGUF model for testing.
+// Checks VEXEL_TEST_MODEL env var first, falls back to LLaMA 2 7B Q4_0.
 func modelPath(t *testing.T) string {
 	t.Helper()
+	if p := os.Getenv("VEXEL_TEST_MODEL"); p != "" {
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			t.Skipf("Model not found at %s (from VEXEL_TEST_MODEL)", p)
+		}
+		return p
+	}
 	cwd, _ := os.Getwd()
 	root := filepath.Join(cwd, "../..")
 	path := filepath.Join(root, "models", "llama-2-7b.Q4_0.gguf")
