@@ -1494,6 +1494,18 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	}
 
 	// 8. MLP: Architecture-dependent (SwiGLU for LLaMA, GELU for Phi)
+	// Fused W2+Add2: check once if backend supports accumulating matvec (out += A @ B^T).
+	// Used in the gated MLP path below to fuse W2 + residual Add2 into a single dispatch.
+	type matMulQ4Add interface {
+		MatMulQ4_0_Add(a, bMat, out tensor.DevicePtr, n, k int)
+	}
+	var didFuseW2Add2Ptr matMulQ4Add
+	var didFuseW2Add2 bool
+	if seqLen == 1 && !b.ParallelResidual && !b.HasPostNorms &&
+		b.W2.IsQuantized() && b.W2.QuantProfile() == tensor.Q4_0 {
+		didFuseW2Add2Ptr, _ = b.backend.(matMulQ4Add)
+	}
+
 	if b.MLPType == MLPGELU {
 		// GELU MLP (Phi, GPT-2): hidden = GELU(x @ W1 + bias), out = hidden @ W2 + bias
 		// For parallel residual: skip FFNNorm since we use the shared normOutPtr from AttnNorm
@@ -1836,12 +1848,24 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 
 		// Barrier: W2 reads gatePtr written by FusedMLP or SiLUMul/GELUMul
 		barrier()
-		profileOp("W2", func() {
-			if !b.W2.DevicePtr().IsNil() {
+
+		// Fused W2+Add2: for M=1 decode with Q4_0 W2 and serial residual (no PostFFNNorm),
+		// compute xPtr += gatePtr @ W2^T in a single dispatch, saving 1 dispatch per layer.
+		if didFuseW2Add2Ptr != nil && !b.W2.DevicePtr().IsNil() {
+			// Fused path: xPtr += gatePtr @ W2^T (single dispatch replaces W2 + Add2)
+			profileOp("W2+Add2", func() {
 				w2Dim := b.W2.Shape().Dims()[0]
-				b.matMulTransposed(gatePtr, b.W2, normOutPtr, seqLen, w2Dim, intermediateSize)
-			}
-		})
+				didFuseW2Add2Ptr.MatMulQ4_0_Add(gatePtr, b.W2.DevicePtr(), xPtr, w2Dim, intermediateSize)
+			})
+			didFuseW2Add2 = true
+		} else {
+			profileOp("W2", func() {
+				if !b.W2.DevicePtr().IsNil() {
+					w2Dim := b.W2.Shape().Dims()[0]
+					b.matMulTransposed(gatePtr, b.W2, normOutPtr, seqLen, w2Dim, intermediateSize)
+				}
+			})
+		}
 	}
 	if debugThisLayerPost {
 		b.backend.Sync()
@@ -1856,12 +1880,14 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		b.backend.RMSNorm(normOutPtr, b.PostFFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
 	}
 
-	// 10. Final residual add
+	// 10. Final residual add (skip if W2+Add2 was already fused above)
 	// Barrier: Add2 reads normOutPtr written by W2 (scratch buffer)
 	barrier()
 	// For parallel residual (Phi): x = x + attn_output + mlp_output (combined add)
 	// For serial residual (LLaMA): x = x + mlp_output (attn was already added in Add1)
-	if b.ParallelResidual {
+	if didFuseW2Add2 {
+		// Already fused above — skip separate Add2
+	} else if b.ParallelResidual {
 		// Combined add: x = x + attnOutput + mlpOutput
 		// attnOutput is in woOutputPtr (which is attnOutPtr for parallel residual)
 		// mlpOutput is in normOutPtr

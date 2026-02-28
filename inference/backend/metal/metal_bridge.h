@@ -540,6 +540,11 @@ void metal_matvec_q4_0_v2_f16in_f32(void* queue, void* pipeline,
                                      void* A, void* B, void* C,
                                      int N, int K);
 
+// MatVec Q4_0 v2 with add-to-output (fuses matmul + residual add)
+void metal_matvec_q4_0_v2_add_f32(void* queue, void* pipeline,
+                                   void* A, void* B, void* C,
+                                   int N, int K);
+
 // Reshape KV cache for paged attention
 // Copies data from src [numTokens, numKVHeads, headDim] to paged blocks.
 // pageTable: [numTokens] mapping each logical token to (blockID, offsetInBlock)

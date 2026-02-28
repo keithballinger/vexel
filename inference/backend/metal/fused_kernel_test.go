@@ -418,3 +418,114 @@ func TestFusedRMSNormQKV_F16_vsCPU(t *testing.T) {
 	checkVsCPU("V", outVBuf, expectedV, kvDim)
 	_ = fmt.Sprintf("") // use fmt
 }
+
+// TestMatVecQ4_0_Add verifies the fused W2+Add2 kernel: out += A @ B^T.
+// Compares against separate MatMulQ4_0 (out = A @ B^T) + element-wise Add.
+func TestMatVecQ4_0_Add(t *testing.T) {
+	b, err := NewBackend(0)
+	if err != nil {
+		t.Skipf("Metal backend not available: %v", err)
+	}
+	defer b.Close()
+
+	configs := []struct {
+		name string
+		n, k int
+	}{
+		{"small", 128, 128},
+		{"LLaMA_W2", 4096, 11008},   // W2: [hiddenSize, intermediateSize]
+		{"LLaMA_Wo", 4096, 4096},    // Wo: [hiddenSize, hiddenSize]
+	}
+
+	rng := rand.New(rand.NewSource(42))
+	for _, cfg := range configs {
+		t.Run(cfg.name, func(t *testing.T) {
+			n, k := cfg.n, cfg.k
+
+			// Generate random FP32 activation vector [k]
+			aData := make([]float32, k)
+			for i := range aData {
+				aData[i] = rng.Float32()*2 - 1
+			}
+
+			// Generate random Q4_0 weight matrix [n, k]
+			blockSize := 32
+			bytesPerBlock := 18
+			blocksPerRow := k / blockSize
+			bData := make([]byte, n*blocksPerRow*bytesPerBlock)
+			for i := range bData {
+				bData[i] = byte(rng.Intn(256))
+			}
+
+			// Generate random initial output (the "residual" x that gets added to)
+			residualData := make([]float32, n)
+			for i := range residualData {
+				residualData[i] = rng.Float32()*2 - 1
+			}
+
+			// Upload to GPU
+			aPtr := b.Alloc(k * 4)
+			bPtr := b.Alloc(len(bData))
+			outSeparatePtr := b.Alloc(n * 4)  // for separate path
+			outFusedPtr := b.Alloc(n * 4)     // for fused path
+			defer b.Free(aPtr)
+			defer b.Free(bPtr)
+			defer b.Free(outSeparatePtr)
+			defer b.Free(outFusedPtr)
+
+			b.ToDevice(aPtr, float32SliceToBytes(aData))
+			b.ToDevice(bPtr, bData)
+
+			// === Separate path: out = A @ B^T, then out = residual + out ===
+			// First: MatMulQ4_0 to get matmul result
+			b.MatMulQ4_0(aPtr, bPtr, outSeparatePtr, 1, n, k)
+			b.Sync()
+
+			// Read matmul result
+			matmulResult := make([]byte, n*4)
+			b.ToHost(matmulResult, outSeparatePtr)
+
+			// Now write residual to outSeparatePtr, then add matmul result
+			b.ToDevice(outSeparatePtr, float32SliceToBytes(residualData))
+			// Read back the matmul-only result for adding
+			matmulFloats := make([]float32, n)
+			for i := 0; i < n; i++ {
+				matmulFloats[i] = math.Float32frombits(binary.LittleEndian.Uint32(matmulResult[i*4:]))
+			}
+			// Compute expected: residual + matmul
+			expectedData := make([]float32, n)
+			for i := 0; i < n; i++ {
+				expectedData[i] = residualData[i] + matmulFloats[i]
+			}
+
+			// === Fused path: out = residual; out += A @ B^T ===
+			b.ToDevice(outFusedPtr, float32SliceToBytes(residualData))
+			b.MatMulQ4_0_Add(aPtr, bPtr, outFusedPtr, n, k)
+			b.Sync()
+
+			// Read fused result
+			fusedResult := make([]byte, n*4)
+			b.ToHost(fusedResult, outFusedPtr)
+
+			// Compare
+			var maxDiff float32
+			maxDiffIdx := 0
+			for i := 0; i < n; i++ {
+				fusedVal := math.Float32frombits(binary.LittleEndian.Uint32(fusedResult[i*4:]))
+				diff := float32(math.Abs(float64(fusedVal - expectedData[i])))
+				if diff > maxDiff {
+					maxDiff = diff
+					maxDiffIdx = i
+				}
+			}
+
+			t.Logf("  N=%d K=%d: max_diff=%.6f at idx=%d", n, k, maxDiff, maxDiffIdx)
+			if maxDiff > 0.001 {
+				fusedVal := math.Float32frombits(binary.LittleEndian.Uint32(fusedResult[maxDiffIdx*4:]))
+				t.Fatalf("  Fused vs separate mismatch: diff=%.6f at idx=%d (fused=%.6f, expected=%.6f)",
+					maxDiff, maxDiffIdx, fusedVal, expectedData[maxDiffIdx])
+			}
+		})
+	}
+}
+

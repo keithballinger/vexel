@@ -66,6 +66,7 @@ type Backend struct {
 	matvecQ4MultiOutputPipeline unsafe.Pointer
 	matvecQ4V2Pipeline          unsafe.Pointer // llama.cpp-matched: 64 threads, NR0=4, fused nibble-masking
 	matvecQ4V2F16InPipeline     unsafe.Pointer // v2 variant with FP16 activation input
+	matvecQ4V2AddPipeline       unsafe.Pointer // v2 variant that adds to output (fuses matmul + residual)
 	matvecQ4NR2Pipeline         unsafe.Pointer
 	matvecQ4NR4Pipeline         unsafe.Pointer
 	matvecQ4CollabPipeline      unsafe.Pointer
@@ -285,6 +286,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.scatterKVF32Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("scatter_kv_f32"))
 	b.scatterKVF32ToF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("scatter_kv_f32_to_f16"))
 	b.matvecQ4V2F16InPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_v2_f16in_f32"))
+	b.matvecQ4V2AddPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_v2_add_f32"))
 
 	// Q8_0 quantization pipelines
 	b.quantizeF32ToQ8_0Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("quantize_f32_to_q8_0"))
@@ -1645,6 +1647,18 @@ func (b *Backend) MatMulQ4_0_F16In(a, bMat, out tensor.DevicePtr, n, k int) {
 		panic("MatMulQ4_0_F16In called but pipeline unavailable")
 	}
 	C.metal_matvec_q4_0_v2_f16in_f32(b.queue, b.matvecQ4V2F16InPipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(n), C.int(k))
+}
+
+// MatMulQ4_0_Add performs Q4_0 matvec and ADDS result to output: out += a @ B^T.
+// Fuses W2 matmul + residual Add2 into a single dispatch (M=1 decode only).
+func (b *Backend) MatMulQ4_0_Add(a, bMat, out tensor.DevicePtr, n, k int) {
+	b.profiler.RecordDispatch("MatMulQ4_0")
+	if b.matvecQ4V2AddPipeline == nil {
+		panic("MatMulQ4_0_Add called but pipeline unavailable")
+	}
+	C.metal_matvec_q4_0_v2_add_f32(b.queue, b.matvecQ4V2AddPipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(n), C.int(k))
 }

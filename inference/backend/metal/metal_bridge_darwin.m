@@ -738,6 +738,74 @@ kernel void matvec_q4_0_v2_f32(
     }
 }
 
+// Variant of matvec_q4_0_v2_f32 that adds result to output (C[i] += dot product).
+// Used to fuse W2 matmul + residual add into single dispatch.
+kernel void matvec_q4_0_v2_add_f32(
+    device const float* A [[buffer(0)]],
+    device const uchar* B [[buffer(1)]],
+    device float* C [[buffer(2)]],
+    constant int& N [[buffer(3)]],
+    constant int& K [[buffer(4)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int r0 = (gid * MV2_NSG + simd_group) * MV2_NR0;
+    if (r0 >= N) return;
+
+    int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
+    short ix = simd_lane / 2;
+    short il = (simd_lane % 2) * 8;
+
+    device const uchar* rows[MV2_NR0];
+    for (int row = 0; row < MV2_NR0; row++) {
+        rows[row] = (r0 + row < N) ? B + (r0 + row) * numBlocks * Q4_BYTES_PER_BLOCK : nullptr;
+    }
+
+    float sumf[MV2_NR0] = {0.f, 0.f, 0.f, 0.f};
+
+    for (int ib0 = ix; ib0 < numBlocks; ib0 += MV2_NQ) {
+        int base_k = ib0 * Q4_BLOCK_SIZE + il;
+        device const float* yb = A + base_k;
+        float yl[16];
+        float sumy0 = 0.f, sumy1 = 0.f;
+
+        for (short i = 0; i < 8; i += 2) {
+            sumy0  += yb[i + 0] + yb[i + 1];
+            yl[i+0] = yb[i + 0];
+            yl[i+1] = yb[i + 1] / 256.f;
+            sumy1  += yb[i + 16] + yb[i + 17];
+            yl[i+8] = yb[i + 16] / 16.f;
+            yl[i+9] = yb[i + 17] / 4096.f;
+        }
+        float sumy = sumy0 + sumy1;
+
+        for (short row = 0; row < MV2_NR0; row++) {
+            if (!rows[row]) continue;
+            device const uchar* blockPtr = rows[row] + ib0 * Q4_BYTES_PER_BLOCK;
+            float d = float(as_type<half>(*((device const ushort*)blockPtr)));
+            device const ushort* qs = (device const ushort*)(blockPtr + 2 + il);
+
+            float acc0 = 0.f, acc1 = 0.f, acc2 = 0.f, acc3 = 0.f;
+            for (short i = 0; i < 8; i += 2) {
+                acc0 += yl[i + 0] * (qs[i / 2] & 0x000F);
+                acc1 += yl[i + 1] * (qs[i / 2] & 0x0F00);
+                acc2 += yl[i + 8] * (qs[i / 2] & 0x00F0);
+                acc3 += yl[i + 9] * (qs[i / 2] & 0xF000);
+            }
+            sumf[row] += d * (sumy * -8.f + acc0 + acc1 + acc2 + acc3);
+        }
+    }
+
+    // Add to output instead of overwrite (fuses residual add)
+    for (short row = 0; row < MV2_NR0; row++) {
+        float tot = simd_sum(sumf[row]);
+        if (simd_lane == 0 && r0 + row < N) {
+            C[r0 + row] += tot;
+        }
+    }
+}
+
 // Variant of matvec_q4_0_v2_f32 that reads FP16 activations.
 // Eliminates a separate ConvertF16ToF32 dispatch when SDPA outputs FP16.
 // Same algorithm: 64 threads, NR0=4, fused nibble-masking.
@@ -9057,6 +9125,35 @@ void metal_matvec_q4_0_v2_f16in_f32(void* queuePtr, void* pipelinePtr,
     [encoder setBytes:&K length:sizeof(K) atIndex:4];
 
     // Same dispatch geometry as v2: 64 threads per TG, NR0=4 rows per TG
+    int nsg = 2;
+    int nr0 = 4;
+    int rows_per_tg = nsg * nr0;
+    int numThreadgroups = (N + rows_per_tg - 1) / rows_per_tg;
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(64, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// MatVec Q4_0 v2 with add-to-output (fuses W2 + residual add).
+void metal_matvec_q4_0_v2_add_f32(void* queuePtr, void* pipelinePtr,
+                                   void* A, void* B, void* C,
+                                   int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:0 atIndex:2];
+    [encoder setBytes:&N length:sizeof(N) atIndex:3];
+    [encoder setBytes:&K length:sizeof(K) atIndex:4];
+
     int nsg = 2;
     int nr0 = 4;
     int rows_per_tg = nsg * nr0;
