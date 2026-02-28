@@ -1330,89 +1330,78 @@ kernel void matvec_q4k_multi_output_f32(
     uint simd_lane [[thread_index_in_simdgroup]],
     uint simd_group [[simdgroup_index_in_threadgroup]]
 ) {
-    // Each simdgroup handles one output
+    // Sub-block strided Q4_K matvec: each lane independently processes 32-element
+    // sub-blocks with stride-32, matching Q4_0 multi_output's block-striding pattern.
+    //
+    // Q4_K has 8 sub-blocks of 32 elements per 256-element block. For K=4096:
+    // 16 blocks × 8 sub-blocks = 128 total → 128/32 = 4 sub-blocks per lane.
+    // Each sub-block: 8 float4 loads + 8 dot products (same density as Q4_0).
+    //
+    // Key optimizations vs previous cooperative approach:
+    // 1. Hardware fp16 via as_type<half> (not software q4_f16_to_f32 with pow())
+    // 2. Independent lane processing (no serial block loop, better ILP)
+    // 3. Selective scale/min extraction (1 scale + 1 min per sub-block, not all 8)
+    // 4. uint vector loads for qs bytes (1 load per 4 bytes vs 4 individual loads)
     int output_idx = gid * Q4K_OUTPUTS_PER_TG + simd_group;
     if (output_idx >= N) return;
 
     float sum = 0.0f;
 
-    // Q4_K row layout
     int numBlocks = (K + Q4K_BLOCK_SIZE - 1) / Q4K_BLOCK_SIZE;
     device const uchar* b_row = B + output_idx * numBlocks * Q4K_BYTES_PER_BLOCK;
+    int totalSubBlocks = numBlocks << 3;  // numBlocks * 8
 
-    // Each thread processes elements with stride 32 within each block
-    for (int block = 0; block < numBlocks; block++) {
-        device const uchar* blockPtr = b_row + block * Q4K_BYTES_PER_BLOCK;
+    for (int sb = simd_lane; sb < totalSubBlocks; sb += 32) {
+        int block_idx = sb >> 3;           // which Q4_K block
+        int j = sb & 7;                    // sub-block index within block (0..7)
 
-        // Parse block header
-        ushort d_u16 = ((ushort)blockPtr[1] << 8) | blockPtr[0];
-        ushort dmin_u16 = ((ushort)blockPtr[3] << 8) | blockPtr[2];
-        float d = q4_f16_to_f32(d_u16);
-        float dmin = q4_f16_to_f32(dmin_u16);
+        device const uchar* blockPtr = b_row + block_idx * Q4K_BYTES_PER_BLOCK;
 
-        device const uchar* scalesData = blockPtr + 4;
-        device const uchar* qs = blockPtr + 16;  // 4-bit quantized values
+        // Hardware fp16→fp32 conversion (single cycle vs software pow())
+        float d = float(as_type<half>(*((device const ushort*)blockPtr)));
+        float dmin = float(as_type<half>(*((device const ushort*)(blockPtr + 2))));
 
-        // Unpack 6-bit scales and mins from 12 bytes
-        // Following llama.cpp get_scale_min_k4 exactly:
-        // For j < 4: scale = q[j] & 63, min = q[j+4] & 63
-        // For j >= 4: scale = (q[j+4] & 0x0F) | ((q[j-4] >> 6) << 4)
-        //             min = (q[j+4] >> 4) | ((q[j] >> 6) << 4)
-        uchar scales[8];
-        uchar mins[8];
+        // Extract only this sub-block's scale and min from packed 6-bit header
+        device const uchar* sd = blockPtr + 4;
+        int j_lo = j & 3;  // 0..3 for either half
+        uchar sc, mn;
+        if (j < 4) {
+            sc = sd[j_lo] & 0x3F;
+            mn = sd[j_lo + 4] & 0x3F;
+        } else {
+            sc = (sd[8 + j_lo] & 0x0F) | ((sd[j_lo] >> 6) << 4);
+            mn = (sd[8 + j_lo] >> 4) | ((sd[j_lo + 4] >> 6) << 4);
+        }
 
-        // First 4 sub-blocks: simple 6-bit from lower bytes
-        scales[0] = scalesData[0] & 0x3F;
-        scales[1] = scalesData[1] & 0x3F;
-        scales[2] = scalesData[2] & 0x3F;
-        scales[3] = scalesData[3] & 0x3F;
-        mins[0] = scalesData[4] & 0x3F;
-        mins[1] = scalesData[5] & 0x3F;
-        mins[2] = scalesData[6] & 0x3F;
-        mins[3] = scalesData[7] & 0x3F;
+        float dsc = d * float(sc);
+        float dmn = dmin * float(mn);
 
-        // Last 4 sub-blocks: 4 bits from bytes 8-11, 2 bits from upper bits of bytes 0-7
-        scales[4] = (scalesData[8] & 0x0F) | ((scalesData[0] >> 6) << 4);
-        scales[5] = (scalesData[9] & 0x0F) | ((scalesData[1] >> 6) << 4);
-        scales[6] = (scalesData[10] & 0x0F) | ((scalesData[2] >> 6) << 4);
-        scales[7] = (scalesData[11] & 0x0F) | ((scalesData[3] >> 6) << 4);
-        mins[4] = (scalesData[8] >> 4) | ((scalesData[4] >> 6) << 4);
-        mins[5] = (scalesData[9] >> 4) | ((scalesData[5] >> 6) << 4);
-        mins[6] = (scalesData[10] >> 4) | ((scalesData[6] >> 6) << 4);
-        mins[7] = (scalesData[11] >> 4) | ((scalesData[7] >> 6) << 4);
+        // Sub-blocks 0-3 use low nibbles, 4-7 use high nibbles of same qs bytes.
+        // Both halves share qs_base offset; 'shift' selects the nibble.
+        int qs_base = j_lo << 5;              // (j & 3) * 32
+        int shift = (j >> 2) << 2;            // 0 for j<4, 4 for j>=4
+        int elem_start = block_idx * Q4K_BLOCK_SIZE + (j << 5);  // j * 32
 
-        int base_k = block * Q4K_BLOCK_SIZE;
+        if (elem_start + 32 <= K) {
+            // Full sub-block: 32 elements = 8 × float4, matching Q4_0 density
+            device const float4* a_vec = (device const float4*)(A + elem_start);
+            device const uint* qs32 = (device const uint*)(blockPtr + 16 + qs_base);
 
-        // Process elements following llama.cpp layout exactly:
-        // Each 64-element group uses 32 bytes of qs
-        // Low nibble -> first 32 elements (scale[is+0])
-        // High nibble -> next 32 elements (scale[is+1])
-        for (int elem_offset = simd_lane; elem_offset < 256 && base_k + elem_offset < K; elem_offset += 32) {
-            int k_idx = base_k + elem_offset;
-            float a_val = A[k_idx];
-
-            // scale_idx = which 32-element sub-block (0-7)
-            int scale_idx = elem_offset / 32;
-            float sc = float(scales[scale_idx]);
-            float m = float(mins[scale_idx]);
-
-            // Byte layout: each 64-element group uses 32 bytes
-            // byte_idx = (elem / 64) * 32 + (elem % 32)
-            // nibble = (elem / 32) % 2 (0=low, 1=high)
-            int qs_byte_idx = (elem_offset / 64) * 32 + (elem_offset % 32);
-            int nibble_is_high = (elem_offset / 32) % 2;
-            uchar qs_byte = qs[qs_byte_idx];
-
-            int q;
-            if (nibble_is_high == 0) {
-                q = qs_byte & 0x0F;  // Low nibble
-            } else {
-                q = (qs_byte >> 4) & 0x0F;  // High nibble
+            // 8 dot products: each uint holds 4 qs bytes, extract 4 nibbles
+            for (int i = 0; i < 8; i++) {
+                float4 a = a_vec[i];
+                uint w = qs32[i];
+                float4 q = float4((w >> shift) & 0xF, (w >> (shift + 8)) & 0xF,
+                                  (w >> (shift + 16)) & 0xF, (w >> (shift + 24)) & 0xF);
+                sum += dot(a, dsc * q - dmn);
             }
-
-            // Dequantize: d * scale * q - dmin * min
-            float dequant = d * sc * float(q) - dmin * m;
-            sum += a_val * dequant;
+        } else if (elem_start < K) {
+            // Partial sub-block: scalar fallback for boundary
+            device const uchar* qs = blockPtr + 16 + qs_base;
+            for (int i = 0; i < 32 && elem_start + i < K; i++) {
+                float q_val = float((qs[i] >> shift) & 0xF);
+                sum += A[elem_start + i] * (dsc * q_val - dmn);
+            }
         }
     }
 
@@ -1451,15 +1440,15 @@ kernel void matvec_q4k_nr2_f32(
         device const uchar* p0 = b_row0 + block * Q4K_BYTES_PER_BLOCK;
         device const uchar* p1 = (row1 < N) ? b_row1 + block * Q4K_BYTES_PER_BLOCK : p0;
 
-        // Parse block headers
-        float d0 = q4_f16_to_f32(((ushort)p0[1] << 8) | p0[0]);
-        float dm0 = q4_f16_to_f32(((ushort)p0[3] << 8) | p0[2]);
-        float d1 = (row1 < N) ? q4_f16_to_f32(((ushort)p1[1] << 8) | p1[0]) : 0.0f;
-        float dm1 = (row1 < N) ? q4_f16_to_f32(((ushort)p1[3] << 8) | p1[2]) : 0.0f;
+        // Parse block headers (hardware fp16 conversion)
+        float d0 = float(as_type<half>(*((device const ushort*)p0)));
+        float dm0 = float(as_type<half>(*((device const ushort*)(p0 + 2))));
+        float d1 = (row1 < N) ? float(as_type<half>(*((device const ushort*)p1))) : 0.0f;
+        float dm1 = (row1 < N) ? float(as_type<half>(*((device const ushort*)(p1 + 2)))) : 0.0f;
 
         device const uchar* sd0 = p0 + 4;
         device const uchar* sd1 = p1 + 4;
-        
+
         // Unpack scales and mins (6-bit each, packed into 12 bytes)
         uchar s0[8], m0[8], s1[8], m1[8];
         s0[0] = sd0[0] & 0x3F; s0[1] = sd0[1] & 0x3F; s0[2] = sd0[2] & 0x3F; s0[3] = sd0[3] & 0x3F;

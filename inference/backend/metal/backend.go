@@ -673,15 +673,9 @@ func (b *Backend) MatMulQ6_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 func (b *Backend) MatMulQ4_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 	b.profiler.RecordDispatch("MatMulQ4_K")
 	if m == 1 {
-		// Decode: use optimized matvec kernel
-		if b.matvecQ4KNR2Pipeline != nil {
-			C.metal_matvec_q4k_nr2_f32(b.queue, b.matvecQ4KNR2Pipeline,
-				unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
-				unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
-				unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
-				C.int(n), C.int(k))
-			return
-		}
+		// Decode: use vectorized multi_output kernel (float4 loads, 8 out/TG).
+		// Benchmarked: multi_output with vectorized Q4_K dequant is faster than
+		// NR2 which uses scalar element processing with stride-32 inner loop.
 		if b.matvecQ4KPipeline == nil {
 			panic("MatMulQ4_K called but no matvecQ4KPipeline available")
 		}
