@@ -222,7 +222,7 @@ Benchmarks on Apple M3 Max (128 GB) with LLaMA 2 7B:
 |--------|-------|-----------|-----|-----|
 | Decode throughput | 64.8 tok/s | 76.3 tok/s | 83.5 tok/s | -15.1% |
 | Decode ctx degradation (16→512) | ~-10% | -2.7% | -2.5% | — |
-| Prefill (128 tokens) | 200 tok/s | 803 tok/s | 725 tok/s | — |
+| Prefill (128 tokens) | 377 tok/s | 803 tok/s | 725 tok/s | -53% |
 | Model load time | ~885 ms | ~1100 ms | — | +20% faster |
 
 **Q4_K_M (4.08 GB) — optimized kernels:**
@@ -230,7 +230,7 @@ Benchmarks on Apple M3 Max (128 GB) with LLaMA 2 7B:
 | Metric | Vexel | vs Q4_0 | Before Optimization |
 |--------|-------|---------|---------------------|
 | Decode throughput | 52.8 tok/s | 0.84x | 14.2 tok/s (3.7x faster) |
-| Prefill (128 tokens) | 157.6 tok/s | 0.79x | 16.6 tok/s (9.5x faster) |
+| Prefill (128 tokens) | 157.6 tok/s* | 0.42x | 16.6 tok/s (9.5x faster) |
 | Context degradation (16→512) | -10.9% | — | — |
 
 Vexel achieves **85% of llama.cpp's decode throughput** on Q4_0 and supports

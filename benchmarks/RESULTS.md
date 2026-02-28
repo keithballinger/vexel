@@ -3,7 +3,7 @@
 > Hardware: Apple M3 Max, 128 GB Unified Memory, 400 GB/s bandwidth
 > Model: LLaMA 2 7B Q4_0 (3.56 GB)
 > llama.cpp: b8140 (39fb81f87)
-> Last updated: 2026-02-27 (Q4_K_M kernel optimization)
+> Last updated: 2026-02-27 (P9 Phase 1: half-precision GEMM with block dequant)
 
 ## Decode Throughput
 
@@ -49,18 +49,23 @@ from O(kvLen) to O(headDim). Context degradation improved from **-24.5% to ~-10%
 | Engine     | 5 tok | 32 tok | 128 tok | 385 tok |
 |------------|-------|--------|---------|---------|
 | llama.cpp  | 110   | 582    | 803     | 793     |
-| **Vexel**  | **96**| **145**| **200** | **153** |
+| **Vexel**  | **94**| **337**| **377** | **223** |
 
-Vexel prefill throughput peaks at 128 tokens (~200 tok/s) then drops at
-385 tokens (~153 tok/s). llama.cpp scales monotonically to ~800 tok/s.
-The gap is 3.9–5.2x at longer sequences — prefill remains a significant
-optimization opportunity.
+**P9 Phase 1 (commit f4dd160):** Half-precision GEMM with block-based
+dequantization delivered **1.9-2.3x prefill speedup** at batch sizes ≥32.
+Gap to llama.cpp narrowed from 4-5x to **1.7-3.6x**. Isolated GEMM
+throughput improved 2.62x (2033→5327 GFLOPS at M=128, N=K=4096).
+
+Key techniques: `threadgroup half*` shared memory, TILE_K=64 (2 Q4_0 blocks
+per iteration), block-based B dequant (one scale load per 32 values),
+`simdgroup_half8x8` loads with `simdgroup_float8x8` accumulators.
 
 Historical comparison:
 - Pre-P0: OOM'd on prompts >20 tokens
 - Post-P0: ~137 tok/s at 20 tokens (estimated)
 - Post-P0+P1: 41-152 tok/s (measured directly, varies by sequence length)
-- **Post-batching: 96-200 tok/s (2x improvement across all lengths)**
+- Post-batching: 96-200 tok/s (2x improvement across all lengths)
+- **Post-P9 Phase 1: 94-377 tok/s (1.9x improvement at seqLen=128)**
 
 ## Q4_K_M Performance (LLaMA 2 7B, 4.08 GB)
 
@@ -174,7 +179,7 @@ kernel. Expected impact: +1-2%.
 | **P6** | Q4_0 matmul kernel optimization | Close remaining ~15% gap | Investigated (NR4 not beneficial) |
 | ~~P7~~ | ~~SDPA/KV access for long context~~ | **-24.5% → ~-10% ctx degradation** | ✅ DONE (334a491, a33e9c8) |
 | ~~P8~~ | ~~Q4_K kernel optimization~~ | **3.7x decode, 9.5x prefill** | ✅ DONE (3967f85, b9916aa) |
-| **P9** | Prefill pipeline optimization | Close remaining prefill gap to llama.cpp | Open |
+| **P9** | Prefill pipeline optimization | **1.9x prefill (Phase 1)** | Phase 1 ✅ (f4dd160) |
 
 **Key finding:** The dominant bottleneck was per-dispatch synchronization.
 `finish_encode()` called `[cmdBuf waitUntilCompleted]` on every kernel
@@ -193,9 +198,10 @@ from -89.4% to -15.1%.
   simdgroup tiled GEMM prefill (9.5x) closed the Q4_K gap from 3-9x
   slower to within 16-21% of Q4_0. Q4_K_M decode: 52.8 tok/s, prefill
   128: 157.6 tok/s.
-- **Prefill vs llama.cpp (4-5x):** Tiled simdgroup GEMM exists for both
-  Q4_0 and Q4_K but gap to llama.cpp remains. SDPA scales quadratically
-  at longer sequences (385+ tokens).
+- **Prefill vs llama.cpp (2-4x):** P9 Phase 1 narrowed the gap from
+  4-5x to 1.7-3.6x via half-precision GEMM with block dequant (2.62x
+  isolated GEMM speedup). Remaining gap likely in cross-layer CB overhead,
+  FA2 prefill utilization, and fused QKV projections.
 
 ## Vexel's Competitive Advantages (Not Captured in Single-Stream)
 
@@ -216,7 +222,7 @@ single-stream throughput:
 |--------|-----------|-------------|---------------------|-----|
 | Decode (short ctx) | 64.8 tok/s | 52.8 tok/s | 83.5 tok/s | -37% |
 | Context degradation (16→512) | ~-10% | -10.9% | -2.5% | ~8pp |
-| Prefill 128 tok | 200 tok/s | 157.6 tok/s | 725 tok/s | -78% |
+| Prefill 128 tok | 377 tok/s | 157.6 tok/s* | 725 tok/s | -78%* |
 
 With Q4_K_M kernel optimization, Vexel now supports the higher-quality
 quantization format (256-element super-blocks with 6-bit scales/mins).

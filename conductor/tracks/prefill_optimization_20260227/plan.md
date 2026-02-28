@@ -2,6 +2,7 @@
 
 > **Goal:** Close the 4-5x prefill throughput gap to llama.cpp
 > **Baseline:** Vexel Q4_0 200 tok/s @ seqLen=128, llama.cpp 803 tok/s
+> **After Phase 1:** Vexel Q4_0 377 tok/s @ seqLen=128 (1.88x improvement)
 > **Target:** ≥500 tok/s @ seqLen=128 (2.5x improvement, close to 60% of llama.cpp)
 > **Hardware:** M3 Max 128GB, LLaMA 2 7B
 
@@ -37,22 +38,40 @@ Five bottlenecks identified (priority ordered by estimated impact):
 
 ## Implementation Plan
 
-### Phase 1: GEMM Kernel — Register-Based Dequantization
+### Phase 1: GEMM Kernel — Half-Precision + Block Dequantization ✅ DONE (f4dd160)
 
-Target: 2-3x improvement on GEMM-dominated prefill path.
+**Achieved:** 2.62x isolated GEMM improvement, 1.88x full-model prefill at seqLen=128.
 
-- [ ] Task 1.1: Write benchmark test for isolated Q4_0 simdgroup GEMM throughput
-    - Test at M=128, N=4096, K=4096 (typical prefill projection)
-    - Measure current GFLOPS and memory bandwidth utilization
-- [ ] Task 1.2: Implement register-dequant Q4_0 simdgroup kernel
-    - Each simdgroup loads A from shared memory, dequantizes B from device to registers
-    - Eliminate shared_B entirely (save 8KB threadgroup memory)
-    - Vectorized nibble extraction: load uint4, extract 8 quants with bitwise ops
-    - Keep TILE_M=32, TILE_N=64, increase TILE_K to 64 (2 Q4_0 blocks per iteration)
-    - Use simdgroup_load for A, manual register construction for B tiles
-- [ ] Task 1.3: Run correctness tests (parity with current kernel)
-- [ ] Task 1.4: Benchmark isolated GEMM and full-model prefill
-    - Target: ≥400 tok/s at seqLen=128
+Key techniques (final kernel):
+- Half-precision shared memory (`threadgroup half*`) for A and B tiles
+- TILE_K=64 (2 Q4_0 blocks per K-tile, halves barrier count 128→64)
+- Block-based B dequant: threads 0-127 each handle one Q4_0 block (32 values),
+  single scale load per block (32x fewer scale reads vs flat approach)
+- `simdgroup_half8x8` loads → `simdgroup_float8x8` accumulators (mixed-precision MAC)
+- 12KB total shared memory (4KB A + 8KB B) — allows 2 TGs per compute unit
+
+Approaches explored (M=128, N=K=4096):
+| Configuration | GFLOPS | vs Baseline |
+|---|---|---|
+| Baseline (float, TILE_K=32) | 2033 | 1.00x |
+| Half shared mem only (TILE_K=32) | 1510 | 0.74x (regression) |
+| 128 threads (4 SG) | 2079 | 1.02x (no gain) |
+| Half + TILE_K=64 flat dequant | 3397 | 1.67x |
+| Half + TILE_K=128 block dequant | 4466 | 2.20x (24KB kills occupancy) |
+| **Half + TILE_K=64 block dequant** | **5327** | **2.62x** |
+
+Full-model prefill results:
+| seqLen | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| 5 | 96.2 tok/s | 94.2 tok/s | Same (NR2 kernel path) |
+| 32 | 145.2 tok/s | 337.2 tok/s | 2.32x |
+| 128 | 200.2 tok/s | 376.9 tok/s | 1.88x |
+| 385 | 151.7 tok/s | 223.2 tok/s | 1.47x |
+
+- [x] Task 1.1: Baseline GEMM benchmark (2033 GFLOPS)
+- [x] Task 1.2: Implement optimized kernel (half + TILE_K=64 + block dequant)
+- [x] Task 1.3: Correctness tests pass (max_diff 0.000689)
+- [x] Task 1.4: Full-model prefill: 377 tok/s (target was ≥400, close)
 
 ### Phase 2: Cross-Layer Command Buffer Batching
 
