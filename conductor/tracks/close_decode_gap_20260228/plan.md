@@ -43,6 +43,14 @@ Theoretical minimum compute time: ~9.4ms (BW-limited at 400 GB/s).
     - block.go: F16-input Wo path, skip convert
 - [x] Result: **70.4 tok/s**, 291 dispatches/token (+13.0% from baseline)
 
+## Phase 2.4: Fused W2+Add2 — COMPLETE
+- [x] Task 2.4a: Write matvec_q4_0_v2_add_f32 kernel (out += A @ B^T)
+    - Same v2 technique but accumulates instead of overwrites output
+    - Fuses W2 down-projection + residual Add2 into single dispatch
+- [x] Task 2.4b: Wire into block.go with type assertion (serial residual, Q4_0 only)
+- [x] Task 2.4c: Correctness: bitwise-identical at 128×128, 4096×11008, 4096×4096
+- [x] Result: **70.0 tok/s**, 259 dispatches/token (neutral throughput — dispatch overhead no longer dominant)
+
 ## Current Status
 
 | Stage | Dispatches | tok/s | Gap to llama.cpp |
@@ -51,21 +59,27 @@ Theoretical minimum compute time: ~9.4ms (BW-limited at 400 GB/s).
 | + v2 kernel | 419 | 61.7 | 19.1% |
 | + QKV fusion | 355 | 69.9 | 8.4% |
 | + Fused scatter + F16-in Wo | 291 | 70.4 | 7.7% |
+| + W2+Add2 fusion | 259 | 70.0 | 8.2% |
 
-Per-layer dispatches now: 9 (FusedQKV + RoPE + ScatterKV + SDPA + Wo + AddRMSNorm + FusedMLP + W2 + Add2)
+Per-layer dispatches now: 8 (FusedQKV + RoPE + ScatterKV + SDPA + Wo + AddRMSNorm + FusedMLP + W2+Add2)
 
 ## Remaining Gap Analysis
 
-70.4 tok/s → 14.2ms/token. Target 73 tok/s → 13.7ms/token. Need to save ~0.5ms.
+70.0 tok/s → 14.3ms/token. Target 73 tok/s → 13.7ms/token. Need to save ~0.6ms.
+
+Dispatch overhead is no longer the dominant bottleneck (reduced 38% from 419→259).
+The remaining gap is now in per-kernel compute time and per-dispatch overhead (~55µs/dispatch).
 
 Potential further optimizations:
-- Fuse Wo + Add1 + RMSNorm2: replace 3 dispatches (Wo + AddRMSNorm + ... ) with fused kernel
-- Batch-dispatch: encode multiple layers' non-dependent ops in parallel
-- Further kernel tuning: shared memory optimization for remaining dispatches
+- Fuse Wo + AddRMSNorm into single kernel (save 1 dispatch/layer → 227 dispatches)
+- Reduce per-dispatch overhead (CGO crossing, Metal API calls)
+- Kernel compute optimization: faster SDPA, RoPE, or matvec implementations
+- Batch-dispatch: encode independent operations in parallel command encoders
 
 ## Reference: Key Files
 
 - v2 kernel: `inference/backend/metal/metal_bridge_darwin.m` (matvec_q4_0_v2_f32)
+- v2 accumulate: same file (matvec_q4_0_v2_add_f32)
 - F16-input variant: same file (matvec_q4_0_v2_f16in_f32)
 - Fused QKV kernel: same file (matvec_q4_0_fused_rmsnorm_qkv_f16)
 - Fused KV scatter: same file (scatter_kv_f16_fused)
