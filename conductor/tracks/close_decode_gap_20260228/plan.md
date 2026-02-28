@@ -1,86 +1,75 @@
-# Track Plan: Close the 15% Decode Gap to llama.cpp
+# Track Plan: Close the Decode Gap to llama.cpp
 
-Vexel Q4_0 decode is 64.8 tok/s vs llama.cpp's 76.3 tok/s (-15.1%) on M3 Max.
-BW utilization: 69.7% vs 82.0%. The gap is entirely in Q4_0 matvec kernel efficiency.
+Vexel Q4_0 decode was 62.3 tok/s vs llama.cpp's 76.3 tok/s (-18.4%) on M3 Max.
+Root cause: dispatch overhead dominates (419 dispatches/token × ~17µs each).
 
 **Target: ≥73 tok/s decode throughput (≤5% gap to llama.cpp).**
 
 ## Background
 
-The current M=1 decode path uses `matvec_q4_0_multi_output_f32`:
-- 8 outputs per threadgroup (1 per simdgroup), 256 threads
-- Each thread in simdgroup handles blocks with stride 32
-- Vectorized float4 activation loads, simd_sum reduction
-- NR2 (16 outputs/TG) and NR4 (32 outputs/TG) benchmarked: no benefit
-  due to Q4_0's 18-byte block layout causing L1 cache pressure
+The M=1 decode path was dominated by dispatch overhead, not raw kernel speed.
+419 dispatches per token × ~17µs dispatch overhead = ~7ms overhead per token.
+Theoretical minimum compute time: ~9.4ms (BW-limited at 400 GB/s).
 
-The `matvec_q4_0_optimized_f32` variant exists with shared-memory activation
-caching but is not used in the main decode path.
-
-## Phase 0: Decode Profiling Baseline
+## Phase 0: Decode Profiling Baseline — COMPLETE
 - [x] Task 0.1: Per-operation decode profiling at ctx=16
-    - Test: TestDecodeProfileBaseline in throughput_bench_test.go
-    - Baseline: **62.3 tok/s** (16.0 ms/token median), BW util 55.5% (222 GB/s)
-    - Per-op breakdown (sync-inflated, but relative proportions valid):
-      FusedMLP=16.6%, FusedRMSNorm+QKV_F16=16.3%, W2=13.0%,
-      SDPA=10.8%, RoPE=9.6%, Wo=9.5%, AddRMSNorm=8.2%, KVCache=8.1%, Add2=7.7%
-    - 419 dispatches/token: MatMulQ4_0(64) + FusedRMSNorm+MatMul(96) + FusedMLP(32) +
-      ScatterKV(64) + Convert(32) + RoPE(32) + SDPA(32) + Add(32) + AddRMSNorm(32) + misc
-    - **Matmuls dominate** (7 per layer = 224 dispatches, 53.5%)
-    - FP16 KV path active: adds 32 Convert dispatches/token
-- [x] Task 0.2: Per-layer matmul bandwidth measurement
-    - Overall: 3.56 GB × 62.3 tok/s = 222 GB/s (55.5% of 400 GB/s)
-    - Theoretical ceiling: 400/3.56 = 112 tok/s
-    - Gap analysis: 76.3 llama.cpp → 82.0% BW, Vexel 62.3 → 55.5%
-    - Remaining bandwidth gap: 26.5 percentage points
-- [x] Task 0.3: Profile command buffer sync overhead
-    - Cross-layer batching IS active (line 476 of decode.go wraps all layers in single CB)
-    - 2 batches/token (outer cross-layer + final sync)
-    - 40µs avg per dispatch within batch (16.75ms / 419 dispatches)
-    - Sync overhead NOT the bottleneck — the batch path is working correctly
+    - Baseline: **62.3 tok/s** (16.0ms/token median), 419 dispatches/token
+    - Per-layer: 13 dispatches (FusedRMSNorm×3, RoPE, ScatterKV×2, SDPA, Convert, MatMulQ4_0×2, Add, AddRMSNorm, FusedMLP)
+    - Dispatch overhead is the dominant bottleneck (~43% of wall time)
 
-## Phase 1: Decode Command Buffer Optimization
-- [ ] Task 1.1: Audit decode command buffer batching
-    - Verify whether decode already uses the batch-encode path from
-      commit 4fc581c, or still uses per-dispatch synchronization
-    - If batching IS active: measure remaining sync overhead
-    - If batching is NOT active for M=1: wire it up
-- [ ] Task 1.2: Minimize per-token CPU overhead
-    - Profile Go→CGo→Metal dispatch overhead per decode token
-    - Consider fusing consecutive matmuls into single dispatch where possible
-    - Benchmark with reduced sync points
+## Phase 2.1: v2 Matvec Kernel — COMPLETE
+- [x] Task 2.1a: Write matvec_q4_0_v2_f32 matching llama.cpp's decode technique
+    - 64 threads, NR0=4, fused nibble-masking (pre-scaled activations)
+    - Fix: corrected qs pointer offset (blockPtr + 2 + il, not blockPtr + 1 + il/2)
+- [x] Task 2.1b: Correctness tests pass (11 configs, max_diff ≤ 0.017)
+- [x] Task 2.1c: Benchmark: 5-39% faster in isolation vs multi_output
+    - 4096×4096: 288→275µs (1.05x), 4096×11008: 441→318µs (1.39x)
+- [x] Result: 61.7 tok/s (marginal — only 64/419 dispatches use v2)
 
-## Phase 2: Matvec Kernel Optimization
-- [ ] Task 2.1: Shared-memory activation caching kernel
-    - Test `matvec_q4_0_optimized_f32` variant that pre-loads activations
-      to shared memory before computing multiple output rows
-    - Key hypothesis: shared-memory activation reuse reduces device BW
-    - Benchmark vs current multi_output at all decode dimensions
-- [ ] Task 2.2: Vectorized Q4_0 block extraction
-    - Current: byte-by-byte nibble extraction with masks
-    - Try: uint16_t packed reads (2 bytes → 4 elements) matching llama.cpp
-    - Try: uint32_t reads (4 bytes → 8 elements) for wider extraction
-- [ ] Task 2.3: Tune output parallelism
-    - Current: 8 outputs/TG (1 per simdgroup)
-    - Test: 4 outputs/TG with 2 simdgroups per output (more reduction parallelism)
-    - Test: 16 outputs/TG with shared memory activation broadcast
-    - Measure occupancy tradeoffs at each configuration
+## Phase 2.2: Fused QKV Dispatch — COMPLETE
+- [x] Task 2.2a: Write matvec_q4_0_fused_rmsnorm_qkv_f16 kernel
+    - Single dispatch for RMSNorm + Q/K/V projections (3→1 per layer)
+    - Routes threadgroups to Q, K, or V based on gid
+    - Bitwise-identical output vs 3 separate FusedRMSNormF16 dispatches
+- [x] Task 2.2b: Wire into block.go FP16 decode path
+- [x] Result: **69.9 tok/s**, 355 dispatches/token (+12.2% from baseline)
 
-## Phase 3: Integration Benchmarks
-- [ ] Task 3.1: End-to-end decode benchmark
-    - Measure at ctx=16, 128, 512 with temperature=0, 50 tokens
-    - Compare to llama.cpp baseline
-    - Target: ≥73 tok/s at short context
-- [ ] Task 3.2: Verify no prefill regression
-    - Confirm prefill throughput still ≥700 tok/s at seqLen=128
-- [ ] Task 3.3: Update tracking docs
-    - Update RESULTS.md with new decode numbers
-    - Update COMPETITORS.md gap analysis
+## Phase 2.3: Fused KV Scatter + Eliminate Converts — COMPLETE
+- [x] Task 2.3a: Write scatter_kv_f16_fused kernel (K+V in single dispatch)
+- [x] Task 2.3b: Write matvec_q4_0_v2_f16in_f32 kernel (FP16 activation input)
+    - Reads half* instead of float* — eliminates ConvertF16ToF32 dispatch
+- [x] Task 2.3c: Wire both into runtime
+    - gpu_kv_cache.go: fused scatter via type assertion
+    - block.go: F16-input Wo path, skip convert
+- [x] Result: **70.4 tok/s**, 291 dispatches/token (+13.0% from baseline)
+
+## Current Status
+
+| Stage | Dispatches | tok/s | Gap to llama.cpp |
+|-------|-----------|-------|-----------------|
+| Baseline | 419 | 62.3 | 18.4% |
+| + v2 kernel | 419 | 61.7 | 19.1% |
+| + QKV fusion | 355 | 69.9 | 8.4% |
+| + Fused scatter + F16-in Wo | 291 | 70.4 | 7.7% |
+
+Per-layer dispatches now: 9 (FusedQKV + RoPE + ScatterKV + SDPA + Wo + AddRMSNorm + FusedMLP + W2 + Add2)
+
+## Remaining Gap Analysis
+
+70.4 tok/s → 14.2ms/token. Target 73 tok/s → 13.7ms/token. Need to save ~0.5ms.
+
+Potential further optimizations:
+- Fuse Wo + Add1 + RMSNorm2: replace 3 dispatches (Wo + AddRMSNorm + ... ) with fused kernel
+- Batch-dispatch: encode multiple layers' non-dependent ops in parallel
+- Further kernel tuning: shared memory optimization for remaining dispatches
 
 ## Reference: Key Files
 
-- Matvec kernel: `inference/backend/metal/metal_bridge_darwin.m` (lines 238-318)
-- NR2 kernel: same file (lines 329-451)
-- Optimized kernel: same file (lines 653-737)
-- Dispatch routing: `inference/backend/metal/backend.go` (lines 595-631)
-- SDPA decode: `inference/backend/metal/metal_bridge_darwin.m` (lines 4624-4747)
+- v2 kernel: `inference/backend/metal/metal_bridge_darwin.m` (matvec_q4_0_v2_f32)
+- F16-input variant: same file (matvec_q4_0_v2_f16in_f32)
+- Fused QKV kernel: same file (matvec_q4_0_fused_rmsnorm_qkv_f16)
+- Fused KV scatter: same file (scatter_kv_f16_fused)
+- Dispatch routing: `inference/backend/metal/backend.go`
+- Forward pass: `inference/runtime/block.go`
+- KV cache: `inference/runtime/gpu_kv_cache.go`
+- Tests: `inference/backend/metal/q4_batched_matmul_test.go`, `fused_kernel_test.go`
