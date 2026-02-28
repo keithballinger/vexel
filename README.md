@@ -10,7 +10,7 @@ Vexel is a high-performance inference engine for Large Language Models (LLMs) on
 - **Streaming Support**: Server-Sent Events (SSE) for real-time token streaming.
 - **Go Client Library**: High-level Go client (`vexel/client`) for easy integration.
 - **Direct Inference API**: Use the runtime directly for custom pipelines and benchmarking.
-- **GGUF Support**: Compatible with GGUF model format (Q4_0 and other quantizations).
+- **GGUF Support**: Compatible with GGUF model format (Q4_0, Q4_K_M, Q6_K quantizations).
 - **Multi-Architecture**: Supports LLaMA family (LLaMA 2/3, Mistral) and Phi family (Phi-2, Phi-3).
 
 ## Getting Started
@@ -214,19 +214,27 @@ scripts/             Performance harness and benchmarking tools
 
 ## Performance
 
-Benchmarks on Apple M3 Max (128 GB) with LLaMA 2 7B Q4_0 (3.56 GB):
+Benchmarks on Apple M3 Max (128 GB) with LLaMA 2 7B:
+
+**Q4_0 (3.56 GB):**
 
 | Metric | Vexel | llama.cpp | MLX | Gap (vs llama.cpp) |
 |--------|-------|-----------|-----|-----|
 | Decode throughput | 64.8 tok/s | 76.3 tok/s | 83.5 tok/s | -15.1% |
 | Decode ctx degradation (16→512) | ~-10% | -2.7% | -2.5% | — |
-| Prefill (128 tokens) | ~150 tok/s | 803 tok/s | 725 tok/s | — |
+| Prefill (128 tokens) | 200 tok/s | 803 tok/s | 725 tok/s | — |
 | Model load time | ~885 ms | ~1100 ms | — | +20% faster |
 
-Vexel achieves **85% of llama.cpp's decode throughput** on single-stream
-generation, utilizing 69.7% of M3 Max memory bandwidth. The optimization
-journey reduced the decode gap from -89% to -15% through command buffer
-batching, memory barriers, and Flash Attention SDPA.
+**Q4_K_M (4.08 GB) — optimized kernels:**
+
+| Metric | Vexel | vs Q4_0 | Before Optimization |
+|--------|-------|---------|---------------------|
+| Decode throughput | 52.8 tok/s | 0.84x | 14.2 tok/s (3.7x faster) |
+| Prefill (128 tokens) | 157.6 tok/s | 0.79x | 16.6 tok/s (9.5x faster) |
+| Context degradation (16→512) | -10.9% | — | — |
+
+Vexel achieves **85% of llama.cpp's decode throughput** on Q4_0 and supports
+Q4_K_M with custom sub-block strided decode and simdgroup tiled prefill kernels.
 
 **Flash Attention:** Tiled split-KV decode with online softmax reduced context
 scaling degradation from -24.5% to ~-10% (ctx=16 → ctx=512).

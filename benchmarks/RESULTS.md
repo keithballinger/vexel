@@ -3,7 +3,7 @@
 > Hardware: Apple M3 Max, 128 GB Unified Memory, 400 GB/s bandwidth
 > Model: LLaMA 2 7B Q4_0 (3.56 GB)
 > llama.cpp: b8140 (39fb81f87)
-> Last updated: 2026-02-27 (final benchmarks)
+> Last updated: 2026-02-27 (Q4_K_M kernel optimization)
 
 ## Decode Throughput
 
@@ -61,6 +61,56 @@ Historical comparison:
 - Post-P0: ~137 tok/s at 20 tokens (estimated)
 - Post-P0+P1: 41-152 tok/s (measured directly, varies by sequence length)
 - **Post-batching: 96-200 tok/s (2x improvement across all lengths)**
+
+## Q4_K_M Performance (LLaMA 2 7B, 4.08 GB)
+
+Q4_K uses 256-element super-blocks with 6-bit packed scales/mins and 8
+sub-blocks of 32 elements each. Q4_K_M models mix 193 Q4_K tensors with
+33 Q6_K tensors (v_proj and down_proj) plus F32 norms.
+
+### Q4_K Kernel Optimization Results
+
+Custom sub-block strided decode kernel and simdgroup tiled prefill GEMM
+closed the Q4_K performance gap from 3-9x slower than Q4_0 to within 16-21%.
+
+**Decode (sub-block strided matvec):**
+
+| Engine | Q4_0 | Q4_K_M | Q4_K/Q4_0 | Before Optimization |
+|--------|------|--------|-----------|---------------------|
+| Vexel  | 62.9 tok/s | 52.8 tok/s | 0.84x | 14.2 tok/s (0.36x) |
+
+Key techniques: each SIMD lane independently processes 32-element sub-blocks
+with stride-32 (128 sub-blocks for K=4096, 4 per lane), hardware fp16 via
+`as_type<half>`, selective scale/min extraction, uint vector loads. **3.7x
+speedup** over scalar baseline.
+
+**Prefill (simdgroup tiled GEMM):**
+
+| seqLen | Q4_0 | Q4_K_M | Q4_K/Q4_0 | Before Optimization |
+|--------|------|--------|-----------|---------------------|
+| 5      | 96.2 tok/s  | 26.7 tok/s  | 0.28x | 16.6 tok/s (0.32x) |
+| 32     | 145.2 tok/s | 132.3 tok/s | 0.91x | — |
+| 128    | 200.2 tok/s | 157.6 tok/s | 0.79x | 16.6 tok/s (0.11x) |
+| 385    | 151.7 tok/s | 123.5 tok/s | 0.81x | 15.9 tok/s (0.15x) |
+
+Key techniques: ported `matmul_q4_0_simdgroup_f32` to Q4_K with TILE_K=32
+aligned to sub-block size, 8 simdgroups in 2×4 layout, 12KB threadgroup
+memory, hardware 8×8 matrix multiply via `simdgroup_multiply_accumulate`.
+**9.5x speedup** at 128 tokens over batched scalar baseline.
+
+**Context scaling (Q4_K_M decode):**
+
+| Context | tok/s | Degradation |
+|---------|-------|-------------|
+| 16      | 54.3  | baseline    |
+| 64      | 53.9  | -0.7%       |
+| 128     | 53.2  | -2.0%       |
+| 256     | 51.8  | -4.6%       |
+| 512     | 48.4  | -10.9%      |
+
+Note: seqLen=5 prefill uses batched NR2 kernel (M<8 threshold), not the
+simdgroup kernel. The seqLen=5 Q4_K gap is a known limitation of the
+scalar NR2 fallback path.
 
 ## Model Load Time
 
@@ -123,7 +173,8 @@ kernel. Expected impact: +1-2%.
 | **P5** | F32→F16 fusion in scatter | +1-2% decode throughput | Open |
 | **P6** | Q4_0 matmul kernel optimization | Close remaining ~15% gap | Investigated (NR4 not beneficial) |
 | ~~P7~~ | ~~SDPA/KV access for long context~~ | **-24.5% → ~-10% ctx degradation** | ✅ DONE (334a491, a33e9c8) |
-| **P8** | Prefill pipeline optimization | Close 4-5x prefill gap | Open |
+| ~~P8~~ | ~~Q4_K kernel optimization~~ | **3.7x decode, 9.5x prefill** | ✅ DONE (3967f85, b9916aa) |
+| **P9** | Prefill pipeline optimization | Close remaining prefill gap to llama.cpp | Open |
 
 **Key finding:** The dominant bottleneck was per-dispatch synchronization.
 `finish_encode()` called `[cmdBuf waitUntilCompleted]` on every kernel
@@ -134,14 +185,17 @@ from -89.4% to -15.1%.
 **Remaining gaps:**
 - **Decode (-15%):** Q4_0 matmul kernel bandwidth utilization (69.7% vs
   llama.cpp's 82.0%). NR4 kernel investigated but not beneficial due to
-  Q4_0's 18-byte block layout causing L1 cache pressure. The gap is
-  structural to Q4_0 format (block_size=32 vs MLX's group_size=64).
-  Closing this requires Q4_K kernel support.
+  Q4_0's 18-byte block layout causing L1 cache pressure.
 - ~~**Context scaling:**~~ **FIXED.** Flash Attention SDPA reduced context
   degradation from -24.5% to ~-10% (ctx=16→512). Uses split-KV tiled
   processing with online softmax, O(headDim) threadgroup memory.
-- **Prefill (4-5x):** Tiled simdgroup GEMM exists (`matmul_q4_0_simdgroup_f32`)
-  but gap remains. SDPA scales quadratically at longer sequences (385+ tokens).
+- ~~**Q4_K kernels:**~~ **FIXED.** Sub-block strided decode (3.7x) and
+  simdgroup tiled GEMM prefill (9.5x) closed the Q4_K gap from 3-9x
+  slower to within 16-21% of Q4_0. Q4_K_M decode: 52.8 tok/s, prefill
+  128: 157.6 tok/s.
+- **Prefill vs llama.cpp (4-5x):** Tiled simdgroup GEMM exists for both
+  Q4_0 and Q4_K but gap to llama.cpp remains. SDPA scales quadratically
+  at longer sequences (385+ tokens).
 
 ## Vexel's Competitive Advantages (Not Captured in Single-Stream)
 
@@ -158,17 +212,18 @@ single-stream throughput:
 
 ## MLX Comparison
 
-| Metric | Vexel (Q4_0) | MLX (Mistral 4-bit) | Gap |
-|--------|-------------|---------------------|-----|
-| Decode (short ctx) | 64.8 tok/s | 83.5 tok/s | -22% |
-| Context degradation (ctx=16→512) | ~-10% | -2.5% | ~7pp |
-| Prefill 128 tok | ~150 tok/s | 725 tok/s | ~5x |
+| Metric | Vexel Q4_0 | Vexel Q4_K_M | MLX (Mistral 4-bit) | Gap (Q4_K_M vs MLX) |
+|--------|-----------|-------------|---------------------|-----|
+| Decode (short ctx) | 64.8 tok/s | 52.8 tok/s | 83.5 tok/s | -37% |
+| Context degradation (16→512) | ~-10% | -10.9% | -2.5% | ~8pp |
+| Prefill 128 tok | 200 tok/s | 157.6 tok/s | 725 tok/s | -78% |
 
-The decode gap vs MLX is structural to Q4_0's quantization format:
-- Q4_0: block_size=32, 18 bytes/block (non-power-of-2, cache-unfriendly)
-- MLX: group_size=64, affine scaling → 2x fewer block boundaries, fewer scale loads
-
-Closing this gap requires a different quantization kernel (Q4_K with group_size=64).
+With Q4_K_M kernel optimization, Vexel now supports the higher-quality
+quantization format (256-element super-blocks with 6-bit scales/mins).
+Q4_K_M decode is currently 16% slower than Q4_0 due to the 33 Q6_K
+tensors using unoptimized NR2 kernels (v_proj, down_proj, lm_head).
+The Q4_K matmul kernels themselves are well-optimized — the remaining
+gap is in Q6_K dispatch and the larger block overhead.
 
 ## Raw Data
 
