@@ -100,6 +100,16 @@ void metal_matmul_q4_0_simdgroup_f32(void* queue, void* pipeline,
                                       void* A, void* B, void* C,
                                       int M, int N, int K);
 
+// V2: TILE_M=64, TILE_N=32, TILE_K=32, swizzled shared memory, 4 SG × 128 threads
+void metal_matmul_q4_0_simdgroup_v2_f32(void* queue, void* pipeline,
+                                         void* A, void* B, void* C,
+                                         int M, int N, int K);
+
+// V3: TILE_M=64, TILE_N=32, TILE_K=32, blocked 8×8 shared memory (llama.cpp layout)
+void metal_matmul_q4_0_simdgroup_v3_f32(void* queue, void* pipeline,
+                                         void* A, void* B, void* C,
+                                         int M, int N, int K);
+
 // Q6_K multi-output matvec: for lm_head which uses Q6_K quantization
 void metal_matvec_q6k_multi_output_f32(void* queue, void* pipeline,
                                         void* A, void* B, void* C,
@@ -281,6 +291,13 @@ void metal_matmul_q4_0_simdgroup_f32_offset(void* queue, void* pipeline,
                                              void* C, uint64_t cOff,
                                              int M, int N, int K);
 
+// V3 offset-aware: blocked 8×8 shared memory layout, TILE_M=64, TILE_N=32
+void metal_matmul_q4_0_simdgroup_v3_f32_offset(void* queue, void* pipeline,
+                                                 void* A, uint64_t aOff,
+                                                 void* B,
+                                                 void* C, uint64_t cOff,
+                                                 int M, int N, int K);
+
 void metal_matvec_q4_0_transposed_f32_offset(void* queue, void* pipeline,
                                               void* A, uint64_t aOff,
                                               void* B,
@@ -336,6 +353,22 @@ void metal_matvec_q4_0_fused_mlp_f32_offset(void* queue, void* pipeline,
 
 void metal_mul_f32(void* queue, void* pipeline,
                    void* a, void* b, void* out, int n);
+
+/// Deinterleave QKV: split fused [M, qkvDim] output into separate Q, K, V.
+// All pointers use offset for scratch-allocated buffer support.
+void metal_deinterleave_qkv_f32(void* queue, void* pipeline,
+                                 void* srcBuf, uint64_t srcOff,
+                                 void* dstQBuf, uint64_t dstQOff,
+                                 void* dstKBuf, uint64_t dstKOff,
+                                 void* dstVBuf, uint64_t dstVOff,
+                                 int M, int qDim, int kvDim);
+
+// Deinterleave 2-way: split fused [M, dim1+dim2] into separate A [M, dim1], B [M, dim2]
+void metal_deinterleave_2way_f32(void* queue, void* pipeline,
+                                  void* srcBuf, uint64_t srcOff,
+                                  void* dstABuf, uint64_t dstAOff,
+                                  void* dstBBuf, uint64_t dstBOff,
+                                  int M, int dim1, int dim2);
 
 // Argmax: find index of maximum value (for GPU-side greedy sampling)
 void metal_argmax_f32(void* queue, void* pipeline,

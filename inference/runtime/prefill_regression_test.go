@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"vexel/inference/backend/metal"
 	"vexel/inference/memory"
@@ -265,4 +266,475 @@ func TestPrefillFP32VsFP16(t *testing.T) {
 		}
 	}
 	t.Logf("FP32 vs FP16 max logit diff: %f", maxDiff)
+}
+
+// TestFusedQKVCorrectness verifies that fused QKV projection (single matmul + deinterleave)
+// produces identical prefill logits and greedy decode tokens to the unfused path (3 separate matmuls).
+// This validates Phase 3a: FuseQKVWeights + deinterleave kernel.
+//
+// The prefill logits must be bit-identical (same GEMM computation, same accumulation order).
+// Decode tokens may diverge slightly due to autoregressive amplification of tiny numerical
+// differences (quantized near-tie logits can flip argmax over many steps).
+func TestFusedQKVCorrectness(t *testing.T) {
+	const numDecodeTokens = 20
+	prefillTokens := []int{1, 15043, 29892, 920, 526} // BOS + "Hello, how are"
+
+	// 1. Baseline: separate Wq/Wk/Wv projections (no QKV fusion)
+	m1, b1, c1 := setupModel(t, false)
+	unfusedLogits := getLogits(t, m1, b1, prefillTokens, 0)
+	nextToken := argmax(unfusedLogits)
+	pos := len(prefillTokens)
+
+	unfusedTokens := make([]int, numDecodeTokens)
+	for i := 0; i < numDecodeTokens; i++ {
+		unfusedTokens[i] = nextToken
+		logits := getLogits(t, m1, b1, []int{nextToken}, pos)
+		nextToken = argmax(logits)
+		pos++
+	}
+	b1.Close()
+	c1.Free()
+
+	// 2. Fused path: Wqkv + deinterleave
+	m2, b2, c2 := setupModelFusedQKV(t)
+	fusedLogits := getLogits(t, m2, b2, prefillTokens, 0)
+	nextToken = argmax(fusedLogits)
+	pos = len(prefillTokens)
+
+	fusedTokens := make([]int, numDecodeTokens)
+	for i := 0; i < numDecodeTokens; i++ {
+		fusedTokens[i] = nextToken
+		logits := getLogits(t, m2, b2, []int{nextToken}, pos)
+		nextToken = argmax(logits)
+		pos++
+	}
+	b2.Close()
+	c2.Free()
+
+	// Check 1: Prefill logits comparison — should be very close (same GEMM math)
+	var maxDiff float64
+	var sumDiff float64
+	for i := range unfusedLogits {
+		diff := math.Abs(float64(unfusedLogits[i] - fusedLogits[i]))
+		sumDiff += diff
+		if diff > maxDiff {
+			maxDiff = diff
+		}
+	}
+	avgDiff := sumDiff / float64(len(unfusedLogits))
+	t.Logf("Prefill logits comparison: max_diff=%.6f, avg_diff=%.8f (%d values)", maxDiff, avgDiff, len(unfusedLogits))
+
+	// Prefill argmax must match
+	unfusedFirst := argmax(unfusedLogits)
+	fusedFirst := argmax(fusedLogits)
+	if unfusedFirst != fusedFirst {
+		t.Errorf("CRITICAL: Prefill first-token mismatch: unfused=%d, fused=%d", unfusedFirst, fusedFirst)
+	} else {
+		t.Logf("Prefill first token: %d (matches)", unfusedFirst)
+	}
+
+	// Max logit diff should be very small for Q4_0 (same computation, same accumulation)
+	if maxDiff > 0.01 {
+		t.Errorf("Prefill logit max_diff %.6f exceeds threshold 0.01 — possible bug", maxDiff)
+	}
+
+	// Check 2: Decode token comparison — allow small divergence from autoregressive amplification
+	mismatches := 0
+	for i := 0; i < numDecodeTokens; i++ {
+		if unfusedTokens[i] != fusedTokens[i] {
+			t.Logf("  Token mismatch at decode step %d (pos %d): unfused=%d, fused=%d",
+				i, i+len(prefillTokens), unfusedTokens[i], fusedTokens[i])
+			mismatches++
+		}
+	}
+
+	t.Logf("Decode token comparison: %d/%d match", numDecodeTokens-mismatches, numDecodeTokens)
+	t.Logf("  Unfused: %v", unfusedTokens[:min(10, numDecodeTokens)])
+	t.Logf("  Fused:   %v", fusedTokens[:min(10, numDecodeTokens)])
+
+	// Allow up to 3 mismatches in 20 decode tokens (quantized near-tie logits)
+	if mismatches > 3 {
+		t.Errorf("%d/%d token mismatches exceeds tolerance — possible correctness issue", mismatches, numDecodeTokens)
+	}
+}
+
+// TestFusedGateUpCorrectness verifies that fused gate_up projection (single matmul + deinterleave)
+// produces identical prefill logits and greedy decode tokens to the unfused path (2 separate matmuls).
+// This validates Phase 3b: FuseGateUpWeights + deinterleave_2way kernel.
+func TestFusedGateUpCorrectness(t *testing.T) {
+	const numDecodeTokens = 20
+	prefillTokens := []int{1, 15043, 29892, 920, 526} // BOS + "Hello, how are"
+
+	// 1. Baseline: separate W1/W3 projections (no gate_up fusion)
+	m1, b1, c1 := setupModel(t, false)
+	unfusedLogits := getLogits(t, m1, b1, prefillTokens, 0)
+	nextToken := argmax(unfusedLogits)
+	pos := len(prefillTokens)
+
+	unfusedTokens := make([]int, numDecodeTokens)
+	for i := 0; i < numDecodeTokens; i++ {
+		unfusedTokens[i] = nextToken
+		logits := getLogits(t, m1, b1, []int{nextToken}, pos)
+		nextToken = argmax(logits)
+		pos++
+	}
+	b1.Close()
+	c1.Free()
+
+	// 2. Fused path: W1W3 + deinterleave_2way
+	m2, b2, c2 := setupModelFusedGateUp(t)
+	fusedLogits := getLogits(t, m2, b2, prefillTokens, 0)
+	nextToken = argmax(fusedLogits)
+	pos = len(prefillTokens)
+
+	fusedTokens := make([]int, numDecodeTokens)
+	for i := 0; i < numDecodeTokens; i++ {
+		fusedTokens[i] = nextToken
+		logits := getLogits(t, m2, b2, []int{nextToken}, pos)
+		nextToken = argmax(logits)
+		pos++
+	}
+	b2.Close()
+	c2.Free()
+
+	// Check 1: Prefill logits comparison
+	var maxDiff float64
+	var sumDiff float64
+	for i := range unfusedLogits {
+		diff := math.Abs(float64(unfusedLogits[i] - fusedLogits[i]))
+		sumDiff += diff
+		if diff > maxDiff {
+			maxDiff = diff
+		}
+	}
+	avgDiff := sumDiff / float64(len(unfusedLogits))
+	t.Logf("Prefill logits comparison: max_diff=%.6f, avg_diff=%.8f (%d values)", maxDiff, avgDiff, len(unfusedLogits))
+
+	unfusedFirst := argmax(unfusedLogits)
+	fusedFirst := argmax(fusedLogits)
+	if unfusedFirst != fusedFirst {
+		t.Errorf("CRITICAL: Prefill first-token mismatch: unfused=%d, fused=%d", unfusedFirst, fusedFirst)
+	} else {
+		t.Logf("Prefill first token: %d (matches)", unfusedFirst)
+	}
+
+	if maxDiff > 0.01 {
+		t.Errorf("Prefill logit max_diff %.6f exceeds threshold 0.01 — possible bug", maxDiff)
+	}
+
+	// Check 2: Decode token comparison
+	mismatches := 0
+	for i := 0; i < numDecodeTokens; i++ {
+		if unfusedTokens[i] != fusedTokens[i] {
+			t.Logf("  Token mismatch at decode step %d (pos %d): unfused=%d, fused=%d",
+				i, i+len(prefillTokens), unfusedTokens[i], fusedTokens[i])
+			mismatches++
+		}
+	}
+
+	t.Logf("Decode token comparison: %d/%d match", numDecodeTokens-mismatches, numDecodeTokens)
+	t.Logf("  Unfused: %v", unfusedTokens[:min(10, numDecodeTokens)])
+	t.Logf("  Fused:   %v", fusedTokens[:min(10, numDecodeTokens)])
+
+	if mismatches > 3 {
+		t.Errorf("%d/%d token mismatches exceeds tolerance — possible correctness issue", mismatches, numDecodeTokens)
+	}
+}
+
+// TestFusedAllCorrectness verifies both QKV and gate_up fusions combined.
+func TestFusedAllCorrectness(t *testing.T) {
+	const numDecodeTokens = 20
+	prefillTokens := []int{1, 15043, 29892, 920, 526} // BOS + "Hello, how are"
+
+	// 1. Baseline: no fusion
+	m1, b1, c1 := setupModel(t, false)
+	unfusedLogits := getLogits(t, m1, b1, prefillTokens, 0)
+	nextToken := argmax(unfusedLogits)
+	pos := len(prefillTokens)
+
+	unfusedTokens := make([]int, numDecodeTokens)
+	for i := 0; i < numDecodeTokens; i++ {
+		unfusedTokens[i] = nextToken
+		logits := getLogits(t, m1, b1, []int{nextToken}, pos)
+		nextToken = argmax(logits)
+		pos++
+	}
+	b1.Close()
+	c1.Free()
+
+	// 2. Both fusions: QKV + gate_up
+	m2, b2, c2 := setupModelFusedAll(t)
+	fusedLogits := getLogits(t, m2, b2, prefillTokens, 0)
+	nextToken = argmax(fusedLogits)
+	pos = len(prefillTokens)
+
+	fusedTokens := make([]int, numDecodeTokens)
+	for i := 0; i < numDecodeTokens; i++ {
+		fusedTokens[i] = nextToken
+		logits := getLogits(t, m2, b2, []int{nextToken}, pos)
+		nextToken = argmax(logits)
+		pos++
+	}
+	b2.Close()
+	c2.Free()
+
+	// Check prefill logits
+	var maxDiff float64
+	for i := range unfusedLogits {
+		diff := math.Abs(float64(unfusedLogits[i] - fusedLogits[i]))
+		if diff > maxDiff {
+			maxDiff = diff
+		}
+	}
+	t.Logf("Prefill logits max_diff=%.6f", maxDiff)
+
+	unfusedFirst := argmax(unfusedLogits)
+	fusedFirst := argmax(fusedLogits)
+	if unfusedFirst != fusedFirst {
+		t.Errorf("Prefill first-token mismatch: unfused=%d, fused=%d", unfusedFirst, fusedFirst)
+	}
+	if maxDiff > 0.01 {
+		t.Errorf("Prefill logit max_diff %.6f exceeds threshold 0.01", maxDiff)
+	}
+
+	// Decode tokens
+	mismatches := 0
+	for i := 0; i < numDecodeTokens; i++ {
+		if unfusedTokens[i] != fusedTokens[i] {
+			mismatches++
+		}
+	}
+	t.Logf("Decode: %d/%d match", numDecodeTokens-mismatches, numDecodeTokens)
+	if mismatches > 3 {
+		t.Errorf("%d/%d token mismatches exceeds tolerance", mismatches, numDecodeTokens)
+	}
+}
+
+// TestFusedPrefillThroughput measures prefill throughput with and without QKV+gate_up fusion.
+// Runs back-to-back to minimize environmental variance for fair A/B comparison.
+func TestFusedPrefillThroughput(t *testing.T) {
+	tokens := generateTokenSequence(128)
+	seqLen := len(tokens)
+	const warmup = 2
+	const iterations = 5
+
+	type result struct {
+		name    string
+		avgMs   float64
+		tokPerS float64
+	}
+	var results []result
+
+	// Test 1: Baseline (no fusion)
+	{
+		m, b, c := setupModel(t, false)
+		for w := 0; w < warmup; w++ {
+			m.DecodeWithGPUKV(tokens, 0)
+			b.Sync()
+			c.Reset()
+		}
+		times := make([]time.Duration, iterations)
+		for i := 0; i < iterations; i++ {
+			c.Reset()
+			start := time.Now()
+			m.DecodeWithGPUKV(tokens, 0)
+			b.Sync()
+			times[i] = time.Since(start)
+		}
+		sortDurations(times)
+		avg := (times[1] + times[2] + times[3]) / 3
+		tps := float64(seqLen) / avg.Seconds()
+		results = append(results, result{"baseline", float64(avg.Microseconds()) / 1000, tps})
+		b.Close()
+		c.Free()
+	}
+
+	// Test 2: QKV fusion only
+	{
+		m, b, c := setupModelFusedQKV(t)
+		for w := 0; w < warmup; w++ {
+			m.DecodeWithGPUKV(tokens, 0)
+			b.Sync()
+			c.Reset()
+		}
+		times := make([]time.Duration, iterations)
+		for i := 0; i < iterations; i++ {
+			c.Reset()
+			start := time.Now()
+			m.DecodeWithGPUKV(tokens, 0)
+			b.Sync()
+			times[i] = time.Since(start)
+		}
+		sortDurations(times)
+		avg := (times[1] + times[2] + times[3]) / 3
+		tps := float64(seqLen) / avg.Seconds()
+		results = append(results, result{"QKV fused", float64(avg.Microseconds()) / 1000, tps})
+		b.Close()
+		c.Free()
+	}
+
+	// Test 3: Both QKV + gate_up fusion
+	{
+		m, b, c := setupModelFusedAll(t)
+		for w := 0; w < warmup; w++ {
+			m.DecodeWithGPUKV(tokens, 0)
+			b.Sync()
+			c.Reset()
+		}
+		times := make([]time.Duration, iterations)
+		for i := 0; i < iterations; i++ {
+			c.Reset()
+			start := time.Now()
+			m.DecodeWithGPUKV(tokens, 0)
+			b.Sync()
+			times[i] = time.Since(start)
+		}
+		sortDurations(times)
+		avg := (times[1] + times[2] + times[3]) / 3
+		tps := float64(seqLen) / avg.Seconds()
+		results = append(results, result{"QKV+gate_up fused", float64(avg.Microseconds()) / 1000, tps})
+		b.Close()
+		c.Free()
+	}
+
+	t.Log("\n=== Prefill Throughput Comparison (seqLen=128) ===")
+	for _, r := range results {
+		t.Logf("  %-20s: %8.1f tok/s  (%.2f ms)", r.name, r.tokPerS, r.avgMs)
+	}
+	if len(results) >= 3 {
+		speedup := results[2].tokPerS / results[0].tokPerS
+		t.Logf("  Speedup (both fused vs baseline): %.2fx", speedup)
+	}
+}
+
+// setupModelFusedQKV creates a model with QKV weight fusion enabled.
+func setupModelFusedQKV(t *testing.T) (*runtime.ModelRuntime, *metal.Backend, *runtime.GPUKVCache) {
+	t.Helper()
+	path := modelPath(t)
+
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Failed to open GGUF: %v", err)
+	}
+	cfg := runtime.ModelConfigFromGGUF(gf.GetModelConfig())
+	gf.Close()
+
+	gpuBackend, err := metal.NewBackend(0)
+	if err != nil {
+		t.Fatalf("Failed to init Metal: %v", err)
+	}
+
+	memCtx := memory.NewInferenceContext(tensor.Metal)
+	maxTokens := 2048
+	totalScratch := cfg.TotalArenaBytes(maxTokens)
+	memCtx.AddArenaWithBackend(memory.Scratch, int(totalScratch), gpuBackend.Alloc)
+
+	model, err := runtime.NewModelRuntime(gpuBackend, memCtx, nil, cfg)
+	if err != nil {
+		t.Fatalf("Failed to create runtime: %v", err)
+	}
+
+	if err := model.LoadWeights(path); err != nil {
+		t.Fatalf("Failed to load weights: %v", err)
+	}
+	if err := model.CopyWeightsToDevice(); err != nil {
+		t.Fatalf("Failed to copy weights: %v", err)
+	}
+
+	// Fuse QKV weights for prefill optimization
+	if err := model.FuseQKVWeights(); err != nil {
+		t.Fatalf("Failed to fuse QKV weights: %v", err)
+	}
+
+	cache := model.CreateGPUKVCache(2048)
+	return model, gpuBackend, cache
+}
+
+// setupModelFusedGateUp creates a model with gate_up weight fusion enabled.
+func setupModelFusedGateUp(t *testing.T) (*runtime.ModelRuntime, *metal.Backend, *runtime.GPUKVCache) {
+	t.Helper()
+	path := modelPath(t)
+
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Failed to open GGUF: %v", err)
+	}
+	cfg := runtime.ModelConfigFromGGUF(gf.GetModelConfig())
+	gf.Close()
+
+	gpuBackend, err := metal.NewBackend(0)
+	if err != nil {
+		t.Fatalf("Failed to init Metal: %v", err)
+	}
+
+	memCtx := memory.NewInferenceContext(tensor.Metal)
+	maxTokens := 2048
+	totalScratch := cfg.TotalArenaBytes(maxTokens)
+	memCtx.AddArenaWithBackend(memory.Scratch, int(totalScratch), gpuBackend.Alloc)
+
+	model, err := runtime.NewModelRuntime(gpuBackend, memCtx, nil, cfg)
+	if err != nil {
+		t.Fatalf("Failed to create runtime: %v", err)
+	}
+
+	if err := model.LoadWeights(path); err != nil {
+		t.Fatalf("Failed to load weights: %v", err)
+	}
+	if err := model.CopyWeightsToDevice(); err != nil {
+		t.Fatalf("Failed to copy weights: %v", err)
+	}
+
+	// Fuse gate_up weights for prefill optimization
+	if err := model.FuseGateUpWeights(); err != nil {
+		t.Fatalf("Failed to fuse gate_up weights: %v", err)
+	}
+
+	cache := model.CreateGPUKVCache(2048)
+	return model, gpuBackend, cache
+}
+
+// setupModelFusedAll creates a model with both QKV and gate_up fusion enabled.
+func setupModelFusedAll(t *testing.T) (*runtime.ModelRuntime, *metal.Backend, *runtime.GPUKVCache) {
+	t.Helper()
+	path := modelPath(t)
+
+	gf, err := gguf.Open(path)
+	if err != nil {
+		t.Fatalf("Failed to open GGUF: %v", err)
+	}
+	cfg := runtime.ModelConfigFromGGUF(gf.GetModelConfig())
+	gf.Close()
+
+	gpuBackend, err := metal.NewBackend(0)
+	if err != nil {
+		t.Fatalf("Failed to init Metal: %v", err)
+	}
+
+	memCtx := memory.NewInferenceContext(tensor.Metal)
+	maxTokens := 2048
+	totalScratch := cfg.TotalArenaBytes(maxTokens)
+	memCtx.AddArenaWithBackend(memory.Scratch, int(totalScratch), gpuBackend.Alloc)
+
+	model, err := runtime.NewModelRuntime(gpuBackend, memCtx, nil, cfg)
+	if err != nil {
+		t.Fatalf("Failed to create runtime: %v", err)
+	}
+
+	if err := model.LoadWeights(path); err != nil {
+		t.Fatalf("Failed to load weights: %v", err)
+	}
+	if err := model.CopyWeightsToDevice(); err != nil {
+		t.Fatalf("Failed to copy weights: %v", err)
+	}
+
+	// Fuse both QKV and gate_up weights
+	if err := model.FuseQKVWeights(); err != nil {
+		t.Fatalf("Failed to fuse QKV weights: %v", err)
+	}
+	if err := model.FuseGateUpWeights(); err != nil {
+		t.Fatalf("Failed to fuse gate_up weights: %v", err)
+	}
+
+	cache := model.CreateGPUKVCache(2048)
+	return model, gpuBackend, cache
 }

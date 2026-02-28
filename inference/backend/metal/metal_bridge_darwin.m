@@ -754,9 +754,26 @@ kernel void matvec_q4_0_optimized_f32(
 // with one scale load per block (32x fewer scale reads).
 // Shared memory: 4096 (A, half) + 8192 (B, half) = 12288 bytes total
 
+// =============================================================================
+// Q4_0 Simdgroup GEMM — llama.cpp-matched occupancy
+// =============================================================================
+// TILE_M=32, TILE_N=64, TILE_K=32, 128 threads (4 SGs), 6KB shared
+// Key optimizations:
+//   1. Blocked 8×8 layout with stride=8 for simdgroup_load (zero bank conflicts)
+//   2. TILE_K=32 → 6KB shared memory → 5 TGs/partition (was 2 with 12KB)
+//   3. Vectorized float4 activation loads (2 loads per thread vs 8 scalar)
+//   4. All 128 threads do both A loading + B dequant simultaneously
+//   5. SG layout: 1×4 (each SG covers 32M×16N = 8 accumulators)
+//   6. Same compute:bandwidth ratio as llama.cpp (12.5 ops/byte)
+//
+// Shared memory (blocked 8×8):
+//   sa: 32M × 32K = 16 blocks of 8×8, block_idx = bk*4+bm → 2048 bytes
+//   sb: 64N × 32K = 32 blocks of 8×8, block_idx = bk*8+bn → 4096 bytes
+//   Total: 6144 bytes (matches llama.cpp's 6KB)
+//
 constant int SMM_TILE_M = 32;
 constant int SMM_TILE_N = 64;
-constant int SMM_TILE_K = 64;
+constant int SMM_TILE_K = 32;
 
 kernel void matmul_q4_0_simdgroup_f32(
     device const float* A [[buffer(0)]],
@@ -776,90 +793,538 @@ kernel void matmul_q4_0_simdgroup_f32(
     int tile_n = tg_pos.x * SMM_TILE_N;
     if (tile_m >= M || tile_n >= N) return;
 
-    int sg_row = (simd_group / 4) * 16;
-    int sg_col = (simd_group % 4) * 16;
+    // SG layout: 1×4 — all SGs cover full M=32, each covers 16 N-cols
+    int sg_col = simd_group * 16;  // 0, 16, 32, 48
 
-    simdgroup_float8x8 acc00(0.0f), acc01(0.0f), acc10(0.0f), acc11(0.0f);
+    // 8 accumulators per SG: 4 along M × 2 along N (each 8×8)
+    simdgroup_float8x8 mc[8];
+    for (int i = 0; i < 8; i++) mc[i] = simdgroup_float8x8(0.0f);
 
     int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
     int numKTiles = (K + SMM_TILE_K - 1) / SMM_TILE_K;
 
+    // Block indices for this SG's N-slice (constant across all k_tiles)
+    int bn0 = sg_col >> 3;     // 0, 2, 4, or 6
+    int bn1 = bn0 + 1;         // 1, 3, 5, or 7
+
     for (int k_tile = 0; k_tile < numKTiles; k_tile++) {
         int k_base = k_tile * SMM_TILE_K;
 
-        // === Cooperative A loading: all 256 threads, float → half ===
-        for (int i = tid; i < SMM_TILE_M * SMM_TILE_K; i += 256) {
-            int local_m = i / SMM_TILE_K;
-            int local_k = i % SMM_TILE_K;
+        // === Vectorized A loading: blocked 8×8 layout ===
+        // 32×32 = 1024 elements, 128 threads → 8 elements/thread
+        // 4 threads per M-row, each handles 8 consecutive K-cols (= one 8×8 block row)
+        // Vectorized: 2× float4 load from device → 2× half4 store to shared (contiguous)
+        {
+            int local_m = tid >> 2;        // 0..31
+            int k_group = tid & 3;         // 0..3
+            int local_k = k_group * 8;     // 0, 8, 16, 24
             int global_m = tile_m + local_m;
             int global_k = k_base + local_k;
-            half val = (global_m < M && global_k < K) ? (half)A[global_m * K + global_k] : (half)0;
-            shared_A[local_m * SMM_TILE_K + local_k] = val;
+
+            int bm = local_m >> 3;
+            int rm = local_m & 7;
+            int bk = k_group;
+            threadgroup half* dst_a = shared_A + (bk * 4 + bm) * 64 + rm * 8;
+
+            if (global_m < M && global_k + 7 < K) {
+                // Fast path: vectorized load of 8 consecutive floats
+                float4 v0 = *(device const float4*)(A + global_m * K + global_k);
+                float4 v1 = *(device const float4*)(A + global_m * K + global_k + 4);
+                *(threadgroup half4*)(dst_a)     = half4(v0);
+                *(threadgroup half4*)(dst_a + 4) = half4(v1);
+            } else {
+                // Slow path: scalar with bounds checking
+                for (int j = 0; j < 8; j++) {
+                    int gk = global_k + j;
+                    *(dst_a + j) = (global_m < M && gk < K) ? (half)A[global_m * K + gk] : (half)0;
+                }
+            }
         }
 
-        // === Block-based B dequant: each thread handles one Q4_0 block ===
-        // 128 blocks (64 N-cols × 2 K-blocks), threads 0-127 each get one block
-        // One scale load per 32 values (vs per value in flat approach)
-        if (tid < SMM_TILE_N * 2) {
-            int block_id = tid;
-            int local_n = block_id >> 1;          // 0-63 (N column)
-            int block_in_tile = block_id & 1;     // 0-1 (which Q4_0 block)
-            int k_offset = block_in_tile * 32;
+        // === B dequant: blocked 8×8 layout ===
+        // 64 N-cols × 1 Q4_0 block each, 128 threads → 2 threads per column
+        // Thread (2n) handles bytes 2..9 (k=0..7 low, k=16..23 high)
+        // Thread (2n+1) handles bytes 10..17 (k=8..15 low, k=24..31 high)
+        {
+            int local_n = tid >> 1;        // 0..63
+            int sub = tid & 1;             // 0 or 1
             int global_n = tile_n + local_n;
-            int q4_block_idx = k_tile * 2 + block_in_tile;
+            int bn = local_n >> 3;
+            int cn = local_n & 7;
 
-            if (global_n < N && k_base + k_offset < K) {
+            if (global_n < N && k_base < K) {
                 device const uchar* blockPtr = B + global_n * numBlocks * Q4_BYTES_PER_BLOCK
-                                                + q4_block_idx * Q4_BYTES_PER_BLOCK;
+                                                + k_tile * Q4_BYTES_PER_BLOCK;
                 ushort scale_u16 = ((ushort)blockPtr[1] << 8) | blockPtr[0];
                 half scale = as_type<half>(scale_u16);
 
-                // Process all 32 nibbles with one scale load
-                for (int j = 0; j < 16; j++) {
-                    uchar byte_val = blockPtr[2 + j];
-                    half lo = scale * (half)((byte_val & 0xF) - 8);
-                    half hi = scale * (half)(((byte_val >> 4) & 0xF) - 8);
-                    shared_B[(k_offset + j) * SMM_TILE_N + local_n] = lo;
-                    shared_B[(k_offset + j + 16) * SMM_TILE_N + local_n] = hi;
+                int byte_start = 2 + sub * 8;  // sub=0: bytes 2..9, sub=1: bytes 10..17
+
+                for (int j = 0; j < 8; j++) {
+                    uchar byte_val = blockPtr[byte_start + j];
+                    int lo_k = sub * 8 + j;         // 0..7 or 8..15
+                    int hi_k = 16 + sub * 8 + j;    // 16..23 or 24..31
+
+                    int bk_lo = lo_k >> 3;
+                    int rk_lo = lo_k & 7;
+                    int bk_hi = hi_k >> 3;
+                    int rk_hi = hi_k & 7;
+
+                    shared_B[(bk_lo * 8 + bn) * 64 + rk_lo * 8 + cn] = scale * (half)((byte_val & 0xF) - 8);
+                    shared_B[(bk_hi * 8 + bn) * 64 + rk_hi * 8 + cn] = scale * (half)(((byte_val >> 4) & 0xF) - 8);
                 }
             } else {
-                for (int j = 0; j < 32; j++) {
-                    shared_B[(k_offset + j) * SMM_TILE_N + local_n] = (half)0;
+                for (int j = 0; j < 8; j++) {
+                    int lo_k = sub * 8 + j;
+                    int hi_k = 16 + sub * 8 + j;
+                    int bk_lo = lo_k >> 3;
+                    int rk_lo = lo_k & 7;
+                    int bk_hi = hi_k >> 3;
+                    int rk_hi = hi_k & 7;
+                    shared_B[(bk_lo * 8 + bn) * 64 + rk_lo * 8 + cn] = (half)0;
+                    shared_B[(bk_hi * 8 + bn) * 64 + rk_hi * 8 + cn] = (half)0;
                 }
             }
         }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // === simdgroup_multiply_accumulate: half8x8 inputs → float accumulation ===
-        for (int k = 0; k < SMM_TILE_K; k += 8) {
-            simdgroup_half8x8 matA0, matA1, matB0, matB1;
+        // === Compute: 4 K-substeps × (4 ma + 2 mb + 8 MAC) ===
+        // stride=8 for simdgroup_load (contiguous 8×8 blocks)
+        // simdgroup_barrier hints improve instruction scheduling (matches llama.cpp)
+        for (int ik = 0; ik < 4; ik++) {
+            simdgroup_half8x8 ma[4], mb[2];
 
-            simdgroup_load(matA0, shared_A + (sg_row + 0) * SMM_TILE_K + k, SMM_TILE_K);
-            simdgroup_load(matA1, shared_A + (sg_row + 8) * SMM_TILE_K + k, SMM_TILE_K);
-            simdgroup_load(matB0, shared_B + k * SMM_TILE_N + (sg_col + 0), SMM_TILE_N);
-            simdgroup_load(matB1, shared_B + k * SMM_TILE_N + (sg_col + 8), SMM_TILE_N);
+            simdgroup_barrier(mem_flags::mem_none);
 
-            simdgroup_multiply_accumulate(acc00, matA0, matB0, acc00);
-            simdgroup_multiply_accumulate(acc01, matA0, matB1, acc01);
-            simdgroup_multiply_accumulate(acc10, matA1, matB0, acc10);
-            simdgroup_multiply_accumulate(acc11, matA1, matB1, acc11);
+            // Load 4 A sub-matrices (32 M-rows, 8 K-cols) — shared by all SGs
+            simdgroup_load(ma[0], shared_A + (ik * 4 + 0) * 64, 8);
+            simdgroup_load(ma[1], shared_A + (ik * 4 + 1) * 64, 8);
+            simdgroup_load(ma[2], shared_A + (ik * 4 + 2) * 64, 8);
+            simdgroup_load(ma[3], shared_A + (ik * 4 + 3) * 64, 8);
+
+            simdgroup_barrier(mem_flags::mem_none);
+
+            // Load 2 B sub-matrices (16 N-cols of this SG, 8 K-cols)
+            simdgroup_load(mb[0], shared_B + (ik * 8 + bn0) * 64, 8);
+            simdgroup_load(mb[1], shared_B + (ik * 8 + bn1) * 64, 8);
+
+            simdgroup_barrier(mem_flags::mem_none);
+
+            // 8 MACs: mc[ia*2+ib] += ma[ia] × mb[ib]
+            simdgroup_multiply_accumulate(mc[0], ma[0], mb[0], mc[0]);
+            simdgroup_multiply_accumulate(mc[1], ma[0], mb[1], mc[1]);
+            simdgroup_multiply_accumulate(mc[2], ma[1], mb[0], mc[2]);
+            simdgroup_multiply_accumulate(mc[3], ma[1], mb[1], mc[3]);
+            simdgroup_multiply_accumulate(mc[4], ma[2], mb[0], mc[4]);
+            simdgroup_multiply_accumulate(mc[5], ma[2], mb[1], mc[5]);
+            simdgroup_multiply_accumulate(mc[6], ma[3], mb[0], mc[6]);
+            simdgroup_multiply_accumulate(mc[7], ma[3], mb[1], mc[7]);
         }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    int out_m = tile_m + sg_row;
+    // ========== Write output ==========
+    int out_m = tile_m;
     int out_n = tile_n + sg_col;
 
-    if (out_m < M && out_n < N)
-        simdgroup_store(acc00, C + (out_m + 0) * N + (out_n + 0), N);
-    if (out_m < M && out_n + 8 < N)
-        simdgroup_store(acc01, C + (out_m + 0) * N + (out_n + 8), N);
-    if (out_m + 8 < M && out_n < N)
-        simdgroup_store(acc10, C + (out_m + 8) * N + (out_n + 0), N);
-    if (out_m + 8 < M && out_n + 8 < N)
-        simdgroup_store(acc11, C + (out_m + 8) * N + (out_n + 8), N);
+    for (int i = 0; i < 8; i++) {
+        int m_off = (i / 2) * 8;
+        int n_off = (i % 2) * 8;
+        if (out_m + m_off < M && out_n + n_off < N)
+            simdgroup_store(mc[i], C + (out_m + m_off) * N + (out_n + n_off), N);
+    }
+}
+
+// =============================================================================
+// Q4_0 Simdgroup GEMM v2 — llama.cpp-matched architecture, flat shared memory
+// =============================================================================
+// Architecture from llama.cpp kernel_mul_mm:
+//   1. TILE_M=64, TILE_N=32, TILE_K=32 (K matches Q4_0 block size)
+//   2. 4 simdgroups × 128 threads
+//   3. 8 accumulators per SG (4×2 = 32×16 output per SG, 1.33 MAC:load ratio)
+//   4. 6144 bytes shared memory (vs v1's 12288) → 2× occupancy
+//   5. All 128 threads participate in both A and B loading
+//   6. Flat row-major shared memory (simple, efficient indexing)
+//
+// SG layout: 2×2 grid
+//   SG 0 (sg%2=0, sg/2=0): M-rows 0-31,  N-cols 0-15
+//   SG 1 (sg%2=1, sg/2=0): M-rows 32-63, N-cols 0-15
+//   SG 2 (sg%2=0, sg/2=1): M-rows 0-31,  N-cols 16-31
+//   SG 3 (sg%2=1, sg/2=1): M-rows 32-63, N-cols 16-31
+//
+// Shared memory (flat row-major):
+//   sa: [64, 32] half, stride 32  → 4096 bytes
+//   sb: [32, 32] half, stride 32  → 2048 bytes  (B stored as B^T[k,n])
+//   Total: 6144 bytes
+
+constant int SMM2_TILE_M = 64;
+constant int SMM2_TILE_N = 32;
+constant int SMM2_TILE_K = 32;  // matches Q4_0 block size
+constant int SMM2_NUM_SG = 4;
+constant int SMM2_THREADS = SMM2_NUM_SG * 32;  // 128
+
+kernel void matmul_q4_0_simdgroup_v2_f32(
+    device const float* A [[buffer(0)]],
+    device const uchar* B [[buffer(1)]],
+    device float* C [[buffer(2)]],
+    constant int& M [[buffer(3)]],
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    threadgroup half* shared [[threadgroup(0)]],
+    uint2 tg_pos [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int tile_m = tg_pos.y * SMM2_TILE_M;
+    int tile_n = tg_pos.x * SMM2_TILE_N;
+    if (tile_m >= M || tile_n >= N) return;
+
+    // SG layout: 2×2 grid, each covers 32×16 output
+    int sg_m_half = simd_group % 2;   // 0 or 1 → M-rows 0-31 or 32-63
+    int sg_n_half = simd_group / 2;   // 0 or 1 → N-cols 0-15 or 16-31
+    int sg_row = sg_m_half * 32;      // start row within tile
+    int sg_col = sg_n_half * 16;      // start col within tile
+
+    // 8 accumulators per SG: 4 along M × 2 along N (each 8×8)
+    simdgroup_float8x8 mc[8];
+    for (int i = 0; i < 8; i++) mc[i] = simdgroup_float8x8(0.0f);
+
+    // Shared memory: flat row-major
+    threadgroup half* sa = shared;          // [64, 32] half, stride=32
+    threadgroup half* sb = shared + 2048;   // [32, 32] half, stride=32
+
+    int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
+    int numKTiles = (K + SMM2_TILE_K - 1) / SMM2_TILE_K;
+
+    for (int k_tile = 0; k_tile < numKTiles; k_tile++) {
+        int k_base = k_tile * SMM2_TILE_K;
+
+        // ============================================================
+        // LOAD A (activations, float → half): all 128 threads
+        // 64×32 = 2048 elements, 128 threads → 16 elements/thread
+        // ============================================================
+        for (int i = tid; i < 2048; i += 128) {
+            int local_m = i / 32;     // i >> 5
+            int local_k = i % 32;     // i & 31
+            int global_m = tile_m + local_m;
+            int global_k = k_base + local_k;
+            half val = (global_m < M && global_k < K)
+                       ? (half)A[global_m * K + global_k] : (half)0;
+            *(sa + i) = val;  // sa[local_m * 32 + local_k]
+        }
+
+        // ============================================================
+        // LOAD B (Q4_0 weights → half, stored as B^T[k,n])
+        // 128 threads: 4 threads per Q4_0 block × 32 blocks
+        // Each thread dequants 4 bytes → 8 half values
+        // ============================================================
+        {
+            int block_n = tid >> 2;      // tid / 4 → 0..31 (N-column)
+            int sub = tid & 3;           // tid % 4 → 0..3 (byte chunk)
+            int global_n = tile_n + block_n;
+
+            if (global_n < N && k_base < K) {
+                device const uchar* blockPtr = B + global_n * numBlocks * Q4_BYTES_PER_BLOCK
+                                                + k_tile * Q4_BYTES_PER_BLOCK;
+                ushort scale_u16 = ((ushort)blockPtr[1] << 8) | blockPtr[0];
+                half scale = as_type<half>(scale_u16);
+
+                // sub p: bytes [2+4p .. 2+4p+3] → 4 low nibbles + 4 high nibbles
+                int byte_start = 2 + sub * 4;
+                for (int jj = 0; jj < 4; jj++) {
+                    uchar byte_val = blockPtr[byte_start + jj];
+                    int lo_k = sub * 4 + jj;       // k = 0..15
+                    int hi_k = 16 + sub * 4 + jj;  // k = 16..31
+
+                    // sb[k * 32 + n] — B^T[k, n] in flat row-major
+                    *(sb + lo_k * 32 + block_n) = scale * (half)((byte_val & 0xF) - 8);
+                    *(sb + hi_k * 32 + block_n) = scale * (half)(((byte_val >> 4) & 0xF) - 8);
+                }
+            } else {
+                // Zero-fill: 8 values for this thread
+                int byte_start_k = sub * 4;
+                for (int jj = 0; jj < 4; jj++) {
+                    *(sb + (byte_start_k + jj) * 32 + block_n) = (half)0;
+                    *(sb + (16 + byte_start_k + jj) * 32 + block_n) = (half)0;
+                }
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ============================================================
+        // COMPUTE: 4 K-substeps × (4 A loads + 2 B loads + 8 MACs)
+        // MAC:load = 8:6 = 1.33
+        // ============================================================
+        for (int ik = 0; ik < 4; ik++) {
+            int k_off = ik * 8;  // K offset within tile
+            simdgroup_half8x8 ma[4], mb[2];
+
+            // Load 4 A sub-matrices (32 M-rows of this SG)
+            simdgroup_load(ma[0], sa + (sg_row + 0) * 32 + k_off, 32);
+            simdgroup_load(ma[1], sa + (sg_row + 8) * 32 + k_off, 32);
+            simdgroup_load(ma[2], sa + (sg_row + 16) * 32 + k_off, 32);
+            simdgroup_load(ma[3], sa + (sg_row + 24) * 32 + k_off, 32);
+
+            // Load 2 B sub-matrices (16 N-cols of this SG)
+            simdgroup_load(mb[0], sb + k_off * 32 + sg_col, 32);
+            simdgroup_load(mb[1], sb + k_off * 32 + (sg_col + 8), 32);
+
+            // 8 MACs: mc[ia*2+ib] += ma[ia] × mb[ib]
+            simdgroup_multiply_accumulate(mc[0], ma[0], mb[0], mc[0]);
+            simdgroup_multiply_accumulate(mc[1], ma[0], mb[1], mc[1]);
+            simdgroup_multiply_accumulate(mc[2], ma[1], mb[0], mc[2]);
+            simdgroup_multiply_accumulate(mc[3], ma[1], mb[1], mc[3]);
+            simdgroup_multiply_accumulate(mc[4], ma[2], mb[0], mc[4]);
+            simdgroup_multiply_accumulate(mc[5], ma[2], mb[1], mc[5]);
+            simdgroup_multiply_accumulate(mc[6], ma[3], mb[0], mc[6]);
+            simdgroup_multiply_accumulate(mc[7], ma[3], mb[1], mc[7]);
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // ============================================================
+    // WRITE OUTPUT: 8 tiles of 8×8 per SG → 32×16 output block
+    // ============================================================
+    int sg_m_base = tile_m + sg_row;
+    int sg_n_base = tile_n + sg_col;
+
+    for (int ia = 0; ia < 4; ia++) {
+        int m_start = sg_m_base + ia * 8;
+        if (m_start >= M) continue;
+        for (int ib_idx = 0; ib_idx < 2; ib_idx++) {
+            int n_start = sg_n_base + ib_idx * 8;
+            if (n_start >= N) continue;
+            if (m_start + 8 <= M && n_start + 8 <= N) {
+                simdgroup_store(mc[ia * 2 + ib_idx], C + m_start * N + n_start, N);
+            } else {
+                // Boundary: store via shared memory scratch
+                threadgroup float* scratch = (threadgroup float*)(sa) + simd_group * 64;
+                simdgroup_store(mc[ia * 2 + ib_idx], scratch, 8);
+                for (int elem = simd_lane; elem < 64; elem += 32) {
+                    int r = elem / 8;
+                    int c = elem % 8;
+                    if (m_start + r < M && n_start + c < N) {
+                        C[(m_start + r) * N + (n_start + c)] = scratch[r * 8 + c];
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Q4_0 Simdgroup GEMM v3 — llama.cpp blocked shared memory layout
+// =============================================================================
+// Key insight from llama.cpp: store shared memory as contiguous 8×8 blocks
+// with stride 8 for simdgroup_load, instead of flat row-major with stride 32.
+// This gives ~4× better threadgroup memory read efficiency since the hardware
+// can read each 8×8 tile in one burst (128 bytes) vs 8 scattered 16-byte reads.
+//
+// Architecture (same as v2):
+//   TILE_M=64, TILE_N=32, TILE_K=32 (matches Q4_0 block size)
+//   128 threads (4 simdgroups), 6144 bytes shared memory
+//   8 accumulators per SG (4×2 = 32×16 output, 1.33 MAC:load ratio)
+//
+// Shared memory layout (DIFFERENT from v2):
+//   sa: 32 blocks of 8×8 halves, block_idx = bk*8 + bm
+//       sa[block_idx * 64 + row_in_block * 8 + col_in_block]
+//       bk = 0..3 (K-blocks), bm = 0..7 (M-blocks)
+//   sb: 16 blocks of 8×8 halves, block_idx = bk*4 + bn
+//       sb[block_idx * 64 + row_in_block * 8 + col_in_block]
+//       bk = 0..3 (K-blocks), bn = 0..3 (N-blocks)
+//
+// Compute access pattern:
+//   For sgitg%2=0 (M rows 0-31), ik-th K substep:
+//     lsma = sa + (ik * 8) * 64  =>  4 consecutive blocks bm=0..3
+//     ma[i] = simdgroup_load(lsma + i*64, stride=8)
+//   For sgitg/2=0 (N cols 0-15), ik-th K substep:
+//     lsmb = sb + (ik * 4) * 64  =>  2 consecutive blocks bn=0..1
+//     mb[i] = simdgroup_load(lsmb + i*64, stride=8)
+
+kernel void matmul_q4_0_simdgroup_v3_f32(
+    device const float* A [[buffer(0)]],
+    device const uchar* B [[buffer(1)]],
+    device float* C [[buffer(2)]],
+    constant int& M [[buffer(3)]],
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    threadgroup half* shared [[threadgroup(0)]],
+    uint2 tg_pos [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int tile_m = tg_pos.y * 64;
+    int tile_n = tg_pos.x * 32;
+    if (tile_m >= M || tile_n >= N) return;
+
+    // SG layout: 2×2 grid, each covers 32×16 output
+    int sg_m_half = simd_group & 1;    // 0 or 1
+    int sg_n_half = simd_group >> 1;   // 0 or 1
+
+    // 8 accumulators per SG: 4 along M × 2 along N (each 8×8)
+    simdgroup_float8x8 mc[8];
+    for (int i = 0; i < 8; i++) mc[i] = simdgroup_float8x8(0.0f);
+
+    // Shared memory: blocked 8×8 layout
+    threadgroup half* sa = shared;          // 32 blocks × 64 halves = 4096 bytes
+    threadgroup half* sb = shared + 2048;   // 16 blocks × 64 halves = 2048 bytes
+
+    int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
+    int numKTiles = (K + 31) / 32;
+
+    for (int k_tile = 0; k_tile < numKTiles; k_tile++) {
+        int k_base = k_tile * 32;
+
+        // ============================================================
+        // LOAD A (float → half) into blocked 8×8 layout
+        // 64×32 = 2048 elements, 128 threads → 16 elements/thread
+        // Block index = bk*8 + bm, stored at block_idx*64 + rm*8 + ck
+        // ============================================================
+        for (int i = tid; i < 2048; i += 128) {
+            int local_m = i >> 5;        // i / 32, range 0..63
+            int local_k = i & 31;        // i % 32, range 0..31
+            int global_m = tile_m + local_m;
+            int global_k = k_base + local_k;
+
+            int bm = local_m >> 3;       // local_m / 8, range 0..7
+            int bk = local_k >> 3;       // local_k / 8, range 0..3
+            int rm = local_m & 7;        // local_m % 8
+            int ck = local_k & 7;        // local_k % 8
+            int block_idx = bk * 8 + bm; // K-major block order
+
+            half val = (global_m < M && global_k < K)
+                       ? (half)A[global_m * K + global_k] : (half)0;
+            *(sa + block_idx * 64 + rm * 8 + ck) = val;
+        }
+
+        // ============================================================
+        // LOAD B (Q4_0 → half) into blocked 8×8 layout
+        // 128 threads: 4 threads per N-column × 32 N-columns
+        // Block index = bk*4 + bn, stored at block_idx*64 + rk*8 + cn
+        // ============================================================
+        {
+            int block_n = tid >> 2;      // 0..31 (N-column)
+            int sub = tid & 3;           // 0..3 (byte chunk within Q4_0 block)
+            int global_n = tile_n + block_n;
+
+            if (global_n < N && k_base < K) {
+                device const uchar* blockPtr = B + global_n * numBlocks * Q4_BYTES_PER_BLOCK
+                                                + k_tile * Q4_BYTES_PER_BLOCK;
+                ushort scale_u16 = ((ushort)blockPtr[1] << 8) | blockPtr[0];
+                half scale = as_type<half>(scale_u16);
+
+                int byte_start = 2 + sub * 4;
+                int bn = block_n >> 3;           // N-block: 0..3
+                int cn = block_n & 7;            // col within N-block
+
+                for (int jj = 0; jj < 4; jj++) {
+                    uchar byte_val = blockPtr[byte_start + jj];
+                    int lo_k = sub * 4 + jj;       // k = 0..15
+                    int hi_k = 16 + sub * 4 + jj;  // k = 16..31
+
+                    // lo_k block coordinates
+                    int bk_lo = lo_k >> 3;          // 0 or 1
+                    int rk_lo = lo_k & 7;
+                    int idx_lo = (bk_lo * 4 + bn) * 64 + rk_lo * 8 + cn;
+
+                    // hi_k block coordinates
+                    int bk_hi = hi_k >> 3;          // 2 or 3
+                    int rk_hi = hi_k & 7;
+                    int idx_hi = (bk_hi * 4 + bn) * 64 + rk_hi * 8 + cn;
+
+                    *(sb + idx_lo) = scale * (half)((byte_val & 0xF) - 8);
+                    *(sb + idx_hi) = scale * (half)(((byte_val >> 4) & 0xF) - 8);
+                }
+            } else {
+                int bn = block_n >> 3;
+                int cn = block_n & 7;
+                int byte_start_k = sub * 4;
+                for (int jj = 0; jj < 4; jj++) {
+                    int lo_k = byte_start_k + jj;
+                    int hi_k = 16 + byte_start_k + jj;
+                    int bk_lo = lo_k >> 3;
+                    int rk_lo = lo_k & 7;
+                    int bk_hi = hi_k >> 3;
+                    int rk_hi = hi_k & 7;
+                    *(sb + (bk_lo * 4 + bn) * 64 + rk_lo * 8 + cn) = (half)0;
+                    *(sb + (bk_hi * 4 + bn) * 64 + rk_hi * 8 + cn) = (half)0;
+                }
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ============================================================
+        // COMPUTE: 4 K-substeps × (4 A loads + 2 B loads + 8 MACs)
+        // stride=8 for simdgroup_load (contiguous 8×8 blocks)
+        // ============================================================
+        // lsma points to first M-block for this SG's M-half
+        threadgroup const half* lsma = sa + sg_m_half * 4 * 64;  // skip 4 blocks for M-half 1
+        threadgroup const half* lsmb = sb + sg_n_half * 2 * 64;  // skip 2 blocks for N-half 1
+
+        for (int ik = 0; ik < 4; ik++) {
+            simdgroup_half8x8 ma[4], mb[2];
+
+            // Load 4 A sub-matrices (32 M-rows of this SG, 8 K-cols)
+            simdgroup_load(ma[0], lsma + 0 * 64, 8);
+            simdgroup_load(ma[1], lsma + 1 * 64, 8);
+            simdgroup_load(ma[2], lsma + 2 * 64, 8);
+            simdgroup_load(ma[3], lsma + 3 * 64, 8);
+
+            // Load 2 B sub-matrices (16 N-cols of this SG, 8 K-cols)
+            simdgroup_load(mb[0], lsmb + 0 * 64, 8);
+            simdgroup_load(mb[1], lsmb + 1 * 64, 8);
+
+            // 8 MACs: mc[ia*2+ib] += ma[ia] × mb[ib]
+            simdgroup_multiply_accumulate(mc[0], ma[0], mb[0], mc[0]);
+            simdgroup_multiply_accumulate(mc[1], ma[0], mb[1], mc[1]);
+            simdgroup_multiply_accumulate(mc[2], ma[1], mb[0], mc[2]);
+            simdgroup_multiply_accumulate(mc[3], ma[1], mb[1], mc[3]);
+            simdgroup_multiply_accumulate(mc[4], ma[2], mb[0], mc[4]);
+            simdgroup_multiply_accumulate(mc[5], ma[2], mb[1], mc[5]);
+            simdgroup_multiply_accumulate(mc[6], ma[3], mb[0], mc[6]);
+            simdgroup_multiply_accumulate(mc[7], ma[3], mb[1], mc[7]);
+
+            lsma += 8 * 64;   // advance to next K-block (skip 8 M-blocks)
+            lsmb += 4 * 64;   // advance to next K-block (skip 4 N-blocks)
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // ============================================================
+    // WRITE OUTPUT: 8 tiles of 8×8 per SG → 32×16 output block
+    // ============================================================
+    int sg_m_base = tile_m + sg_m_half * 32;
+    int sg_n_base = tile_n + sg_n_half * 16;
+
+    for (int ia = 0; ia < 4; ia++) {
+        int m_start = sg_m_base + ia * 8;
+        if (m_start >= M) continue;
+        for (int ib_idx = 0; ib_idx < 2; ib_idx++) {
+            int n_start = sg_n_base + ib_idx * 8;
+            if (n_start >= N) continue;
+            if (m_start + 8 <= M && n_start + 8 <= N) {
+                simdgroup_store(mc[ia * 2 + ib_idx], C + m_start * N + n_start, N);
+            } else {
+                threadgroup float* scratch = (threadgroup float*)(sa) + simd_group * 64;
+                simdgroup_store(mc[ia * 2 + ib_idx], scratch, 8);
+                for (int elem = simd_lane; elem < 64; elem += 32) {
+                    int r = elem >> 3;
+                    int c = elem & 7;
+                    if (m_start + r < M && n_start + c < N) {
+                        C[(m_start + r) * N + (n_start + c)] = scratch[r * 8 + c];
+                    }
+                }
+            }
+        }
+    }
 }
 
 // =============================================================================
@@ -5630,6 +6095,69 @@ kernel void memcpy_compute(
 }
 
 // =============================================================================
+// Deinterleave QKV: split fused [M, qkvDim] output into separate Q, K, V
+// =============================================================================
+// src: [M, qkvDim] where qkvDim = qDim + 2*kvDim, row-major
+// dstQ: [M, qDim], dstK: [M, kvDim], dstV: [M, kvDim]
+// Each thread copies one float from the interleaved source to the correct destination.
+kernel void deinterleave_qkv_f32(
+    device const float* src [[buffer(0)]],
+    device float* dstQ [[buffer(1)]],
+    device float* dstK [[buffer(2)]],
+    device float* dstV [[buffer(3)]],
+    constant int& M [[buffer(4)]],
+    constant int& qDim [[buffer(5)]],
+    constant int& kvDim [[buffer(6)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    int qkvDim = qDim + 2 * kvDim;
+    int totalElements = M * qkvDim;
+    if ((int)gid >= totalElements) return;
+
+    int row = (int)gid / qkvDim;
+    int col = (int)gid % qkvDim;
+    float val = src[gid];
+
+    if (col < qDim) {
+        dstQ[row * qDim + col] = val;
+    } else if (col < qDim + kvDim) {
+        dstK[row * kvDim + (col - qDim)] = val;
+    } else {
+        dstV[row * kvDim + (col - qDim - kvDim)] = val;
+    }
+}
+
+// =============================================================================
+// Deinterleave 2-way: split fused [M, dim1+dim2] output into separate A, B
+// =============================================================================
+// src: [M, totalDim] where totalDim = dim1 + dim2, row-major
+// dstA: [M, dim1], dstB: [M, dim2]
+// Each thread copies one float from the interleaved source to the correct destination.
+kernel void deinterleave_2way_f32(
+    device const float* src [[buffer(0)]],
+    device float* dstA [[buffer(1)]],
+    device float* dstB [[buffer(2)]],
+    constant int& M [[buffer(3)]],
+    constant int& dim1 [[buffer(4)]],
+    constant int& dim2 [[buffer(5)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    int totalDim = dim1 + dim2;
+    int totalElements = M * totalDim;
+    if ((int)gid >= totalElements) return;
+
+    int row = (int)gid / totalDim;
+    int col = (int)gid % totalDim;
+    float val = src[gid];
+
+    if (col < dim1) {
+        dstA[row * dim1 + col] = val;
+    } else {
+        dstB[row * dim2 + (col - dim1)] = val;
+    }
+}
+
+// =============================================================================
 // Argmax kernel: find index of maximum value
 // =============================================================================
 // Single threadgroup reduction for vocab-sized arrays (32K elements)
@@ -6528,15 +7056,15 @@ void metal_matmul_q4_0_simdgroup_f32(void* queuePtr, void* pipelinePtr,
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
     id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
 
-    // Tile sizes from kernel: SMM_TILE_M=32, SMM_TILE_N=64, SMM_TILE_K=64
+    // Tile sizes from kernel: SMM_TILE_M=32, SMM_TILE_N=64, SMM_TILE_K=32
     int TILE_M = 32;
     int TILE_N = 64;
-    int TILE_K = 64;   // 2 Q4_0 blocks per K-tile
-    int threadgroupSize = 256;  // 8 simdgroups of 32 threads
+    int TILE_K = 32;   // 1 Q4_0 block per K-tile
+    int threadgroupSize = 128;  // 4 simdgroups of 32 threads
 
-    // Shared memory: half-precision A and B tiles with TILE_K=64
-    int sharedMemA = TILE_M * TILE_K * 2;  // 32×64×2 = 4096 bytes (half)
-    int sharedMemB = TILE_N * TILE_K * 2;  // 64×64×2 = 8192 bytes (half)
+    // Shared memory: blocked 8×8 layout, half-precision A and B tiles
+    int sharedMemA = TILE_M * TILE_K * 2;  // 32×32×2 = 2048 bytes (half)
+    int sharedMemB = TILE_N * TILE_K * 2;  // 64×32×2 = 4096 bytes (half)
 
     id<MTLCommandBuffer> cmdBuffer;
     bool shouldCommit;
@@ -6553,6 +7081,121 @@ void metal_matmul_q4_0_simdgroup_f32(void* queuePtr, void* pipelinePtr,
     [encoder setThreadgroupMemoryLength:sharedMemB atIndex:1];
 
     // 2D grid: tiles in (N, M) dimensions
+    int tilesN = (N + TILE_N - 1) / TILE_N;
+    int tilesM = (M + TILE_M - 1) / TILE_M;
+    MTLSize threadgroups = MTLSizeMake(tilesN, tilesM, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// V2: TILE_M=64, TILE_N=32, TILE_K=32, 4 SG × 128 threads, swizzled shared memory
+void metal_matmul_q4_0_simdgroup_v2_f32(void* queuePtr, void* pipelinePtr,
+                                         void* A, void* B, void* C,
+                                         int M, int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    int TILE_M = 64;
+    int TILE_N = 32;
+    int threadgroupSize = 128;  // 4 simdgroups of 32 threads
+
+    // 8×8 block-interleaved shared memory (matches llama.cpp):
+    // sa: 32 sub-tiles × 64 halfs = 2048 halfs = 4096 bytes
+    // sb: 16 sub-tiles × 64 halfs = 1024 halfs = 2048 bytes
+    // Total: 6144 bytes (half of v1 → 2× occupancy)
+    int sharedMemTotal = (2048 + 1024) * 2;  // 6144 bytes
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:0 atIndex:2];
+    [encoder setBytes:&M length:sizeof(M) atIndex:3];
+    [encoder setBytes:&N length:sizeof(N) atIndex:4];
+    [encoder setBytes:&K length:sizeof(K) atIndex:5];
+    [encoder setThreadgroupMemoryLength:sharedMemTotal atIndex:0];
+
+    // 2D grid: tiles in (N, M) dimensions
+    int tilesN = (N + TILE_N - 1) / TILE_N;
+    int tilesM = (M + TILE_M - 1) / TILE_M;
+    MTLSize threadgroups = MTLSizeMake(tilesN, tilesM, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Q4_0 simdgroup GEMM v3 dispatch (blocked shared memory layout)
+void metal_matmul_q4_0_simdgroup_v3_f32(void* queuePtr, void* pipelinePtr,
+                                         void* A, void* B, void* C,
+                                         int M, int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    int TILE_M = 64;
+    int TILE_N = 32;
+    int threadgroupSize = 128;  // 4 simdgroups
+
+    // Blocked 8×8 shared memory layout (same total as v2):
+    // sa: 32 blocks × 64 halves = 4096 bytes
+    // sb: 16 blocks × 64 halves = 2048 bytes
+    // Total: 6144 bytes
+    int sharedMemTotal = 6144;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:0 atIndex:2];
+    [encoder setBytes:&M length:sizeof(M) atIndex:3];
+    [encoder setBytes:&N length:sizeof(N) atIndex:4];
+    [encoder setBytes:&K length:sizeof(K) atIndex:5];
+    [encoder setThreadgroupMemoryLength:sharedMemTotal atIndex:0];
+
+    int tilesN = (N + TILE_N - 1) / TILE_N;
+    int tilesM = (M + TILE_M - 1) / TILE_M;
+    MTLSize threadgroups = MTLSizeMake(tilesN, tilesM, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Q4_0 simdgroup GEMM v3 offset-aware dispatch (blocked shared memory layout)
+void metal_matmul_q4_0_simdgroup_v3_f32_offset(void* queuePtr, void* pipelinePtr,
+                                                 void* A, uint64_t aOff,
+                                                 void* B,
+                                                 void* C, uint64_t cOff,
+                                                 int M, int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    int TILE_M = 64;
+    int TILE_N = 32;
+    int threadgroupSize = 128;
+    int sharedMemTotal = 6144;  // sa: 4096 + sb: 2048
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:aOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:cOff atIndex:2];
+    [encoder setBytes:&M length:sizeof(M) atIndex:3];
+    [encoder setBytes:&N length:sizeof(N) atIndex:4];
+    [encoder setBytes:&K length:sizeof(K) atIndex:5];
+    [encoder setThreadgroupMemoryLength:sharedMemTotal atIndex:0];
+
     int tilesN = (N + TILE_N - 1) / TILE_N;
     int tilesM = (M + TILE_M - 1) / TILE_M;
     MTLSize threadgroups = MTLSizeMake(tilesN, tilesM, 1);
@@ -7222,11 +7865,12 @@ void metal_matmul_q4_0_simdgroup_f32_offset(void* queuePtr, void* pipelinePtr,
 
     int TILE_M = 32;
     int TILE_N = 64;
-    int TILE_K = 64;   // 2 Q4_0 blocks per K-tile
-    int threadgroupSize = 256;  // 8 simdgroups
+    int TILE_K = 32;   // 1 Q4_0 block per K-tile
+    int threadgroupSize = 128;  // 4 simdgroups
 
-    int sharedMemA = TILE_M * TILE_K * 2;  // half precision: 32×64×2 = 4096 bytes
-    int sharedMemB = TILE_N * TILE_K * 2;  // half precision: 64×64×2 = 8192 bytes
+    // Blocked 8×8 layout, half-precision A and B tiles
+    int sharedMemA = TILE_M * TILE_K * 2;  // 32×32×2 = 2048 bytes (half)
+    int sharedMemB = TILE_N * TILE_K * 2;  // 64×32×2 = 4096 bytes (half)
 
     id<MTLCommandBuffer> cmdBuffer;
     bool shouldCommit;
@@ -7529,6 +8173,77 @@ void metal_mul_f32(void* queuePtr, void* pipelinePtr,
     ];
 
     dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+}
+
+// Deinterleave QKV: split fused [M, qkvDim] output into separate Q, K, V buffers.
+// All pointers use setBuffer:offset: to support scratch-allocated (offset) buffers.
+void metal_deinterleave_qkv_f32(void* queuePtr, void* pipelinePtr,
+                                 void* srcBuf, uint64_t srcOff,
+                                 void* dstQBuf, uint64_t dstQOff,
+                                 void* dstKBuf, uint64_t dstKOff,
+                                 void* dstVBuf, uint64_t dstVOff,
+                                 int M, int qDim, int kvDim) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)srcBuf offset:srcOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)dstQBuf offset:dstQOff atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)dstKBuf offset:dstKOff atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)dstVBuf offset:dstVOff atIndex:3];
+    [encoder setBytes:&M length:sizeof(M) atIndex:4];
+    [encoder setBytes:&qDim length:sizeof(qDim) atIndex:5];
+    [encoder setBytes:&kvDim length:sizeof(kvDim) atIndex:6];
+
+    int qkvDim = qDim + 2 * kvDim;
+    int totalElements = M * qkvDim;
+    NSUInteger threadWidth = [pipeline threadExecutionWidth];
+    int threadsPerTG = 256;
+    int numTGs = (totalElements + threadsPerTG - 1) / threadsPerTG;
+
+    MTLSize threadgroups = MTLSizeMake(numTGs, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadsPerTG, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Deinterleave 2-way: split fused [M, dim1+dim2] output into separate A, B buffers.
+// All pointers use setBuffer:offset: to support scratch-allocated (offset) buffers.
+void metal_deinterleave_2way_f32(void* queuePtr, void* pipelinePtr,
+                                  void* srcBuf, uint64_t srcOff,
+                                  void* dstABuf, uint64_t dstAOff,
+                                  void* dstBBuf, uint64_t dstBOff,
+                                  int M, int dim1, int dim2) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)srcBuf offset:srcOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)dstABuf offset:dstAOff atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)dstBBuf offset:dstBOff atIndex:2];
+    [encoder setBytes:&M length:sizeof(M) atIndex:3];
+    [encoder setBytes:&dim1 length:sizeof(dim1) atIndex:4];
+    [encoder setBytes:&dim2 length:sizeof(dim2) atIndex:5];
+
+    int totalDim = dim1 + dim2;
+    int totalElements = M * totalDim;
+    int threadsPerTG = 256;
+    int numTGs = (totalElements + threadsPerTG - 1) / threadsPerTG;
+
+    MTLSize threadgroups = MTLSizeMake(numTGs, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadsPerTG, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
 // Argmax: find index of maximum value (GPU-side greedy sampling)

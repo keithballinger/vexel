@@ -593,6 +593,181 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 	return nil
 }
 
+// FuseQKVWeights concatenates separate Wq, Wk, Wv weights into a single Wqkv tensor
+// for each layer. This enables a single fused matmul during prefill instead of 3 separate ones,
+// which improves GPU utilization at larger N dimensions (~50% GFLOPS gain from N=4096 → N=12288).
+// Must be called after CopyWeightsToDevice. Separate Wq/Wk/Wv are preserved for decode.
+func (m *ModelRuntime) FuseQKVWeights() error {
+	// Need a buffer copier for GPU-to-GPU copy
+	copier, ok := m.backend.(interface {
+		CopyBuffer(src tensor.DevicePtr, srcOffset int, dst tensor.DevicePtr, dstOffset int, size int)
+	})
+	if !ok {
+		return fmt.Errorf("backend does not support CopyBuffer")
+	}
+
+	allocPerm, hasPerm := m.backend.(interface{ AllocPermanent(int) tensor.DevicePtr })
+
+	for i, layer := range m.layers {
+		// Skip if already has fused QKV (e.g., Phi-2)
+		if !layer.Wqkv.DevicePtr().IsNil() {
+			continue
+		}
+		// Skip if missing any of Q/K/V
+		if layer.Wq.DevicePtr().IsNil() || layer.Wk.DevicePtr().IsNil() || layer.Wv.DevicePtr().IsNil() {
+			continue
+		}
+		// Only fuse Q4_0 weights (the only quant profile used for prefill GEMM)
+		if !layer.Wq.IsQuantized() || layer.Wq.QuantProfile() != tensor.Q4_0 {
+			continue
+		}
+
+		qDims := layer.Wq.Shape().Dims()
+		kDims := layer.Wk.Shape().Dims()
+		vDims := layer.Wv.Shape().Dims()
+		if len(qDims) != 2 || len(kDims) != 2 || len(vDims) != 2 {
+			continue
+		}
+
+		qRows, cols := qDims[0], qDims[1]
+		kRows := kDims[0]
+		vRows := vDims[0]
+		totalRows := qRows + kRows + vRows
+
+		// Q4_0: 32 elements per block, 18 bytes per block
+		blockSize := 32
+		bytesPerBlock := 18
+
+		// Verify alignment
+		qElements := qRows * cols
+		kElements := kRows * cols
+		vElements := vRows * cols
+		if qElements%blockSize != 0 || kElements%blockSize != 0 || vElements%blockSize != 0 {
+			fmt.Printf("Warning: layer %d QKV fusion skipped (not aligned to Q4_0 block size)\n", i)
+			continue
+		}
+
+		qSizeBytes := (qElements / blockSize) * bytesPerBlock
+		kSizeBytes := (kElements / blockSize) * bytesPerBlock
+		vSizeBytes := (vElements / blockSize) * bytesPerBlock
+		totalBytes := qSizeBytes + kSizeBytes + vSizeBytes
+
+		// Allocate fused buffer
+		var fusedPtr tensor.DevicePtr
+		if hasPerm {
+			fusedPtr = allocPerm.AllocPermanent(totalBytes)
+		} else {
+			fusedPtr = m.backend.Alloc(totalBytes)
+		}
+		if fusedPtr.IsNil() {
+			return fmt.Errorf("layer %d: failed to allocate %d bytes for fused QKV", i, totalBytes)
+		}
+
+		// Copy Q, K, V data into fused buffer
+		copier.CopyBuffer(layer.Wq.DevicePtr(), layer.Wq.DevicePtr().Offset(), fusedPtr, 0, qSizeBytes)
+		copier.CopyBuffer(layer.Wk.DevicePtr(), layer.Wk.DevicePtr().Offset(), fusedPtr, qSizeBytes, kSizeBytes)
+		copier.CopyBuffer(layer.Wv.DevicePtr(), layer.Wv.DevicePtr().Offset(), fusedPtr, qSizeBytes+kSizeBytes, vSizeBytes)
+
+		// Create fused tensor
+		layer.Wqkv = tensor.NewQuantTensor(tensor.NewShape(totalRows, cols), m.config.DType, fusedPtr, tensor.Q4_0)
+
+		if i == 0 {
+			fmt.Printf("QKV fusion: [%d,%d]+[%d,%d]+[%d,%d] → [%d,%d] (%.1f MB/layer, %d layers)\n",
+				qRows, cols, kRows, cols, vRows, cols, totalRows, cols,
+				float64(totalBytes)/(1024*1024), len(m.layers))
+		}
+	}
+
+	// Sync to ensure all copies complete
+	m.backend.Sync()
+	return nil
+}
+
+// FuseGateUpWeights concatenates separate W1 (gate) and W3 (up) weights into a single
+// W1W3 tensor for each layer. This enables a single fused matmul during prefill instead of 2
+// separate ones, which improves GPU utilization at larger N dimensions.
+// Must be called after CopyWeightsToDevice. Separate W1/W3 are preserved for decode (fused MLP).
+func (m *ModelRuntime) FuseGateUpWeights() error {
+	// Need a buffer copier for GPU-to-GPU copy
+	copier, ok := m.backend.(interface {
+		CopyBuffer(src tensor.DevicePtr, srcOffset int, dst tensor.DevicePtr, dstOffset int, size int)
+	})
+	if !ok {
+		return fmt.Errorf("backend does not support CopyBuffer")
+	}
+
+	allocPerm, hasPerm := m.backend.(interface{ AllocPermanent(int) tensor.DevicePtr })
+
+	for i, layer := range m.layers {
+		// Skip if already has fused W1W3
+		if !layer.W1W3.DevicePtr().IsNil() {
+			continue
+		}
+		// Skip if missing W1 or W3 (GELU MLP models don't have W3)
+		if layer.W1.DevicePtr().IsNil() || layer.W3.DevicePtr().IsNil() {
+			continue
+		}
+		// Only fuse Q4_0 weights (the only quant profile used for prefill GEMM)
+		if !layer.W1.IsQuantized() || layer.W1.QuantProfile() != tensor.Q4_0 {
+			continue
+		}
+
+		w1Dims := layer.W1.Shape().Dims()
+		w3Dims := layer.W3.Shape().Dims()
+		if len(w1Dims) != 2 || len(w3Dims) != 2 {
+			continue
+		}
+
+		w1Rows, cols := w1Dims[0], w1Dims[1]
+		w3Rows := w3Dims[0]
+		totalRows := w1Rows + w3Rows
+
+		// Q4_0: 32 elements per block, 18 bytes per block
+		blockSize := 32
+		bytesPerBlock := 18
+
+		// Verify alignment
+		w1Elements := w1Rows * cols
+		w3Elements := w3Rows * cols
+		if w1Elements%blockSize != 0 || w3Elements%blockSize != 0 {
+			fmt.Printf("Warning: layer %d gate_up fusion skipped (not aligned to Q4_0 block size)\n", i)
+			continue
+		}
+
+		w1SizeBytes := (w1Elements / blockSize) * bytesPerBlock
+		w3SizeBytes := (w3Elements / blockSize) * bytesPerBlock
+		totalBytes := w1SizeBytes + w3SizeBytes
+
+		// Allocate fused buffer
+		var fusedPtr tensor.DevicePtr
+		if hasPerm {
+			fusedPtr = allocPerm.AllocPermanent(totalBytes)
+		} else {
+			fusedPtr = m.backend.Alloc(totalBytes)
+		}
+		if fusedPtr.IsNil() {
+			return fmt.Errorf("layer %d: failed to allocate %d bytes for fused gate_up", i, totalBytes)
+		}
+
+		// Copy W1 (gate), W3 (up) data into fused buffer
+		copier.CopyBuffer(layer.W1.DevicePtr(), layer.W1.DevicePtr().Offset(), fusedPtr, 0, w1SizeBytes)
+		copier.CopyBuffer(layer.W3.DevicePtr(), layer.W3.DevicePtr().Offset(), fusedPtr, w1SizeBytes, w3SizeBytes)
+
+		// Create fused tensor
+		layer.W1W3 = tensor.NewQuantTensor(tensor.NewShape(totalRows, cols), m.config.DType, fusedPtr, tensor.Q4_0)
+
+		if i == 0 {
+			fmt.Printf("Gate_up fusion: [%d,%d]+[%d,%d] → [%d,%d] (%.1f MB/layer, %d layers)\n",
+				w1Rows, cols, w3Rows, cols, totalRows, cols,
+				float64(totalBytes)/(1024*1024), len(m.layers))
+		}
+	}
+
+	// Sync to ensure all copies complete
+	m.backend.Sync()
+	return nil
+}
+
 func (m *ModelRuntime) mapTensor(name string, t tensor.Tensor) {
 	// Global
 	if name == "model.embed_tokens.weight" || name == "token_embd.weight" {

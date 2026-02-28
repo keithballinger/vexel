@@ -146,6 +146,22 @@ type FusedOps interface {
 	MatMulQ4_0_FusedMLP(x, w1, w3, out tensor.DevicePtr, m, n, k int)
 }
 
+// QKVDeinterleaver is an optional interface for backends that support deinterleaving
+// fused QKV matmul output into separate Q, K, V buffers.
+type QKVDeinterleaver interface {
+	// DeinterleaveQKV splits a fused [M, qDim+2*kvDim] row-major output into
+	// separate Q [M, qDim], K [M, kvDim], V [M, kvDim] buffers.
+	DeinterleaveQKV(src, dstQ, dstK, dstV tensor.DevicePtr, seqLen, qDim, kvDim int)
+}
+
+// GateUpDeinterleaver is an optional interface for backends that support deinterleaving
+// fused gate_up matmul output into separate gate and up buffers.
+type GateUpDeinterleaver interface {
+	// Deinterleave2Way splits a fused [M, dim1+dim2] row-major output into
+	// separate A [M, dim1] and B [M, dim2] buffers.
+	Deinterleave2Way(src, dstA, dstB tensor.DevicePtr, seqLen, dim1, dim2 int)
+}
+
 // Q8_0Ops is an optional interface for backends that support Q8_0 quantized KV cache.
 // Q8_0 format: 34 bytes per 32 elements (2-byte f16 scale + 32 int8 values).
 // Provides 4x memory savings vs FP32 with minimal accuracy loss.

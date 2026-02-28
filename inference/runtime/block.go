@@ -240,6 +240,7 @@ type BlockRuntime struct {
 	PostAttnNorm tensor.Tensor // Post-attention RMSNorm weight (Gemma 2)
 	PostFFNNorm  tensor.Tensor // Post-FFN RMSNorm weight (Gemma 2)
 	W1, W2, W3   tensor.Tensor // Gate, Down, Up (W3 not used for GELU MLP)
+	W1W3         tensor.Tensor // Combined gate+up projection (optional, fused prefill path)
 
 	// Optional bias tensors (for Phi, GPT-2, etc.)
 	AttnNormBias tensor.Tensor // LayerNorm bias for attention
@@ -266,6 +267,12 @@ type BlockRuntime struct {
 
 	// Cached interface for fused operations
 	fusedOps backend.FusedOps
+
+	// Cached interface for QKV deinterleave (fused QKV prefill path)
+	qkvDeinterleaver backend.QKVDeinterleaver
+
+	// Cached interface for gate_up deinterleave (fused gate_up prefill path)
+	gateUpDeinterleaver backend.GateUpDeinterleaver
 
 	// Cached interface for LayerNorm operations
 	layerNormOps backend.LayerNormOps
@@ -338,6 +345,10 @@ func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 
 	// Cache fused operations interface check
 	br.fusedOps, _ = b.(backend.FusedOps)
+
+	// Cache QKV deinterleave interface check
+	br.qkvDeinterleaver, _ = b.(backend.QKVDeinterleaver)
+	br.gateUpDeinterleaver, _ = b.(backend.GateUpDeinterleaver)
 
 	// Cache LayerNorm, GELU, Bias, and SoftCap operations interface checks
 	br.layerNormOps, _ = b.(backend.LayerNormOps)
@@ -1036,13 +1047,14 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	attnOutBytes := qSize * 4
 	gateBytes := seqLen * intermediateSize * 4
 	upBytes := seqLen * intermediateSize * 4
+	fusedMLPTempBytes := seqLen * intermediateSize * 2 * 4 // For fused W1W3 output before deinterleave
 
 	// Allocate intermediate buffers.
 	// For CPU: sub-allocate from scratch buffer (pointer arithmetic handles offsets correctly).
 	// For GPU: use ScratchAlloc (bump allocation from pre-allocated MTLBuffer) when available,
 	// falling back to pool Alloc. Scratch-allocated DevicePtrs have non-zero offsets which
 	// are transparently handled by auto-detecting offset-aware kernel dispatch.
-	var normOutPtr, qPtr, kPtr, vPtr, attnOutPtr, gatePtr, upPtr tensor.DevicePtr
+	var normOutPtr, qPtr, kPtr, vPtr, attnOutPtr, gatePtr, upPtr, fusedMLPTempPtr tensor.DevicePtr
 
 	if scratchPtr.Location() == tensor.CPU {
 		offset := uintptr(0)
@@ -1059,7 +1071,9 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		gatePtr = tensor.DevicePtrOffset(scratchPtr, offset)
 		offset += uintptr(gateBytes)
 		upPtr = tensor.DevicePtrOffset(scratchPtr, offset)
-		_ = upBytes
+		offset += uintptr(upBytes)
+		fusedMLPTempPtr = tensor.DevicePtrOffset(scratchPtr, offset)
+		_ = fusedMLPTempBytes
 	} else if b.scratchAlloc != nil {
 		// Reset scratch allocator for this layer (reuses the same pre-allocated buffer).
 		b.scratchAlloc.ScratchReset()
@@ -1070,6 +1084,7 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		attnOutPtr = b.scratchAlloc.ScratchAlloc(attnOutBytes)
 		gatePtr = b.scratchAlloc.ScratchAlloc(gateBytes)
 		upPtr = b.scratchAlloc.ScratchAlloc(upBytes)
+		fusedMLPTempPtr = b.scratchAlloc.ScratchAlloc(fusedMLPTempBytes)
 	} else {
 		// Fallback: individual pool allocations (no scratch allocator available).
 		normOutPtr = b.backend.Alloc(normOutBytes)
@@ -1079,6 +1094,7 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		attnOutPtr = b.backend.Alloc(attnOutBytes)
 		gatePtr = b.backend.Alloc(gateBytes)
 		upPtr = b.backend.Alloc(upBytes)
+		fusedMLPTempPtr = b.backend.Alloc(fusedMLPTempBytes)
 	}
 
 	// FP16/Q8_0 KV cache support: allocate conversion buffers if needed
@@ -1168,7 +1184,19 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		}
 
 		profileOp("Wqkv", func() {
-			if !b.Wqkv.DevicePtr().IsNil() {
+			if !b.Wqkv.DevicePtr().IsNil() && seqLen > 1 && b.qkvDeinterleaver != nil {
+				// Fused QKV prefill path: single matmul → temp → deinterleave
+				// Uses gate+up scratch space as temp buffer (contiguous via ScratchAlloc).
+				// gateBytes+upBytes = seqLen*intermediateSize*4*2 ≥ seqLen*qkvDim*4 for all models.
+				qkvDim := b.Wqkv.Shape().Dims()[0]
+				b.matMulTransposedWithBias(normOutPtr, b.Wqkv, b.WqkvBias, gatePtr, seqLen, qkvDim, hiddenSize)
+				// Barrier: deinterleave reads gatePtr written by fused matmul
+				barrier()
+				qDim := numHeads * headDim
+				kvDim := numKVHeads * headDim
+				b.qkvDeinterleaver.DeinterleaveQKV(gatePtr, qPtr, kPtr, vPtr, seqLen, qDim, kvDim)
+			} else if !b.Wqkv.DevicePtr().IsNil() {
+				// Fused QKV decode path (seqLen==1): output lands directly in Q|K|V scratch
 				qkvDim := b.Wqkv.Shape().Dims()[0]
 				b.matMulTransposedWithBias(normOutPtr, b.Wqkv, b.WqkvBias, qPtr, seqLen, qkvDim, hiddenSize)
 			} else {
@@ -1738,29 +1766,44 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 
 			// Barrier: W1/W3 read normOutPtr written by AddRMSNorm/RMSNorm2
 			barrier()
-			profileOp("W1", func() {
-				if !b.W1.DevicePtr().IsNil() {
+			if !b.W1W3.DevicePtr().IsNil() && seqLen > 1 && b.gateUpDeinterleaver != nil {
+				// Fused gate_up prefill path: single matmul → temp → deinterleave
+				w1w3Dim := b.W1W3.Shape().Dims()[0]
+				profileOp("W1W3", func() {
+					b.matMulTransposed(normOutPtr, b.W1W3, fusedMLPTempPtr, seqLen, w1w3Dim, hiddenSize)
+				})
+				// Barrier: deinterleave reads fusedMLPTempPtr written by fused matmul
+				barrier()
+				profileOp("DeinterleaveMLP", func() {
 					w1Dim := b.W1.Shape().Dims()[0]
-					b.matMulTransposed(normOutPtr, b.W1, gatePtr, seqLen, w1Dim, hiddenSize)
-				}
-			})
-			if debugThisLayerPost {
-				b.backend.Sync()
-				b.debugBlockTensor(fmt.Sprintf("L%d gate after W1", layerIdx), gatePtr, seqLen*intermediateSize)
-			}
-
-			profileOp("W3", func() {
-				if !b.W3.DevicePtr().IsNil() {
 					w3Dim := b.W3.Shape().Dims()[0]
-					b.matMulTransposed(normOutPtr, b.W3, upPtr, seqLen, w3Dim, hiddenSize)
+					b.gateUpDeinterleaver.Deinterleave2Way(fusedMLPTempPtr, gatePtr, upPtr, seqLen, w1Dim, w3Dim)
+				})
+			} else {
+				profileOp("W1", func() {
+					if !b.W1.DevicePtr().IsNil() {
+						w1Dim := b.W1.Shape().Dims()[0]
+						b.matMulTransposed(normOutPtr, b.W1, gatePtr, seqLen, w1Dim, hiddenSize)
+					}
+				})
+				if debugThisLayerPost {
+					b.backend.Sync()
+					b.debugBlockTensor(fmt.Sprintf("L%d gate after W1", layerIdx), gatePtr, seqLen*intermediateSize)
 				}
-			})
-			if debugThisLayerPost {
-				b.backend.Sync()
-				b.debugBlockTensor(fmt.Sprintf("L%d up after W3", layerIdx), upPtr, seqLen*intermediateSize)
+
+				profileOp("W3", func() {
+					if !b.W3.DevicePtr().IsNil() {
+						w3Dim := b.W3.Shape().Dims()[0]
+						b.matMulTransposed(normOutPtr, b.W3, upPtr, seqLen, w3Dim, hiddenSize)
+					}
+				})
+				if debugThisLayerPost {
+					b.backend.Sync()
+					b.debugBlockTensor(fmt.Sprintf("L%d up after W3", layerIdx), upPtr, seqLen*intermediateSize)
+				}
 			}
 
-			// Barrier: SiLUMul/GELUMul reads gatePtr, upPtr written by W1, W3
+			// Barrier: SiLUMul/GELUMul reads gatePtr, upPtr written by W1/W3 or deinterleave
 			barrier()
 			if b.MLPType == MLPGeGLU {
 				profileOp("GELUMul", func() {

@@ -97,6 +97,8 @@ type Backend struct {
 	flashAttention2F16Pipeline  unsafe.Pointer
 	matmulQ4BatchedPipeline     unsafe.Pointer
 	matmulQ4SimdgroupPipeline   unsafe.Pointer
+	matmulQ4SimdgroupV2Pipeline unsafe.Pointer
+	matmulQ4SimdgroupV3Pipeline unsafe.Pointer
 	matvecQ6KPipeline           unsafe.Pointer
 			matvecQ6KNR2Pipeline        unsafe.Pointer // Optimized Q6_K with nr0=2
 			matvecQ4KPipeline           unsafe.Pointer
@@ -147,6 +149,8 @@ type Backend struct {
 
 	// Utility pipelines
 	memcpyComputePipeline      unsafe.Pointer // Compute-based memory copy (avoids blit encoder)
+	deinterleaveQKVPipeline    unsafe.Pointer // Deinterleave fused QKV output into separate Q, K, V
+	deinterleave2WayPipeline   unsafe.Pointer // Deinterleave fused gate_up output into separate gate, up
 	reshapePagedKVPipeline     unsafe.Pointer
 	sdpaPagedDecodePipeline    unsafe.Pointer
 }
@@ -237,6 +241,8 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.flashAttention2F16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("flash_attention_2_f16"))
 	b.matmulQ4BatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_batched_f32"))
 	b.matmulQ4SimdgroupPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_simdgroup_f32"))
+	b.matmulQ4SimdgroupV2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_simdgroup_v2_f32"))
+	b.matmulQ4SimdgroupV3Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_simdgroup_v3_f32"))
 	b.matvecQ6KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q6k_multi_output_f32"))
 	b.matvecQ6KNR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q6k_nr2_f32"))
 	b.matvecQ4KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_multi_output_f32"))
@@ -286,6 +292,8 @@ func NewBackend(deviceID int) (*Backend, error) {
 
 	// Utility pipelines
 	b.memcpyComputePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("memcpy_compute"))
+	b.deinterleaveQKVPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("deinterleave_qkv_f32"))
+	b.deinterleave2WayPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("deinterleave_2way_f32"))
 	b.reshapePagedKVPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("reshape_paged_kv_f32"))
 	b.sdpaPagedDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_paged_decode_f32"))
 
@@ -483,6 +491,39 @@ func (b *Backend) CopyBufferBatched(src tensor.DevicePtr, srcOffset int, dst ten
 	}
 }
 
+// DeinterleaveQKV splits a fused [M, qkvDim] matmul output into separate Q, K, V buffers.
+// src: [M, qDim+2*kvDim] row-major (fused QKV output)
+// dstQ: [M, qDim], dstK: [M, kvDim], dstV: [M, kvDim]
+// All pointers support scratch-allocated offsets.
+func (b *Backend) DeinterleaveQKV(src, dstQ, dstK, dstV tensor.DevicePtr, seqLen, qDim, kvDim int) {
+	if b.deinterleaveQKVPipeline == nil {
+		panic("DeinterleaveQKV called but pipeline unavailable")
+	}
+	b.profiler.RecordDispatch("DeinterleaveQKV")
+	C.metal_deinterleave_qkv_f32(b.queue, b.deinterleaveQKVPipeline,
+		unsafe.Pointer(src.Addr()), C.uint64_t(src.Offset()),
+		unsafe.Pointer(dstQ.Addr()), C.uint64_t(dstQ.Offset()),
+		unsafe.Pointer(dstK.Addr()), C.uint64_t(dstK.Offset()),
+		unsafe.Pointer(dstV.Addr()), C.uint64_t(dstV.Offset()),
+		C.int(seqLen), C.int(qDim), C.int(kvDim))
+}
+
+// Deinterleave2Way splits a fused [M, dim1+dim2] matmul output into separate A, B buffers.
+// src: [M, dim1+dim2] row-major (fused gate_up output)
+// dstA: [M, dim1], dstB: [M, dim2]
+// All pointers support scratch-allocated offsets.
+func (b *Backend) Deinterleave2Way(src, dstA, dstB tensor.DevicePtr, seqLen, dim1, dim2 int) {
+	if b.deinterleave2WayPipeline == nil {
+		panic("Deinterleave2Way called but pipeline unavailable")
+	}
+	b.profiler.RecordDispatch("Deinterleave2Way")
+	C.metal_deinterleave_2way_f32(b.queue, b.deinterleave2WayPipeline,
+		unsafe.Pointer(src.Addr()), C.uint64_t(src.Offset()),
+		unsafe.Pointer(dstA.Addr()), C.uint64_t(dstA.Offset()),
+		unsafe.Pointer(dstB.Addr()), C.uint64_t(dstB.Offset()),
+		C.int(seqLen), C.int(dim1), C.int(dim2))
+}
+
 // GPUProfileStats holds GPU profiling statistics.
 type GPUProfileStats struct {
 	TotalTimeNs uint64
@@ -578,8 +619,7 @@ func (b *Backend) MatMulQ4_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(n), C.int(k))
 	} else if m >= 8 && b.matmulQ4SimdgroupPipeline != nil {
-		// Use simdgroup_matrix kernel for prefill (M>=8)
-		// 32×64 tiled kernel with 8 simdgroups, optimized for M=32/64/128
+		// V1-blocked: 32×64×64 tiles, 8 SG, blocked 8×8 shared memory layout
 		C.metal_matmul_q4_0_simdgroup_f32(b.queue, b.matmulQ4SimdgroupPipeline,
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(m), C.int(n), C.int(k))
@@ -589,6 +629,24 @@ func (b *Backend) MatMulQ4_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(m), C.int(n), C.int(k))
 	}
+}
+
+// MatMulQ4_0SimdgroupV2 calls the v2 simdgroup GEMM kernel directly for A/B testing.
+// TILE_M=64, TILE_N=32, TILE_K=32, 4 SG, swizzled shared memory.
+func (b *Backend) MatMulQ4_0SimdgroupV2(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	b.profiler.RecordDispatch("MatMulQ4_0V2")
+	C.metal_matmul_q4_0_simdgroup_v2_f32(b.queue, b.matmulQ4SimdgroupV2Pipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(m), C.int(n), C.int(k))
+}
+
+// MatMulQ4_0SimdgroupV3 calls the v3 simdgroup GEMM kernel for A/B testing.
+// TILE_M=64, TILE_N=32, TILE_K=32, 4 SG, blocked 8×8 shared memory (llama.cpp layout).
+func (b *Backend) MatMulQ4_0SimdgroupV3(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	b.profiler.RecordDispatch("MatMulQ4_0V3")
+	C.metal_matmul_q4_0_simdgroup_v3_f32(b.queue, b.matmulQ4SimdgroupV3Pipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(m), C.int(n), C.int(k))
 }
 
 // MatVecQ4_0MultiOutput executes the 8-output-per-threadgroup kernel explicitly.
@@ -1091,6 +1149,7 @@ func (b *Backend) MatMulQ4_0Offset(a, bMat, out tensor.DevicePtr, m, n, k int) {
 			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
 			C.int(n), C.int(k))
 	} else if m >= 8 && b.matmulQ4SimdgroupPipeline != nil {
+		// V1-blocked: 32×64×64 tiles, 8 SG, blocked 8×8 shared memory layout
 		C.metal_matmul_q4_0_simdgroup_f32_offset(b.queue, b.matmulQ4SimdgroupPipeline,
 			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
 			unsafe.Pointer(bMat.Addr()),

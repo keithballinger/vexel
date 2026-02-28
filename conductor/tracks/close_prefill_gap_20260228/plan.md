@@ -62,16 +62,65 @@ Gap narrowed from 2.13x → 1.43x. Remaining gap is now entirely in GEMM through
 GEMM: ~240ms/pass (58%) = 5,500 GFLOPS vs llama.cpp ~13,000 GFLOPS.
 
 ## Phase 2: GEMM Kernel Optimization
-- [ ] Task 2.1: Analyze llama.cpp kernel_mul_mm for reference
-- [ ] Task 2.2: Double-buffered shared memory
-- [ ] Task 2.3: Tile size tuning
-- [ ] Task 2.4: Correctness verification + benchmarks
+- [x] Task 2.1: Analyze llama.cpp kernel_mul_mm for reference
+    - llama.cpp uses TILE_M=64, TILE_N=32, TILE_K=32, 128 threads (4 SGs), 6KB shared
+    - Blocked 8×8 shared memory layout with stride=8 for simdgroup_load
+    - Key insight: their large tile dimension (64) is for weights, not activations
+    - Their bandwidth ratio: 12.5 ops/byte (5248 bytes/tile for 65536 ops)
+- [x] Task 2.2: Double-buffered shared memory
+    - **REJECTED**: 24KB shared memory (2× buffers) reduces occupancy from 2→1 TG/partition
+    - Measured: 2796 GFLOPS (vs 3863 without) — 28% regression
+    - Apple GPU handles latency differently from NVIDIA; occupancy > double buffering
+- [x] Task 2.3: Tile size tuning
+    - Tested V1-blocked (32×64×64, 256 threads, 12KB) → 534 tok/s
+    - Tested V3 (64×32×32, 128 threads, 6KB) → fast at N≤4096 but slow at N>4096
+    - Tested hybrid V3+V1 dispatch → 466 tok/s (pipeline transition overhead)
+    - Tested 256-thread B loading → 511 tok/s (contention regression)
+    - **WINNER: TILE_M=32, TILE_N=64, TILE_K=32** — 128 threads (4 SGs), 6KB shared
+      - Matches llama.cpp's 12.5 ops/byte and 6KB shared memory
+      - 2.5× occupancy improvement (5 TGs/partition vs 2)
+      - Vectorized float4 activation loads (2 loads vs 8 scalar)
+      - simdgroup_barrier hints for instruction scheduling (+4%)
+      - Result: **717 tok/s** at seqLen=128
+- [x] Task 2.4: Correctness verification + benchmarks
+    - All 6 GEMM correctness configs pass (max_diff=0.000689, identical to pre-change)
+    - Fusion correctness: bit-identical prefill logits, 20/20 decode tokens match
+    - Per-dimension GFLOPS (M=128):
+      | Dimension | Before (V1-blocked) | After (TK=32) | Improvement |
+      |-----------|---------------------|----------------|-------------|
+      | 4096×4096 | ~3,863 | ~6,500 | **+68%** |
+      | 11008×4096 | 6,928 | 9,000 | **+30%** |
+      | 4096×11008 | 6,077 | 8,382 | **+38%** |
+      | 32000×4096 | 7,924 | 10,651 | **+34%** |
 
 ## Phase 3: Fused Projections
-- [ ] Task 3.1: Fused QKV projection
-- [ ] Task 3.2: Fused gate_up projection
-- [ ] Task 3.3: Correctness verification
+- [x] Task 3.1: Fused QKV projection
+    - Concatenate Wq+Wk+Wv → Wqkv [12288,4096] at load time
+    - FuseQKVWeights() in loader.go + deinterleave kernel
+    - Split output via DevicePtrOffset for Q, K, V pointers
+    - Free original Wq/Wk/Wv to avoid 2× memory
+- [x] Task 3.2: Fused gate_up projection
+    - Added W1W3 field to BlockRuntime
+    - Concatenate W1+W3 → W1W3 [22016,4096] at load time
+    - FuseGateUpWeights() in loader.go + split kernel
+    - Single matmul → split into gate [M,11008] and up [M,11008]
+- [x] Task 3.3: Correctness verification
+    - TestFusedQKVCorrectness: bit-identical prefill, 20/20 decode match
+    - TestFusedGateUpCorrectness: bit-identical prefill, 20/20 decode match
+    - TestFusedAllCorrectness (both fused): bit-identical prefill, 20/20 decode match
+    - Fusion speedup: ~1% at seqLen=128 (689→696 tok/s) — marginal
 
 ## Phase 4: Integration Benchmarks
-- [ ] Task 4.1: End-to-end prefill benchmark
+- [x] Task 4.1: End-to-end prefill benchmark
+    - **TARGET MET: 717 tok/s at seqLen=128** (target ≥700)
+    - Full results (M3 Max, LLaMA 2 7B Q4_0, 94% battery charging):
+      | seqLen | Before (Phase 0) | After Phase 1 | After Phase 2 | Improvement |
+      |--------|-------------------|---------------|---------------|-------------|
+      | 5      | 95.4              | 96.2          | 96.8          | +1.5%       |
+      | 32     | 343.5             | 315.1         | 400.3         | **+16.5%**  |
+      | 128    | 377               | 562           | **717.1**     | **+90.2%**  |
+      | 385    | 225.7             | 518           | 636.7         | **+182%**   |
+    - Gap to llama.cpp: 803/717 = **1.12×** (was 2.13×)
+    - Decode throughput: unchanged (~66 tok/s)
+    - All existing tests pass (90+ backend, all runtime except 2 pre-existing M=2 failures)
 - [ ] Task 4.2: Update tracking docs

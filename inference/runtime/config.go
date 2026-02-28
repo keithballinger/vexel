@@ -282,16 +282,17 @@ func (c ModelConfig) ScratchBytes(maxBatchSize int) int64 {
 	kvSize := int64(maxBatchSize) * int64(c.NumKeyValueHeads) * headDim     // K and V buffers (each)
 
 	// Scratch layout for BlockRuntime.Execute:
-	// [normOut][Q][K][V][attnOut][scores][gate][up]
+	// [normOut][Q][K][V][attnOut][scores][gate][up][fusedMLPTemp]
 	// All buffers are allocated at once (no reuse during execution)
 	normOut := int64(maxBatchSize) * int64(c.HiddenSize)
 	attnOut := qSize                                                         // Same size as Q
 	scores := int64(maxBatchSize) * int64(maxBatchSize)                      // seqLen x seqLen per head (reused)
 	gate := int64(maxBatchSize) * int64(c.IntermediateSize)
 	up := int64(maxBatchSize) * int64(c.IntermediateSize)
+	fusedMLPTemp := int64(maxBatchSize) * int64(c.IntermediateSize) * 2      // Fused W1W3 output before deinterleave
 
 	// Total scratch needed for BlockRuntime.Execute
-	blockScratch := normOut + qSize + kvSize + kvSize + attnOut + scores + gate + up
+	blockScratch := normOut + qSize + kvSize + kvSize + attnOut + scores + gate + up + fusedMLPTemp
 
 	// Logits calculation needs separate buffer (in DecodeStep)
 	logits := int64(maxBatchSize) * int64(c.VocabSize)
