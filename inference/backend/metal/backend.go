@@ -64,13 +64,16 @@ type Backend struct {
 	matvecPipeline              unsafe.Pointer
 	matvecQ4Pipeline            unsafe.Pointer
 	matvecQ4MultiOutputPipeline unsafe.Pointer
+	matvecQ4V2Pipeline          unsafe.Pointer // llama.cpp-matched: 64 threads, NR0=4, fused nibble-masking
+	matvecQ4V2F16InPipeline     unsafe.Pointer // v2 variant with FP16 activation input
 	matvecQ4NR2Pipeline         unsafe.Pointer
 	matvecQ4NR4Pipeline         unsafe.Pointer
 	matvecQ4CollabPipeline      unsafe.Pointer
 	matvecQ4OptimizedPipeline   unsafe.Pointer
 	matvecQ4FusedRMSNormPipeline    unsafe.Pointer
-	matvecQ4FusedRMSNormF16Pipeline unsafe.Pointer // FP16 output version
-	matvecQ4FusedMLPPipeline        unsafe.Pointer
+	matvecQ4FusedRMSNormF16Pipeline    unsafe.Pointer // FP16 output version
+	matvecQ4FusedRMSNormQKVF16Pipeline unsafe.Pointer // Fused QKV (3→1 dispatch)
+	matvecQ4FusedMLPPipeline           unsafe.Pointer
 	softmaxPipeline                 unsafe.Pointer
 	rmsnormPipeline                 unsafe.Pointer
 	layernormPipeline               unsafe.Pointer
@@ -124,6 +127,7 @@ type Backend struct {
 	convertF32ToF16Pipeline     unsafe.Pointer
 	convertF16ToF32Pipeline     unsafe.Pointer
 	scatterKVF16Pipeline        unsafe.Pointer
+	scatterKVF16FusedPipeline   unsafe.Pointer // Fused K+V scatter (saves 1 dispatch/layer)
 	scatterKVF32Pipeline        unsafe.Pointer
 	scatterKVF32ToF16Pipeline   unsafe.Pointer
 
@@ -208,12 +212,14 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matvecPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_transposed_f32"))
 	b.matvecQ4Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_transposed_f32"))
 	b.matvecQ4MultiOutputPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_multi_output_f32"))
+	b.matvecQ4V2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_v2_f32"))
 	b.matvecQ4NR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_nr2_f32"))
 	b.matvecQ4NR4Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_nr4_f32"))
 	b.matvecQ4CollabPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_collab_f32"))
 	b.matvecQ4OptimizedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_optimized_f32"))
 	b.matvecQ4FusedRMSNormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_fused_rmsnorm_f32"))
 	b.matvecQ4FusedRMSNormF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_fused_rmsnorm_f16_out"))
+	b.matvecQ4FusedRMSNormQKVF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_fused_rmsnorm_qkv_f16"))
 	b.matvecQ4FusedMLPPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_fused_mlp_f32"))
 	b.softmaxPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("softmax_f32"))
 	b.rmsnormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_f32"))
@@ -275,8 +281,10 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.convertF32ToF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("convert_f32_to_f16"))
 	b.convertF16ToF32Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("convert_f16_to_f32"))
 	b.scatterKVF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("scatter_kv_f16"))
+	b.scatterKVF16FusedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("scatter_kv_f16_fused"))
 	b.scatterKVF32Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("scatter_kv_f32"))
 	b.scatterKVF32ToF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("scatter_kv_f32_to_f16"))
+	b.matvecQ4V2F16InPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_v2_f16in_f32"))
 
 	// Q8_0 quantization pipelines
 	b.quantizeF32ToQ8_0Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("quantize_f32_to_q8_0"))
@@ -612,10 +620,8 @@ func (b *Backend) MatMulQ4_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 				C.int(n), C.int(k))
 			return
 		}
-		// Single row (decode) - use multi-output matvec (8 outputs per threadgroup)
-		// Benchmarked: multi_output (8 out/TG) is faster than NR2 (16 out/TG) for Q4_0
-		// because Q4_0's 18-byte block layout causes cache pressure when 2 rows share a simdgroup.
-		C.metal_matvec_q4_0_multi_output_f32(b.queue, b.matvecQ4MultiOutputPipeline,
+		// Single row (decode) - use v2 matvec (llama.cpp-matched: 64 threads, NR0=4, fused nibble-masking)
+		C.metal_matvec_q4_0_v2_f32(b.queue, b.matvecQ4V2Pipeline,
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(n), C.int(k))
 	} else if m >= 8 && b.matmulQ4SimdgroupPipeline != nil {
@@ -680,6 +686,18 @@ func (b *Backend) MatVecQ4_0NR4(a, bMat, out tensor.DevicePtr, n, k int) {
 		panic("MatVecQ4_0NR4 called but no matvecQ4NR4Pipeline available")
 	}
 	C.metal_matvec_q4_0_nr4_f32(b.queue, b.matvecQ4NR4Pipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(n), C.int(k))
+}
+
+// MatVecQ4_0V2 executes the v2 matvec kernel (llama.cpp-matched: 64 threads, NR0=4, fused nibble-masking).
+// Primarily used for validation/testing.
+func (b *Backend) MatVecQ4_0V2(a, bMat, out tensor.DevicePtr, n, k int) {
+	b.profiler.RecordDispatch("MatMulQ4_0")
+	if b.matvecQ4V2Pipeline == nil {
+		panic("MatVecQ4_0V2 called but no matvecQ4V2Pipeline available")
+	}
+	C.metal_matvec_q4_0_v2_f32(b.queue, b.matvecQ4V2Pipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(n), C.int(k))
 }
@@ -905,6 +923,21 @@ func (b *Backend) MatMulQ4_0_FusedRMSNormF16(x, normWeight, wMat, out tensor.Dev
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(normWeight.Addr()),
 		unsafe.Pointer(wMat.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(n), C.int(k), C.float(eps))
+}
+
+// MatMulQ4_0_FusedRMSNormQKV_F16 performs fused RMSNorm + Q/K/V projections in a single dispatch.
+// Saves 2 dispatches per layer vs 3 separate FusedRMSNormF16 calls (3→1).
+// Only supports M=1 (decode).
+func (b *Backend) MatMulQ4_0_FusedRMSNormQKV_F16(x, normWeight, wq, wk, wv, outQ, outK, outV tensor.DevicePtr, qDim, kvDim, k int, eps float32) {
+	b.profiler.RecordDispatch("FusedRMSNorm+QKV_F16")
+	if b.matvecQ4FusedRMSNormQKVF16Pipeline == nil {
+		panic("MatMulQ4_0_FusedRMSNormQKV_F16 called but pipeline unavailable")
+	}
+	C.metal_matvec_q4_0_fused_rmsnorm_qkv_f16(b.queue, b.matvecQ4FusedRMSNormQKVF16Pipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(normWeight.Addr()),
+		unsafe.Pointer(wq.Addr()), unsafe.Pointer(wk.Addr()), unsafe.Pointer(wv.Addr()),
+		unsafe.Pointer(outQ.Addr()), unsafe.Pointer(outK.Addr()), unsafe.Pointer(outV.Addr()),
+		C.int(qDim), C.int(kvDim), C.int(k), C.float(eps))
 }
 
 // MatMulQ4_0_FusedMLP performs fused MLP: SiLU(x @ W1) * (x @ W3).
@@ -1142,8 +1175,8 @@ func (b *Backend) MatMulQ4_0Offset(a, bMat, out tensor.DevicePtr, m, n, k int) {
 				C.int(n), C.int(k))
 			return
 		}
-		// multi_output: 8 outputs per threadgroup — faster than NR2 for Q4_0 (see above)
-		C.metal_matvec_q4_0_multi_output_f32_offset(b.queue, b.matvecQ4MultiOutputPipeline,
+		// v2: llama.cpp-matched (64 threads, NR0=4, fused nibble-masking)
+		C.metal_matvec_q4_0_v2_f32_offset(b.queue, b.matvecQ4V2Pipeline,
 			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
 			unsafe.Pointer(bMat.Addr()),
 			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
@@ -1586,6 +1619,34 @@ func (b *Backend) ScatterKVF16(src, dst tensor.DevicePtr, newTokens, numKVHeads,
 	C.metal_scatter_kv_f16(b.queue, b.scatterKVF16Pipeline,
 		unsafe.Pointer(src.Addr()), unsafe.Pointer(dst.Addr()),
 		C.int(newTokens), C.int(numKVHeads), C.int(headDim), C.int(maxSeqLen), C.int(seqPos))
+}
+
+// ScatterKVF16Fused scatters both K and V into their caches in a single dispatch.
+// Saves 1 dispatch per layer compared to calling ScatterKVF16 twice.
+func (b *Backend) ScatterKVF16Fused(srcK, dstK, srcV, dstV tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int) {
+	b.profiler.RecordDispatch("ScatterKV")
+	if b.scatterKVF16FusedPipeline == nil {
+		// Fall back to 2 separate dispatches
+		b.ScatterKVF16(srcK, dstK, newTokens, numKVHeads, headDim, maxSeqLen, seqPos)
+		b.ScatterKVF16(srcV, dstV, newTokens, numKVHeads, headDim, maxSeqLen, seqPos)
+		return
+	}
+	C.metal_scatter_kv_f16_fused(b.queue, b.scatterKVF16FusedPipeline,
+		unsafe.Pointer(srcK.Addr()), unsafe.Pointer(dstK.Addr()),
+		unsafe.Pointer(srcV.Addr()), unsafe.Pointer(dstV.Addr()),
+		C.int(newTokens), C.int(numKVHeads), C.int(headDim), C.int(maxSeqLen), C.int(seqPos))
+}
+
+// MatMulQ4_0_F16In performs Q4_0 matmul with FP16 input, FP32 output.
+// Eliminates separate ConvertF16ToF32 dispatch after FP16 SDPA output.
+func (b *Backend) MatMulQ4_0_F16In(a, bMat, out tensor.DevicePtr, n, k int) {
+	b.profiler.RecordDispatch("MatMulQ4_0")
+	if b.matvecQ4V2F16InPipeline == nil {
+		panic("MatMulQ4_0_F16In called but pipeline unavailable")
+	}
+	C.metal_matvec_q4_0_v2_f16in_f32(b.queue, b.matvecQ4V2F16InPipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(n), C.int(k))
 }
 
 func (b *Backend) ScatterKVF32ToF16(src, dst tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int) {

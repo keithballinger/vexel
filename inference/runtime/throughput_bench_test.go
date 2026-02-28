@@ -554,6 +554,158 @@ func TestPrefillPerOpProfile(t *testing.T) {
 	runtime.DisableProfiling()
 }
 
+// TestDecodeProfileBaseline profiles per-operation GPU timing for M=1 decode
+// to establish baseline measurements for decode gap optimization.
+//
+// Track: close_decode_gap_20260228, Phase 0 Task 0.1 + 0.2
+//
+// This test profiles:
+// 1. Per-operation timing breakdown (FusedRMSNorm+QKV, RoPE, KVCache, SDPA, Wo, FFN, etc.)
+// 2. Per-token wall-clock time at ctx=16
+// 3. Per-dimension matvec bandwidth utilization
+//
+// Target: ≥73 tok/s decode throughput (≤5% gap to llama.cpp's 76.3 tok/s)
+func TestDecodeProfileBaseline(t *testing.T) {
+	model, be, cache := setupModel(t, false)
+	defer be.Close()
+	defer cache.Free()
+
+	// Short prefill to seed KV cache
+	prefillTokens := []int{1, 15043, 29892, 920, 526} // BOS + "Hello, how are"
+	logits := getLogits(t, model, be, prefillTokens, 0)
+	nextToken := argmax(logits)
+	pos := len(prefillTokens)
+
+	// Warmup: 5 decode tokens
+	for w := 0; w < 5; w++ {
+		logits = getLogits(t, model, be, []int{nextToken}, pos)
+		nextToken = argmax(logits)
+		pos++
+	}
+
+	// === Part 1: Throughput measurement (no profiling overhead) ===
+	const numDecodeTokens = 50
+	tokenTimes := make([]time.Duration, numDecodeTokens)
+
+	for i := 0; i < numDecodeTokens; i++ {
+		start := time.Now()
+		logits = getLogits(t, model, be, []int{nextToken}, pos)
+		nextToken = argmax(logits)
+		tokenTimes[i] = time.Since(start)
+		pos++
+	}
+
+	sortDurations(tokenTimes)
+	// Use middle 80% to avoid outliers
+	var totalMiddle time.Duration
+	startIdx := numDecodeTokens / 10
+	endIdx := numDecodeTokens * 9 / 10
+	for _, d := range tokenTimes[startIdx:endIdx] {
+		totalMiddle += d
+	}
+	avgTime := totalMiddle / time.Duration(endIdx-startIdx)
+	tokPerSec := 1.0 / avgTime.Seconds()
+	medianMs := float64(tokenTimes[numDecodeTokens/2].Microseconds()) / 1000
+	p99Ms := float64(tokenTimes[numDecodeTokens*99/100].Microseconds()) / 1000
+	minMs := float64(tokenTimes[0].Microseconds()) / 1000
+	maxMs := float64(tokenTimes[numDecodeTokens-1].Microseconds()) / 1000
+
+	t.Logf("\n=== Decode Throughput (ctx=%d, %d tokens, no profiling overhead) ===", pos-numDecodeTokens, numDecodeTokens)
+	t.Logf("  Throughput:  %.1f tok/s", tokPerSec)
+	t.Logf("  Per-token:   min=%.2f ms, median=%.2f ms, p99=%.2f ms, max=%.2f ms", minMs, medianMs, p99Ms, maxMs)
+
+	// Bandwidth analysis
+	// LLaMA 2 7B Q4_0: 3.56 GB weights, 400 GB/s M3 Max bandwidth
+	modelSizeGB := 3.56
+	hwBandwidthGBps := 400.0
+	effectiveBW := modelSizeGB * tokPerSec
+	bwUtil := effectiveBW / hwBandwidthGBps * 100
+	theoreticalMax := hwBandwidthGBps / modelSizeGB
+	t.Logf("  BW utilization: %.1f%% (%.1f GB/s of %.0f GB/s, theoretical max: %.0f tok/s)",
+		bwUtil, effectiveBW, hwBandwidthGBps, theoreticalMax)
+
+	// === Part 2: Per-operation profiling (with sync overhead) ===
+	runtime.EnableProfiling()
+	runtime.ResetProfile()
+
+	// Generate 20 profiled tokens (profiling adds sync overhead per op)
+	const numProfileTokens = 20
+	for i := 0; i < numProfileTokens; i++ {
+		logits = getLogits(t, model, be, []int{nextToken}, pos)
+		nextToken = argmax(logits)
+		pos++
+	}
+
+	t.Logf("\n=== Per-Operation Profile (%d decode tokens, includes sync overhead) ===", numProfileTokens)
+	runtime.PrintProfile()
+	runtime.DisableProfiling()
+
+	// === Part 3: GPU-level timing with VEXEL_GPU_PROFILE ===
+	metal.ResetGPUProfile()
+
+	const numGPUProfileTokens = 20
+	gpuStart := time.Now()
+	for i := 0; i < numGPUProfileTokens; i++ {
+		logits = getLogits(t, model, be, []int{nextToken}, pos)
+		nextToken = argmax(logits)
+		pos++
+	}
+	gpuWallTime := time.Since(gpuStart)
+
+	gpuStats := metal.GetGPUProfile()
+	t.Logf("\n=== GPU Profile (%d decode tokens) ===", numGPUProfileTokens)
+	t.Logf("  Wall time:     %.1f ms (%.1f ms/token)",
+		float64(gpuWallTime.Microseconds())/1000,
+		float64(gpuWallTime.Microseconds())/1000/float64(numGPUProfileTokens))
+	t.Logf("  GPU time:      %.1f ms (%.1f ms/token)",
+		float64(gpuStats.TotalTimeNs)/1e6,
+		float64(gpuStats.TotalTimeNs)/1e6/float64(numGPUProfileTokens))
+	t.Logf("  Sync time:     %.1f ms (%.1f ms/token)",
+		float64(gpuStats.SyncTimeNs)/1e6,
+		float64(gpuStats.SyncTimeNs)/1e6/float64(numGPUProfileTokens))
+	t.Logf("  Batches:       %d (%.1f/token)", gpuStats.BatchCount, float64(gpuStats.BatchCount)/float64(numGPUProfileTokens))
+	t.Logf("  Kernels:       %d (%.1f/token)", gpuStats.KernelCount, float64(gpuStats.KernelCount)/float64(numGPUProfileTokens))
+	if gpuStats.TotalTimeNs > 0 {
+		syncPct := float64(gpuStats.SyncTimeNs) / float64(gpuStats.TotalTimeNs) * 100
+		t.Logf("  Sync overhead: %.1f%%", syncPct)
+	}
+
+	// === Part 4: Dispatch profiler ===
+	profiler := be.DispatchProfiler()
+	profiler.Enable()
+	profiler.BeginPass()
+
+	logits = getLogits(t, model, be, []int{nextToken}, pos)
+	nextToken = argmax(logits)
+	pos++
+
+	profile := profiler.EndPass()
+	profiler.Disable()
+
+	t.Logf("\n=== Dispatch Profile (single decode token) ===")
+	t.Logf("  Total dispatches: %d", profile.TotalDispatches)
+	t.Logf("  Pass duration:    %v", profile.PassDuration)
+	if profile.TotalDispatches > 0 {
+		t.Logf("  Avg per dispatch: %.1f µs", float64(profile.PassDuration.Microseconds())/float64(profile.TotalDispatches))
+	}
+	for op, count := range profile.OpCounts {
+		pct := float64(count) / float64(profile.TotalDispatches) * 100
+		t.Logf("    %-30s %4d (%5.1f%%)", op, count, pct)
+	}
+
+	// Threshold: decode throughput target for closing the gap to llama.cpp
+	t.Logf("\n=== Gap Analysis ===")
+	llamaCppTokPerSec := 76.3
+	gap := (1 - tokPerSec/llamaCppTokPerSec) * 100
+	t.Logf("  Vexel:     %.1f tok/s", tokPerSec)
+	t.Logf("  llama.cpp: %.1f tok/s", llamaCppTokPerSec)
+	t.Logf("  Gap:       %.1f%%", gap)
+
+	if tokPerSec < 73 {
+		t.Errorf("Decode throughput %.1f tok/s below target 73 tok/s (gap to llama.cpp: %.1f%%)", tokPerSec, gap)
+	}
+}
+
 // sortDurations sorts a slice of time.Duration in ascending order.
 func sortDurations(d []time.Duration) {
 	for i := 1; i < len(d); i++ {

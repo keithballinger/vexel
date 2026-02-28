@@ -139,6 +139,12 @@ type FusedOps interface {
 	// x: [1, K] in FP32, normWeight: [K], wMat: [N, K] Q4_0, out: [1, N] in FP16
 	MatMulQ4_0_FusedRMSNormF16(x, normWeight, wMat, out tensor.DevicePtr, m, n, k int, eps float32)
 
+	// MatMulQ4_0_FusedRMSNormQKV_F16 performs RMSNorm on x, then 3 Q4_0 MatVecs for Q, K, V
+	// in a single dispatch, outputting FP16. Saves 2 dispatches vs 3 separate FusedRMSNormF16 calls.
+	// x: [1, K] in FP32, normWeight: [K], Wq: [qDim, K], Wk: [kvDim, K], Wv: [kvDim, K]
+	// outQ: [1, qDim] FP16, outK: [1, kvDim] FP16, outV: [1, kvDim] FP16
+	MatMulQ4_0_FusedRMSNormQKV_F16(x, normWeight, wq, wk, wv, outQ, outK, outV tensor.DevicePtr, qDim, kvDim, k int, eps float32)
+
 	// MatMulQ4_0_FusedMLP performs fused MLP: SiLU(x @ W1) * (x @ W3).
 	// x: [1, K] (or [M, K] in future)
 	// w1, w3: [N, K] Q4_0 (Gate, Up)

@@ -171,9 +171,17 @@ func (c *GPUKVCache) AppendKV(layerIdx int, kPtr, vPtr tensor.DevicePtr, srcDTyp
 				fp16Ops.ScatterKVF32ToF16(kPtr, c.kBuffers[layerIdx], newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
 				fp16Ops.ScatterKVF32ToF16(vPtr, c.vBuffers[layerIdx], newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
 			} else {
-				// Input is already F16 (or we assume it matches cache if not F32)
-				fp16Ops.ScatterKVF16(kPtr, c.kBuffers[layerIdx], newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
-				fp16Ops.ScatterKVF16(vPtr, c.vBuffers[layerIdx], newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
+				// Input is already F16 — try fused K+V scatter (1 dispatch instead of 2)
+				type fusedScatter interface {
+					ScatterKVF16Fused(srcK, dstK, srcV, dstV tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int)
+				}
+				if fused, ok := c.backend.(fusedScatter); ok {
+					fused.ScatterKVF16Fused(kPtr, c.kBuffers[layerIdx], vPtr, c.vBuffers[layerIdx],
+						newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
+				} else {
+					fp16Ops.ScatterKVF16(kPtr, c.kBuffers[layerIdx], newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
+					fp16Ops.ScatterKVF16(vPtr, c.vBuffers[layerIdx], newTokens, c.numKVHeads, c.headDim, c.maxSeqLen, c.seqLen)
+				}
 			}
 
 			fullSeqLen = c.seqLen + newTokens

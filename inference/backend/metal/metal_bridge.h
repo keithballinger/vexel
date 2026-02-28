@@ -70,6 +70,16 @@ void metal_matvec_q4_0_multi_output_f32(void* queue, void* pipeline,
                                          void* A, void* B, void* C,
                                          int N, int K);
 
+// Q4_0 v2 matvec: llama.cpp-matched, 64 threads (2 SGs), NR0=4, fused nibble masking
+void metal_matvec_q4_0_v2_f32(void* queue, void* pipeline,
+                               void* A, void* B, void* C,
+                               int N, int K);
+void metal_matvec_q4_0_v2_f32_offset(void* queue, void* pipeline,
+                                      void* A, uint64_t aOff,
+                                      void* B,
+                                      void* C, uint64_t cOff,
+                                      int N, int K);
+
 // Q4_0 NR2 matvec: 16 outputs per threadgroup (2 per simdgroup, better activation reuse)
 void metal_matvec_q4_0_nr2_f32(void* queue, void* pipeline,
                                 void* A, void* B, void* C,
@@ -199,6 +209,13 @@ void metal_matvec_q4_0_fused_rmsnorm_f32(void* queue, void* pipeline,
 void metal_matvec_q4_0_fused_rmsnorm_f16_out(void* queue, void* pipeline,
                                               void* x, void* normWeight, void* wMat, void* out,
                                               int n, int k, float eps);
+
+// Fused RMSNorm + QKV FP16: single dispatch for all 3 projections
+void metal_matvec_q4_0_fused_rmsnorm_qkv_f16(void* queue, void* pipeline,
+                                               void* x, void* normWeight,
+                                               void* Wq, void* Wk, void* Wv,
+                                               void* outQ, void* outK, void* outV,
+                                               int qDim, int kvDim, int K, float eps);
 
 // Fused MLP: SiLU(x @ W1) * (x @ W3)
 // W1, W3: [N, K] Q4_0
@@ -511,6 +528,17 @@ void metal_convert_f16_to_f32_offset(void* queue, void* pipeline,
 void metal_scatter_kv_f16(void* queue, void* pipeline, void* src, void* dst, int newTokens, int numKVHeads, int headDim, int maxSeqLen, int seqPos);
 void metal_scatter_kv_f32(void* queue, void* pipeline, void* src, void* dst, int newTokens, int numKVHeads, int headDim, int maxSeqLen, int seqPos);
 void metal_scatter_kv_f32_to_f16(void* queue, void* pipeline, void* src, void* dst, int newTokens, int numKVHeads, int headDim, int maxSeqLen, int seqPos);
+
+// Fused K+V scatter: scatter both K and V in a single dispatch (saves 1 dispatch/layer)
+void metal_scatter_kv_f16_fused(void* queue, void* pipeline,
+                                void* srcK, void* dstK,
+                                void* srcV, void* dstV,
+                                int newTokens, int numKVHeads, int headDim, int maxSeqLen, int seqPos);
+
+// MatVec Q4_0 v2 with FP16 input (eliminates F16->F32 convert dispatch)
+void metal_matvec_q4_0_v2_f16in_f32(void* queue, void* pipeline,
+                                     void* A, void* B, void* C,
+                                     int N, int K);
 
 // Reshape KV cache for paged attention
 // Copies data from src [numTokens, numKVHeads, headDim] to paged blocks.

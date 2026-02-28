@@ -763,3 +763,265 @@ func TestQ4_0SimdgroupV3_Throughput(t *testing.T) {
 		})
 	}
 }
+
+// runQ4V2Kernel directly exercises the v2 matvec kernel (M=1).
+func runQ4V2Kernel(t *testing.T, b *Backend, a []float32, bQ4 []byte, n, k int) []float32 {
+	aBuf := b.Alloc(len(a) * 4)
+	bBuf := b.Alloc(len(bQ4))
+	outBuf := b.Alloc(n * 4)
+	defer b.Free(aBuf)
+	defer b.Free(bBuf)
+	defer b.Free(outBuf)
+
+	b.ToDevice(aBuf, float32ToBytes(a))
+	b.ToDevice(bBuf, bQ4)
+
+	b.MatVecQ4_0V2(aBuf, bBuf, outBuf, n, k)
+	b.Sync()
+
+	resultBytes := make([]byte, n*4)
+	b.ToHost(resultBytes, outBuf)
+	return bytesToFloat32(resultBytes)
+}
+
+// TestQ4_0V2_Correctness tests the v2 matvec kernel (llama.cpp-matched: 64 threads,
+// NR0=4, fused nibble-masking) against CPU reference across all LLaMA 2 7B dimensions.
+func TestQ4_0V2_Correctness(t *testing.T) {
+	b, err := NewBackend(0)
+	if err != nil {
+		t.Skipf("Metal backend not available: %v", err)
+	}
+	defer b.Close()
+
+	if b.matvecQ4V2Pipeline == nil {
+		t.Skip("V2 pipeline not available")
+	}
+
+	tests := []struct {
+		name string
+		n    int
+		k    int
+		tol  float64
+	}{
+		// Small edge cases
+		{"N=1_K=32", 1, 32, 1e-3},
+		{"N=4_K=32", 4, 32, 1e-3},
+		{"N=7_K=32", 7, 32, 1e-3},   // N not divisible by 8
+		{"N=8_K=64", 8, 64, 1e-3},   // Exactly 1 v2 TG
+		{"N=31_K=32", 31, 32, 1e-3}, // Partial TG
+		{"N=32_K=32", 32, 32, 1e-3},
+		{"N=33_K=64", 33, 64, 1e-3},
+
+		// LLaMA 2 7B dimensions
+		{"N=4096_K=4096", 4096, 4096, 1e-2},   // Wq, Wk, Wv, Wo
+		{"N=11008_K=4096", 11008, 4096, 1e-2},  // W1 gate, W3 up
+		{"N=4096_K=11008", 4096, 11008, 2e-2},  // W2 down
+		{"N=32000_K=4096", 32000, 4096, 1e-2},  // lm_head
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			n, k := tc.n, tc.k
+
+			a := make([]float32, k)
+			for i := range a {
+				sign := float32(1.0)
+				if i%3 == 1 {
+					sign = -1.0
+				}
+				a[i] = sign * float32((i%11)+1) * 0.1
+			}
+
+			bQ4 := createQ4_0Matrix(n, k, func(row, col int) int {
+				return ((row*3 + col*7) % 7) - 3
+			})
+
+			expected := cpuMatMulQ4_0(a, bQ4, 1, n, k)
+			result := runQ4V2Kernel(t, b, a, bQ4, n, k)
+
+			maxDiff := 0.0
+			maxDiffIdx := 0
+			for i := 0; i < n; i++ {
+				if math.IsNaN(float64(result[i])) || math.IsInf(float64(result[i]), 0) {
+					t.Fatalf("NaN/Inf at output %d", i)
+				}
+				diff := math.Abs(float64(result[i] - expected[i]))
+				if diff > maxDiff {
+					maxDiff = diff
+					maxDiffIdx = i
+				}
+			}
+
+			t.Logf("N=%d K=%d: max_diff=%.6f at idx=%d (tol=%.4f)", n, k, maxDiff, maxDiffIdx, tc.tol)
+			if maxDiff > tc.tol {
+				t.Fatalf("V2 mismatch: diff=%.6f > tol=%.4f at idx=%d (expected=%.6f, got=%.6f)",
+					maxDiff, tc.tol, maxDiffIdx, expected[maxDiffIdx], result[maxDiffIdx])
+			}
+		})
+	}
+}
+
+// TestQ4_0V2_vs_MultiOutput compares v2 against multi_output to verify both
+// produce equivalent results at all LLaMA 2 7B dimensions.
+func TestQ4_0V2_vs_MultiOutput(t *testing.T) {
+	b, err := NewBackend(0)
+	if err != nil {
+		t.Skipf("Metal backend not available: %v", err)
+	}
+	defer b.Close()
+
+	if b.matvecQ4V2Pipeline == nil || b.matvecQ4MultiOutputPipeline == nil {
+		t.Skip("V2 or multi_output pipeline not available")
+	}
+
+	dims := []struct {
+		name string
+		n, k int
+	}{
+		{"4096x4096", 4096, 4096},
+		{"11008x4096", 11008, 4096},
+		{"4096x11008", 4096, 11008},
+		{"32000x4096", 32000, 4096},
+	}
+
+	for _, d := range dims {
+		t.Run(d.name, func(t *testing.T) {
+			n, k := d.n, d.k
+
+			a := make([]float32, k)
+			for i := range a {
+				a[i] = float32((i%17)-8) * 0.05
+			}
+
+			bQ4 := createQ4_0Matrix(n, k, func(row, col int) int {
+				return ((row*5 + col*11) % 9) - 4
+			})
+
+			// Run multi_output
+			aBuf := b.Alloc(len(a) * 4)
+			bBuf := b.Alloc(len(bQ4))
+			outMO := b.Alloc(n * 4)
+			outV2 := b.Alloc(n * 4)
+			defer b.Free(aBuf)
+			defer b.Free(bBuf)
+			defer b.Free(outMO)
+			defer b.Free(outV2)
+
+			b.ToDevice(aBuf, float32ToBytes(a))
+			b.ToDevice(bBuf, bQ4)
+
+			b.MatVecQ4_0MultiOutput(aBuf, bBuf, outMO, n, k)
+			b.Sync()
+
+			b.MatVecQ4_0V2(aBuf, bBuf, outV2, n, k)
+			b.Sync()
+
+			moBytes := make([]byte, n*4)
+			v2Bytes := make([]byte, n*4)
+			b.ToHost(moBytes, outMO)
+			b.ToHost(v2Bytes, outV2)
+			moResult := bytesToFloat32(moBytes)
+			v2Result := bytesToFloat32(v2Bytes)
+
+			maxDiff := 0.0
+			for i := 0; i < n; i++ {
+				diff := math.Abs(float64(v2Result[i] - moResult[i]))
+				if diff > maxDiff {
+					maxDiff = diff
+				}
+			}
+
+			t.Logf("%s: max_diff vs multi_output = %.6f", d.name, maxDiff)
+			if maxDiff > 1e-2 {
+				t.Fatalf("V2 vs multi_output: max_diff=%.6f > 1e-2", maxDiff)
+			}
+		})
+	}
+}
+
+// TestQ4_0V2_Benchmark measures v2 vs multi_output throughput at all decode dimensions.
+func TestQ4_0V2_Benchmark(t *testing.T) {
+	b, err := NewBackend(0)
+	if err != nil {
+		t.Skipf("Metal backend not available: %v", err)
+	}
+	defer b.Close()
+
+	if b.matvecQ4V2Pipeline == nil || b.matvecQ4MultiOutputPipeline == nil {
+		t.Skip("V2 or multi_output pipeline not available")
+	}
+
+	dims := []struct {
+		name string
+		n, k int
+	}{
+		{"4096x4096", 4096, 4096},
+		{"11008x4096", 11008, 4096},
+		{"4096x11008", 4096, 11008},
+		{"32000x4096", 32000, 4096},
+	}
+
+	t.Logf("%-15s %10s %10s %10s %10s %8s", "Dimension", "MO(µs)", "V2(µs)", "MO(GB/s)", "V2(GB/s)", "Speedup")
+
+	for _, d := range dims {
+		t.Run(d.name, func(t *testing.T) {
+			n, k := d.n, d.k
+
+			a := make([]float32, k)
+			for i := range a {
+				a[i] = float32(i%7) * 0.1
+			}
+			bQ4 := createQ4_0Matrix(n, k, func(row, col int) int {
+				return (row + col) % 5
+			})
+
+			aBuf := b.Alloc(len(a) * 4)
+			bBuf := b.Alloc(len(bQ4))
+			outBuf := b.Alloc(n * 4)
+			defer b.Free(aBuf)
+			defer b.Free(bBuf)
+			defer b.Free(outBuf)
+
+			b.ToDevice(aBuf, float32ToBytes(a))
+			b.ToDevice(bBuf, bQ4)
+
+			iters := 200
+			warmup := 20
+
+			// multi_output
+			for i := 0; i < warmup; i++ {
+				b.MatVecQ4_0MultiOutput(aBuf, bBuf, outBuf, n, k)
+			}
+			b.Sync()
+			start := time.Now()
+			for i := 0; i < iters; i++ {
+				b.MatVecQ4_0MultiOutput(aBuf, bBuf, outBuf, n, k)
+			}
+			b.Sync()
+			moTime := time.Since(start).Seconds() / float64(iters)
+
+			// v2
+			for i := 0; i < warmup; i++ {
+				b.MatVecQ4_0V2(aBuf, bBuf, outBuf, n, k)
+			}
+			b.Sync()
+			start = time.Now()
+			for i := 0; i < iters; i++ {
+				b.MatVecQ4_0V2(aBuf, bBuf, outBuf, n, k)
+			}
+			b.Sync()
+			v2Time := time.Since(start).Seconds() / float64(iters)
+
+			// Weight bytes = n * (k/32) * 18 bytes per Q4_0 block
+			weightBytes := float64(n) * float64(k) / 32.0 * 18.0
+			activationBytes := float64(k) * 4 // float32
+			totalBytes := weightBytes + activationBytes
+			moBW := totalBytes / moTime / 1e9
+			v2BW := totalBytes / v2Time / 1e9
+			speedup := moTime / v2Time
+
+			t.Logf("%-15s %10.0f %10.0f %10.1f %10.1f %7.2fx",
+				d.name, moTime*1e6, v2Time*1e6, moBW, v2BW, speedup)
+		})
+	}
+}

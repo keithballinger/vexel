@@ -4,6 +4,7 @@ package metal
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 	"math/rand"
 	"testing"
@@ -157,4 +158,263 @@ func TestFusedRMSNormMatMulQ4_0(t *testing.T) {
 	if maxDiff > 1e-2 {
 		t.Fatalf("Mismatch too large")
 	}
+}
+
+// TestFusedRMSNormQKV_F16 tests the fused RMSNorm + Q/K/V projection kernel (3→1 dispatch).
+// Verifies that a single fused dispatch produces the same FP16 outputs as 3 separate
+// FusedRMSNormF16 dispatches at all LLaMA 2 7B dimensions.
+func TestFusedRMSNormQKV_F16(t *testing.T) {
+	b, err := NewBackend(0)
+	if err != nil {
+		t.Skipf("Metal backend not available: %v", err)
+	}
+	defer b.Close()
+
+	if b.matvecQ4FusedRMSNormQKVF16Pipeline == nil {
+		t.Skip("Fused QKV F16 pipeline not available")
+	}
+	if b.matvecQ4FusedRMSNormF16Pipeline == nil {
+		t.Skip("FusedRMSNormF16 pipeline not available (needed for reference)")
+	}
+
+	configs := []struct {
+		name  string
+		qDim  int // Q output dimension
+		kvDim int // K, V output dimension
+		k     int // hidden dimension
+	}{
+		// Small for debugging
+		{"small_128_128_256", 128, 128, 256},
+		// LLaMA 2 7B: 32 Q heads, 32 KV heads (MHA), headDim=128
+		{"llama2_7b", 4096, 4096, 4096},
+		// LLaMA 2 7B GQA variant (e.g. 70B has 8 KV heads)
+		{"llama2_gqa", 4096, 1024, 4096},
+	}
+
+	eps := float32(1e-5)
+	rng := rand.New(rand.NewSource(42))
+
+	for _, cfg := range configs {
+		t.Run(cfg.name, func(t *testing.T) {
+			k := cfg.k
+			qDim := cfg.qDim
+			kvDim := cfg.kvDim
+
+			// Random input x [1, K]
+			x := make([]float32, k)
+			for i := range x {
+				x[i] = (rng.Float32() - 0.5) * 2
+			}
+
+			// RMSNorm weights [K]
+			normWeight := make([]float32, k)
+			for i := range normWeight {
+				normWeight[i] = rng.Float32() + 0.5
+			}
+
+			// Q4_0 weight matrices
+			numBlocksPerRow := k / 32
+			bytesPerRow := numBlocksPerRow * 18
+
+			wqBytes := make([]byte, qDim*bytesPerRow)
+			wkBytes := make([]byte, kvDim*bytesPerRow)
+			wvBytes := make([]byte, kvDim*bytesPerRow)
+			rng.Read(wqBytes)
+			rng.Read(wkBytes)
+			rng.Read(wvBytes)
+
+			// Ensure valid scales (1.0 = 0x3C00)
+			for _, w := range [][]byte{wqBytes, wkBytes, wvBytes} {
+				for i := 0; i < len(w); i += 18 {
+					binary.LittleEndian.PutUint16(w[i:], 0x3C00)
+				}
+			}
+
+			// Allocate GPU buffers
+			xBuf := b.Alloc(k * 4)
+			normBuf := b.Alloc(k * 4)
+			wqBuf := b.Alloc(len(wqBytes))
+			wkBuf := b.Alloc(len(wkBytes))
+			wvBuf := b.Alloc(len(wvBytes))
+			// FP16 output buffers (2 bytes per element)
+			outQFused := b.Alloc(qDim * 2)
+			outKFused := b.Alloc(kvDim * 2)
+			outVFused := b.Alloc(kvDim * 2)
+			outQRef := b.Alloc(qDim * 2)
+			outKRef := b.Alloc(kvDim * 2)
+			outVRef := b.Alloc(kvDim * 2)
+			defer b.Free(xBuf)
+			defer b.Free(normBuf)
+			defer b.Free(wqBuf)
+			defer b.Free(wkBuf)
+			defer b.Free(wvBuf)
+			defer b.Free(outQFused)
+			defer b.Free(outKFused)
+			defer b.Free(outVFused)
+			defer b.Free(outQRef)
+			defer b.Free(outKRef)
+			defer b.Free(outVRef)
+
+			b.ToDevice(xBuf, float32ToBytes(x))
+			b.ToDevice(normBuf, float32ToBytes(normWeight))
+			b.ToDevice(wqBuf, wqBytes)
+			b.ToDevice(wkBuf, wkBytes)
+			b.ToDevice(wvBuf, wvBytes)
+
+			// Run fused QKV kernel (single dispatch)
+			b.MatMulQ4_0_FusedRMSNormQKV_F16(xBuf, normBuf, wqBuf, wkBuf, wvBuf,
+				outQFused, outKFused, outVFused, qDim, kvDim, k, eps)
+			b.Sync()
+
+			// Run 3 separate FusedRMSNormF16 as reference
+			b.MatMulQ4_0_FusedRMSNormF16(xBuf, normBuf, wqBuf, outQRef, 1, qDim, k, eps)
+			b.MatMulQ4_0_FusedRMSNormF16(xBuf, normBuf, wkBuf, outKRef, 1, kvDim, k, eps)
+			b.MatMulQ4_0_FusedRMSNormF16(xBuf, normBuf, wvBuf, outVRef, 1, kvDim, k, eps)
+			b.Sync()
+
+			// Compare fused vs reference for each projection
+			checkF16Match := func(name string, fusedBuf, refBuf tensor.DevicePtr, dim int) {
+				fusedBytes := make([]byte, dim*2)
+				refBytes := make([]byte, dim*2)
+				b.ToHost(fusedBytes, fusedBuf)
+				b.ToHost(refBytes, refBuf)
+
+				maxDiff := 0.0
+				maxDiffIdx := 0
+				for i := 0; i < dim; i++ {
+					fusedVal := float16ToFloat32CPU(binary.LittleEndian.Uint16(fusedBytes[i*2 : i*2+2]))
+					refVal := float16ToFloat32CPU(binary.LittleEndian.Uint16(refBytes[i*2 : i*2+2]))
+					diff := math.Abs(float64(fusedVal - refVal))
+					if diff > maxDiff {
+						maxDiff = diff
+						maxDiffIdx = i
+					}
+				}
+
+				t.Logf("  %s: max_diff=%.6f at idx=%d (dim=%d)", name, maxDiff, maxDiffIdx, dim)
+				if maxDiff > 1e-3 {
+					fusedVal := float16ToFloat32CPU(binary.LittleEndian.Uint16(fusedBytes[maxDiffIdx*2 : maxDiffIdx*2+2]))
+					refVal := float16ToFloat32CPU(binary.LittleEndian.Uint16(refBytes[maxDiffIdx*2 : maxDiffIdx*2+2]))
+					t.Fatalf("  %s: fused vs ref mismatch: diff=%.6f at idx=%d (fused=%.6f, ref=%.6f)",
+						name, maxDiff, maxDiffIdx, fusedVal, refVal)
+				}
+			}
+
+			checkF16Match("Q", outQFused, outQRef, qDim)
+			checkF16Match("K", outKFused, outKRef, kvDim)
+			checkF16Match("V", outVFused, outVRef, kvDim)
+		})
+	}
+}
+
+// TestFusedRMSNormQKV_F16_vsCPU tests the fused QKV kernel against CPU reference.
+func TestFusedRMSNormQKV_F16_vsCPU(t *testing.T) {
+	b, err := NewBackend(0)
+	if err != nil {
+		t.Skipf("Metal backend not available: %v", err)
+	}
+	defer b.Close()
+
+	if b.matvecQ4FusedRMSNormQKVF16Pipeline == nil {
+		t.Skip("Fused QKV F16 pipeline not available")
+	}
+
+	// LLaMA 2 7B dimensions
+	k := 4096
+	qDim := 4096
+	kvDim := 4096
+	eps := float32(1e-5)
+	rng := rand.New(rand.NewSource(99))
+
+	// Random input
+	x := make([]float32, k)
+	for i := range x {
+		x[i] = (rng.Float32() - 0.5) * 2
+	}
+
+	normWeight := make([]float32, k)
+	for i := range normWeight {
+		normWeight[i] = rng.Float32() + 0.5
+	}
+
+	numBlocksPerRow := k / 32
+	bytesPerRow := numBlocksPerRow * 18
+
+	wqBytes := make([]byte, qDim*bytesPerRow)
+	wkBytes := make([]byte, kvDim*bytesPerRow)
+	wvBytes := make([]byte, kvDim*bytesPerRow)
+	rng.Read(wqBytes)
+	rng.Read(wkBytes)
+	rng.Read(wvBytes)
+	for _, w := range [][]byte{wqBytes, wkBytes, wvBytes} {
+		for i := 0; i < len(w); i += 18 {
+			binary.LittleEndian.PutUint16(w[i:], 0x3C00)
+		}
+	}
+
+	// CPU reference: RMSNorm then MatVec
+	xNorm := cpuRMSNorm(x, normWeight, eps)
+	expectedQ := cpuMatVecQ4_0(xNorm, wqBytes, 1, qDim, k)
+	expectedK := cpuMatVecQ4_0(xNorm, wkBytes, 1, kvDim, k)
+	expectedV := cpuMatVecQ4_0(xNorm, wvBytes, 1, kvDim, k)
+
+	// GPU
+	xBuf := b.Alloc(k * 4)
+	normBuf := b.Alloc(k * 4)
+	wqBuf := b.Alloc(len(wqBytes))
+	wkBuf := b.Alloc(len(wkBytes))
+	wvBuf := b.Alloc(len(wvBytes))
+	outQBuf := b.Alloc(qDim * 2)
+	outKBuf := b.Alloc(kvDim * 2)
+	outVBuf := b.Alloc(kvDim * 2)
+	defer b.Free(xBuf)
+	defer b.Free(normBuf)
+	defer b.Free(wqBuf)
+	defer b.Free(wkBuf)
+	defer b.Free(wvBuf)
+	defer b.Free(outQBuf)
+	defer b.Free(outKBuf)
+	defer b.Free(outVBuf)
+
+	b.ToDevice(xBuf, float32ToBytes(x))
+	b.ToDevice(normBuf, float32ToBytes(normWeight))
+	b.ToDevice(wqBuf, wqBytes)
+	b.ToDevice(wkBuf, wkBytes)
+	b.ToDevice(wvBuf, wvBytes)
+
+	b.MatMulQ4_0_FusedRMSNormQKV_F16(xBuf, normBuf, wqBuf, wkBuf, wvBuf,
+		outQBuf, outKBuf, outVBuf, qDim, kvDim, k, eps)
+	b.Sync()
+
+	checkVsCPU := func(name string, buf tensor.DevicePtr, expected []float32, dim int) {
+		bytes := make([]byte, dim*2)
+		b.ToHost(bytes, buf)
+
+		maxDiff := 0.0
+		maxDiffIdx := 0
+		for i := 0; i < dim; i++ {
+			gpuVal := float64(float16ToFloat32CPU(binary.LittleEndian.Uint16(bytes[i*2 : i*2+2])))
+			cpuVal := float64(expected[i])
+			diff := math.Abs(gpuVal - cpuVal)
+			if diff > maxDiff {
+				maxDiff = diff
+				maxDiffIdx = i
+			}
+		}
+
+		// FP16 output quantization: at value ~1000, step size is 1.0, so absolute error can be 0.5+.
+		// Use relative tolerance: allow 0.1% relative error or 0.5 absolute (FP16 quantization).
+		tol := math.Max(0.5, 0.001*math.Abs(float64(expected[maxDiffIdx])))
+		t.Logf("  %s vs CPU: max_diff=%.6f at idx=%d (tol=%.3f)", name, maxDiff, maxDiffIdx, tol)
+		if maxDiff > tol {
+			gpuVal := float16ToFloat32CPU(binary.LittleEndian.Uint16(bytes[maxDiffIdx*2 : maxDiffIdx*2+2]))
+			t.Fatalf("  %s: GPU vs CPU mismatch: diff=%.6f at idx=%d (gpu=%.6f, cpu=%.6f, tol=%.3f)",
+				name, maxDiff, maxDiffIdx, gpuVal, expected[maxDiffIdx], tol)
+		}
+	}
+
+	checkVsCPU("Q", outQBuf, expectedQ, qDim)
+	checkVsCPU("K", outKBuf, expectedK, kvDim)
+	checkVsCPU("V", outVBuf, expectedV, kvDim)
+	_ = fmt.Sprintf("") // use fmt
 }

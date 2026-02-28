@@ -1133,14 +1133,12 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	useFP16Path := canFuseAttn && useFP16KVCache
 
 	if useFP16Path {
-		// FP16 path: output directly to FP16 buffers, no conversion needed
+		// FP16 path: single fused dispatch for RMSNorm + Q/K/V projections (3→1 dispatch)
 		profileOp("FusedRMSNorm+QKV_F16", func() {
-			// Q -> qF16Ptr (FP16)
-			b.fusedOps.MatMulQ4_0_FusedRMSNormF16(xPtr, b.AttnNorm.DevicePtr(), b.Wq.DevicePtr(), qF16Ptr, 1, qSize, hiddenSize, float32(b.RMSNormEPS))
-			// K -> kF16Ptr (FP16)
-			b.fusedOps.MatMulQ4_0_FusedRMSNormF16(xPtr, b.AttnNorm.DevicePtr(), b.Wk.DevicePtr(), kF16Ptr, 1, kvSize, hiddenSize, float32(b.RMSNormEPS))
-			// V -> vF16Ptr (FP16)
-			b.fusedOps.MatMulQ4_0_FusedRMSNormF16(xPtr, b.AttnNorm.DevicePtr(), b.Wv.DevicePtr(), vF16Ptr, 1, kvSize, hiddenSize, float32(b.RMSNormEPS))
+			b.fusedOps.MatMulQ4_0_FusedRMSNormQKV_F16(xPtr, b.AttnNorm.DevicePtr(),
+				b.Wq.DevicePtr(), b.Wk.DevicePtr(), b.Wv.DevicePtr(),
+				qF16Ptr, kF16Ptr, vF16Ptr,
+				qSize, kvSize, hiddenSize, float32(b.RMSNormEPS))
 		})
 	} else if canFuseAttn {
 		profileOp("FusedRMSNorm+QKV", func() {
@@ -1360,8 +1358,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 					fmt.Printf("FP16Path\n")
 				}
 				// FP16 path: Q already in FP16 (from fused kernel), no Q conversion needed
+				// SDPA output stays in FP16 — Wo will read it directly via F16-input matvec
 				b.fp16Ops.SDPAF16(qF16Ptr, fullKPtr, fullVPtr, attnOutF16Ptr, fullSeqLen, numHeads, numKVHeads, headDim, scale, gpuCache.KVHeadStride())
-				b.fp16Ops.ConvertF16ToF32(attnOutF16Ptr, attnOutPtr, qSize)
 			} else if useFP16KVCache {
 				if debugDecode && layerIdx == 0 {
 					fmt.Printf("FP16KVCache\n")
@@ -1442,7 +1440,21 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	profileOp("Wo", func() {
 		if !b.Wo.DevicePtr().IsNil() {
 			oDim := b.Wo.Shape().Dims()[0]
-			b.matMulTransposedWithBias(attnOutPtr, b.Wo, b.WoBias, woOutputPtr, seqLen, oDim, numHeads*headDim)
+			// FP16 path: use F16-input matvec to skip ConvertF16ToF32 dispatch
+			type f16InMatMul interface {
+				MatMulQ4_0_F16In(a, bMat, out tensor.DevicePtr, n, k int)
+			}
+			if useFP16Path && b.Wo.QuantProfile() == tensor.Q4_0 {
+				if f16mm, ok := b.backend.(f16InMatMul); ok {
+					f16mm.MatMulQ4_0_F16In(attnOutF16Ptr, b.Wo.DevicePtr(), woOutputPtr, oDim, numHeads*headDim)
+				} else {
+					// Fallback: convert then use normal matmul
+					b.fp16Ops.ConvertF16ToF32(attnOutF16Ptr, attnOutPtr, qSize)
+					b.matMulTransposedWithBias(attnOutPtr, b.Wo, b.WoBias, woOutputPtr, seqLen, oDim, numHeads*headDim)
+				}
+			} else {
+				b.matMulTransposedWithBias(attnOutPtr, b.Wo, b.WoBias, woOutputPtr, seqLen, oDim, numHeads*headDim)
+			}
 		}
 		// Post-attention norm (Gemma 2): norm after attn projection, before residual
 		if b.HasPostNorms && !b.PostAttnNorm.DevicePtr().IsNil() {
