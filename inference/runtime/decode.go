@@ -470,6 +470,13 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 	scratch := tensor.NewTensor(tensor.NewShape(int(scratchBytes/4)), m.config.DType, scratchPtr)
 
 	// 5. Layer Loop using ExecuteWithGPUKV
+	// Cross-layer batching: wrap all layers in a single command buffer.
+	// Per-layer BeginBatch/EndBatch calls become nested (refcounted) no-ops,
+	// and the entire forward pass uses one CB with memory barriers between layers.
+	if batcher, ok := m.backend.(backend.Batcher); ok && os.Getenv("VEXEL_GPU_PROFILE") != "1" {
+		batcher.BeginBatch()
+		defer batcher.EndBatch()
+	}
 	if debugNow {
 		fmt.Printf("[DEBUG] debugNow=%v, debugDecode=%v, layers=%d\n", debugNow, debugDecode, len(m.layers))
 	}
@@ -597,6 +604,11 @@ func (m *ModelRuntime) DecodeEarlyExit(tokens []int, pos int, maxLayers int) (te
 	scratch := tensor.NewTensor(tensor.NewShape(int(scratchBytes/4)), m.config.DType, scratchPtr)
 
 	// 3. Layer Loop — only run first maxLayers
+	// Cross-layer batching: single CB for all layers
+	if batcher, ok := m.backend.(backend.Batcher); ok && os.Getenv("VEXEL_GPU_PROFILE") != "1" {
+		batcher.BeginBatch()
+		defer batcher.EndBatch()
+	}
 	for i := 0; i < maxLayers; i++ {
 		state, err = m.layers[i].ExecuteWithGPUKV(state, scratch, m.gpuCache, i, pos)
 		if err != nil {
@@ -839,6 +851,11 @@ func (m *ModelRuntime) DecodeWithGPUKVAndHidden(tokens []int, pos int) (logits t
 	scratch := tensor.NewTensor(tensor.NewShape(int(scratchBytes/4)), m.config.DType, scratchPtr)
 
 	// 5. Layer Loop using ExecuteWithGPUKV
+	// Cross-layer batching: single CB for all layers
+	if batcher, ok := m.backend.(backend.Batcher); ok && os.Getenv("VEXEL_GPU_PROFILE") != "1" {
+		batcher.BeginBatch()
+		defer batcher.EndBatch()
+	}
 	for i, layer := range m.layers {
 		state, err = layer.ExecuteWithGPUKV(state, scratch, m.gpuCache, i, pos)
 		if err != nil {
@@ -960,6 +977,11 @@ func (m *ModelRuntime) VerifySpeculative(tokens []int, pos int) (tensor.Tensor, 
 	scratch := tensor.NewTensor(tensor.NewShape(seqLen, hiddenSize), m.config.DType, scratchPtr)
 
 	// 5. Run through all layers using GPU KV cache
+	// Cross-layer batching: single CB for all layers
+	if batcher, ok := m.backend.(backend.Batcher); ok && os.Getenv("VEXEL_GPU_PROFILE") != "1" {
+		batcher.BeginBatch()
+		defer batcher.EndBatch()
+	}
 	for i := 0; i < m.config.NumHiddenLayers; i++ {
 		layer := m.layers[i]
 		state, err = layer.ExecuteWithGPUKV(state, scratch, m.gpuCache, i, pos)
@@ -1055,6 +1077,11 @@ func (m *ModelRuntime) VerifySpeculativeWithHidden(tokens []int, pos int) (tenso
 	scratch := tensor.NewTensor(tensor.NewShape(seqLen, hiddenSize), m.config.DType, scratchPtr)
 
 	// 5. Run through all layers using GPU KV cache
+	// Cross-layer batching: single CB for all layers
+	if batcher, ok := m.backend.(backend.Batcher); ok && os.Getenv("VEXEL_GPU_PROFILE") != "1" {
+		batcher.BeginBatch()
+		defer batcher.EndBatch()
+	}
 	for i := 0; i < m.config.NumHiddenLayers; i++ {
 		layer := m.layers[i]
 		state, err = layer.ExecuteWithGPUKV(state, scratch, m.gpuCache, i, pos)

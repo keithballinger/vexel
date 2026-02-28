@@ -5561,6 +5561,7 @@ void metal_copy_buffer(void* queue, void* srcBuffer, size_t srcOffset,
 static id<MTLCommandQueue> g_batchQueue = nil;
 static id<MTLCommandBuffer> g_batchCmdBuffer = nil;
 static id<MTLComputeCommandEncoder> g_batchEncoder = nil;
+static int g_batchRefCount = 0;  // Nested batch reference count
 
 // GPU profiling state
 static uint64_t g_gpuTotalTime = 0;
@@ -5689,20 +5690,31 @@ void metal_sync(void* commandQueue) {
 // =============================================================================
 // Global batch state defined earlier in file (see forward declarations)
 
-// Begin a batch of operations - all subsequent kernel dispatches use the same command buffer
+// Begin a batch of operations - all subsequent kernel dispatches use the same command buffer.
+// Supports nesting: if already in a batch, increments ref count without creating a new CB.
+// This enables cross-layer batching where the outer caller wraps multiple layers.
 void metal_begin_batch(void* queuePtr) {
     if (g_batchEncoder != nil) {
-        // Already in a batch - this shouldn't happen, but handle gracefully
+        // Already in a batch - increment ref count for nesting
+        g_batchRefCount++;
         return;
     }
     g_batchQueue = (__bridge id<MTLCommandQueue>)queuePtr;
     g_batchCmdBuffer = [g_batchQueue commandBuffer];
     g_batchEncoder = [g_batchCmdBuffer computeCommandEncoder];
+    g_batchRefCount = 1;
 }
 
-// End the batch and commit all operations
+// End the batch - only commits when ref count reaches 0 (outermost caller).
+// Nested EndBatch calls just decrement the ref count.
 void metal_end_batch(void) {
     if (g_batchEncoder == nil) {
+        return;
+    }
+    g_batchRefCount--;
+    if (g_batchRefCount > 0) {
+        // Nested batch - don't commit yet, just insert a barrier for safety
+        [g_batchEncoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
         return;
     }
     [g_batchEncoder endEncoding];
