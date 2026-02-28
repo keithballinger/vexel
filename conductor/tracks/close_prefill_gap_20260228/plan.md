@@ -19,7 +19,7 @@ Vexel Q4_0 prefill at seqLen=128 is 377 tok/s vs llama.cpp's 803 tok/s (2.13x ga
       2. GQA waste (87.5% threads idle: headsPerKV=1 but 8 simdgroups allocated)
       3. FP32 shared memory (2× needed vs FP16)
 
-## Phase 1: Prefill SDPA Rewrite [checkpoint: TBD]
+## Phase 1: Prefill SDPA Rewrite [checkpoint: 987c252]
 - [x] Task 1.1: Write new FA2v2 prefill kernel (`flash_attention_2_v2_f32`)
     - Single-pass online softmax (eliminates 2-pass Q·K recomputation)
     - Tiles Q positions across simdgroups: tileQ = max(1, 8/headsPerKV)
