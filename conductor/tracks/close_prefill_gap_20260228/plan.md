@@ -61,7 +61,7 @@ Vexel Q4_0 prefill at seqLen=128 is 377 tok/s vs llama.cpp's 803 tok/s (2.13x ga
 Gap narrowed from 2.13x → 1.43x. Remaining gap is now entirely in GEMM throughput.
 GEMM: ~240ms/pass (58%) = 5,500 GFLOPS vs llama.cpp ~13,000 GFLOPS.
 
-## Phase 2: GEMM Kernel Optimization
+## Phase 2: GEMM Kernel Optimization [checkpoint: cd22b51]
 - [x] Task 2.1: Analyze llama.cpp kernel_mul_mm for reference
     - llama.cpp uses TILE_M=64, TILE_N=32, TILE_K=32, 128 threads (4 SGs), 6KB shared
     - Blocked 8×8 shared memory layout with stride=8 for simdgroup_load
@@ -93,7 +93,7 @@ GEMM: ~240ms/pass (58%) = 5,500 GFLOPS vs llama.cpp ~13,000 GFLOPS.
       | 4096×11008 | 6,077 | 8,382 | **+38%** |
       | 32000×4096 | 7,924 | 10,651 | **+34%** |
 
-## Phase 3: Fused Projections
+## Phase 3: Fused Projections [checkpoint: cd22b51]
 - [x] Task 3.1: Fused QKV projection
     - Concatenate Wq+Wk+Wv → Wqkv [12288,4096] at load time
     - FuseQKVWeights() in loader.go + deinterleave kernel
@@ -110,7 +110,7 @@ GEMM: ~240ms/pass (58%) = 5,500 GFLOPS vs llama.cpp ~13,000 GFLOPS.
     - TestFusedAllCorrectness (both fused): bit-identical prefill, 20/20 decode match
     - Fusion speedup: ~1% at seqLen=128 (689→696 tok/s) — marginal
 
-## Phase 4: Integration Benchmarks
+## Phase 4: Integration Benchmarks [checkpoint: cd22b51]
 - [x] Task 4.1: End-to-end prefill benchmark
     - **TARGET MET: 717 tok/s at seqLen=128** (target ≥700)
     - Full results (M3 Max, LLaMA 2 7B Q4_0, 94% battery charging):
