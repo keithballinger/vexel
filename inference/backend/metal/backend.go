@@ -93,6 +93,7 @@ type Backend struct {
 	sdpaFlashDecodePipeline     unsafe.Pointer
 	sdpaPrefillPipeline         unsafe.Pointer
 	flashAttention2Pipeline     unsafe.Pointer
+	flashAttention2V2Pipeline  unsafe.Pointer
 	flashAttention2F16Pipeline  unsafe.Pointer
 	matmulQ4BatchedPipeline     unsafe.Pointer
 	matmulQ4SimdgroupPipeline   unsafe.Pointer
@@ -232,6 +233,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.sdpaFlashDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f32"))
 	b.sdpaPrefillPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_prefill_f32"))
 	b.flashAttention2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("flash_attention_2_f32"))
+	b.flashAttention2V2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("flash_attention_2_v2_f32"))
 	b.flashAttention2F16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("flash_attention_2_f16"))
 	b.matmulQ4BatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_batched_f32"))
 	b.matmulQ4SimdgroupPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4_0_simdgroup_f32"))
@@ -1288,19 +1290,31 @@ func (b *Backend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHea
 }
 
 // SDPAPrefill performs SDPA for prefill with causal masking.
-// Uses Flash Attention 2 for longer sequences where K/V tiling provides benefit.
+// Uses FA2 v2 (single-pass online softmax, tiled Q) for seqLen >= 48, which is
+// 11-15x faster than v1 at seq128-256. Falls back to v1 for shorter sequences
+// where v2's tile overhead dominates.
+// Set VEXEL_FA2_V1=1 to force the original two-pass FA2 kernel.
 func (b *Backend) SDPAPrefill(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
 	b.profiler.RecordDispatch("SDPAPrefill")
-	// Use Flash Attention 2 for sequences >= 32 tokens
-	// FA2 uses two-pass tiling (find max, then accumulate) to reduce register pressure
-	// and caches Q in registers while streaming K/V tiles from shared memory
-	if b.flashAttention2Pipeline != nil && seqLen >= flashAttentionMinSeqLen() {
-		C.metal_flash_attention_2_f32(b.queue, b.flashAttention2Pipeline,
-			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
-			unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
-			C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
-			C.float(scale))
-		return
+	if seqLen >= flashAttentionMinSeqLen() {
+		// FA2 v2: single-pass, tiled Q, ~11x faster at seq128+ (crossover at ~48 tokens)
+		if b.flashAttention2V2Pipeline != nil && seqLen >= 48 && os.Getenv("VEXEL_FA2_V1") != "1" {
+			C.metal_flash_attention_2_v2_f32(b.queue, b.flashAttention2V2Pipeline,
+				unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+				unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+				C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+				C.float(scale))
+			return
+		}
+		// FA2 v1: two-pass, per-Q-position TGs, better for short sequences (16-47)
+		if b.flashAttention2Pipeline != nil {
+			C.metal_flash_attention_2_f32(b.queue, b.flashAttention2Pipeline,
+				unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+				unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+				C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+				C.float(scale))
+			return
+		}
 	}
 	C.metal_sdpa_prefill_f32(b.queue, b.sdpaPrefillPipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
@@ -1314,6 +1328,28 @@ func (b *Backend) SDPAPrefill(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, 
 func (b *Backend) SDPAPrefillStandard(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
 	b.profiler.RecordDispatch("SDPAPrefill")
 	C.metal_sdpa_prefill_f32(b.queue, b.sdpaPrefillPipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale))
+}
+
+// SDPAPrefillFA2V1 calls the original FA2 kernel directly (two-pass, per-Q-position TGs).
+// Used for A/B benchmarking against FA2 v2.
+func (b *Backend) SDPAPrefillFA2V1(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	b.profiler.RecordDispatch("SDPAPrefillFA2V1")
+	C.metal_flash_attention_2_f32(b.queue, b.flashAttention2Pipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale))
+}
+
+// SDPAPrefillFA2V2 calls the optimized FA2 v2 kernel directly (single-pass, tiled Q).
+// Used for A/B benchmarking and correctness testing.
+func (b *Backend) SDPAPrefillFA2V2(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	b.profiler.RecordDispatch("SDPAPrefillFA2V2")
+	C.metal_flash_attention_2_v2_f32(b.queue, b.flashAttention2V2Pipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),

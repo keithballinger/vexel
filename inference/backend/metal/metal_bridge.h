@@ -397,6 +397,12 @@ void metal_flash_attention_2_f32(void* queue, void* pipeline,
                                   int seqLen, int numQHeads, int numKVHeads, int headDim,
                                   float scale);
 
+// Flash Attention 2 v2 — optimized prefill (single-pass, tiled Q for GQA, TILE_KV=32)
+void metal_flash_attention_2_v2_f32(void* queue, void* pipeline,
+                                     void* Q, void* K, void* V, void* out,
+                                     int seqLen, int numQHeads, int numKVHeads, int headDim,
+                                     float scale);
+
 // Flash Attention 2 with FP16 activations (2x bandwidth)
 // Q, K, V, out are all FP16
 void metal_flash_attention_2_f16(void* queue, void* pipeline,

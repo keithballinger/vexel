@@ -5279,6 +5279,180 @@ kernel void flash_attention_2_f32(
     }
 }
 
+// ============================================================================
+// Flash Attention 2 v2 — Optimized FP32 prefill kernel
+// Fixes 3 critical issues in the original FA2:
+//   1. Single-pass online softmax (no Q·K recomputation)
+//   2. Tiles Q positions across simdgroups (fixes GQA utilization waste)
+//   3. Strided dimension mapping for bank-conflict-free shared memory access
+//
+// Grid: (ceil(seqLen / tileQ), numKVHeads)
+//   tileQ = max(1, 8 / headsPerKV): 8 for headsPerKV=1, 2 for headsPerKV=4
+// Each threadgroup handles tileQ Q positions × headsPerKV Q heads = 8 tasks
+// All 8 simdgroups are fully utilized.
+//
+// Shared memory: K tile [TILE_KV, headDim] + V tile [TILE_KV, headDim] in FP32
+//   TILE_KV=32, headDim=128 → 2×32×128×4 = 32KB (fits in threadgroup memory)
+// ============================================================================
+constant int FA2V2_TILE_KV = 32;
+constant int FA2V2_NUM_SG = 8;
+constant int FA2V2_THREADS = FA2V2_NUM_SG * 32;
+
+kernel void flash_attention_2_v2_f32(
+    device const float* Q [[buffer(0)]],
+    device const float* K [[buffer(1)]],
+    device const float* V [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant int& seqLen [[buffer(4)]],
+    constant int& numQHeads [[buffer(5)]],
+    constant int& numKVHeads [[buffer(6)]],
+    constant int& headDim [[buffer(7)]],
+    constant float& scale [[buffer(8)]],
+    threadgroup float* shared [[threadgroup(0)]],
+    uint2 gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int kvHead = gid.y;
+    int headsPerKV = numQHeads / numKVHeads;
+
+    // Tile Q: distribute Q positions across simdgroups
+    // For headsPerKV=1: tileQ=8 (each SG = different Q position, same head)
+    // For headsPerKV=4: tileQ=2 (each SG = one of 4 heads × 2 positions)
+    // For headsPerKV=8: tileQ=1 (each SG = one of 8 heads, same position)
+    int tileQ = FA2V2_NUM_SG / headsPerKV;
+    if (tileQ < 1) tileQ = 1;
+    if (tileQ > FA2V2_NUM_SG) tileQ = FA2V2_NUM_SG;
+
+    int qHeadLocal = (int)simd_group / tileQ;
+    int qPosLocal = (int)simd_group % tileQ;
+
+    int qHead = kvHead * headsPerKV + qHeadLocal;
+    int qPos = (int)gid.x * tileQ + qPosLocal;
+
+    bool active = (qPos < seqLen) && (qHeadLocal < headsPerKV);
+
+    // Shared memory: K tile then V tile
+    threadgroup float* Ktile = shared;
+    threadgroup float* Vtile = shared + FA2V2_TILE_KV * headDim;
+
+    // Strided dimension mapping: thread l handles dims l, l+32, l+64, l+96
+    // This gives coalesced device reads AND bank-conflict-free shared memory access
+    int dimsPerThread = (headDim + 31) / 32;
+
+    // Load Q into registers (reused across all KV tiles)
+    float q_reg[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (active) {
+        int qOffset = qPos * numQHeads * headDim + qHead * headDim;
+        for (int i = 0; i < dimsPerThread; i++) {
+            int d = (int)simd_lane + i * 32;
+            if (d < headDim) q_reg[i] = Q[qOffset + d];
+        }
+    }
+
+    int maxKLen = active ? (qPos + 1) : 0;
+
+    // Online softmax state
+    float runningMax = -INFINITY;
+    float runningSum = 0.0f;
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    // Process KV in tiles
+    for (int tileStart = 0; tileStart < seqLen; tileStart += FA2V2_TILE_KV) {
+        // Early exit: if all Q positions in this TG are past causal boundary
+        int maxQInTG = min((int)gid.x * tileQ + tileQ - 1, seqLen - 1);
+        if (tileStart > maxQInTG) break;
+
+        int tileEnd = min(tileStart + FA2V2_TILE_KV, seqLen);
+        int tileSize = tileEnd - tileStart;
+
+        // Cooperative K/V tile load (all 256 threads participate)
+        int totalElems = FA2V2_TILE_KV * headDim;
+        for (int idx = (int)tid; idx < totalElems; idx += FA2V2_THREADS) {
+            int kPos = tileStart + idx / headDim;
+            int d = idx % headDim;
+            if (kPos < tileEnd) {
+                int kvOffset = kPos * numKVHeads * headDim + kvHead * headDim + d;
+                Ktile[idx] = K[kvOffset];
+                Vtile[idx] = V[kvOffset];
+            } else {
+                Ktile[idx] = 0.0f;
+                Vtile[idx] = 0.0f;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (active) {
+            // Single pass: compute scores + find tile max
+            float tileMax = -INFINITY;
+            float scores[32]; // FA2V2_TILE_KV = 32
+
+            for (int k = 0; k < tileSize; k++) {
+                int kPos = tileStart + k;
+                if (kPos > qPos) {
+                    scores[k] = -INFINITY;
+                    continue;
+                }
+                // Q·K dot product (strided dims)
+                float dot = 0.0f;
+                for (int i = 0; i < dimsPerThread; i++) {
+                    int d = (int)simd_lane + i * 32;
+                    if (d < headDim) {
+                        dot += q_reg[i] * Ktile[k * headDim + d];
+                    }
+                }
+                float score = simd_sum(dot) * scale;
+                scores[k] = score;
+                tileMax = max(tileMax, score);
+            }
+
+            // Online softmax: rescale existing accumulators
+            float newMax = max(runningMax, tileMax);
+            float rescale = (runningMax > -INFINITY) ? exp(runningMax - newMax) : 0.0f;
+
+            for (int i = 0; i < dimsPerThread; i++) {
+                acc[i] *= rescale;
+            }
+            runningSum *= rescale;
+
+            // Accumulate exp(score) * V
+            float tileSum = 0.0f;
+            for (int k = 0; k < tileSize; k++) {
+                int kPos = tileStart + k;
+                if (kPos > qPos) continue;
+
+                float expScore = exp(scores[k] - newMax);
+                tileSum += expScore;
+
+                for (int i = 0; i < dimsPerThread; i++) {
+                    int d = (int)simd_lane + i * 32;
+                    if (d < headDim) {
+                        acc[i] += expScore * Vtile[k * headDim + d];
+                    }
+                }
+            }
+
+            runningSum += tileSum;
+            runningMax = newMax;
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Write output: O = acc / runningSum
+    if (active && runningSum > 0.0f) {
+        int outOffset = qPos * numQHeads * headDim + qHead * headDim;
+        float invSum = 1.0f / runningSum;
+        for (int i = 0; i < dimsPerThread; i++) {
+            int d = (int)simd_lane + i * 32;
+            if (d < headDim) {
+                out[outOffset + d] = acc[i] * invSum;
+            }
+        }
+    }
+}
+
 // Flash Attention 2 with FP16 activations
 // Q, K, V, out are all FP16
 // Shared memory K/V tiles are also FP16 (halves memory usage)
@@ -8442,6 +8616,52 @@ void metal_flash_attention_2_f32(void* queuePtr, void* pipelinePtr,
     // 8 simdgroups (256 threads) process 8 Q heads in parallel
     MTLSize threadgroups = MTLSizeMake(seqLen, numKVHeads, 1);
     MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);  // FA2_THREADS = 8 simdgroups * 32
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Flash Attention 2 v2 — optimized prefill kernel
+// Fixes: single-pass online softmax, tiles Q across simdgroups for GQA utilization,
+// TILE_KV=32 for FP32 headDim=128 within 32KB shared memory budget.
+// Grid: (ceil(seqLen / tileQ), numKVHeads) where tileQ = max(1, 8/headsPerKV)
+void metal_flash_attention_2_v2_f32(void* queuePtr, void* pipelinePtr,
+                                     void* Q, void* K, void* V, void* out,
+                                     int seqLen, int numQHeads, int numKVHeads, int headDim,
+                                     float scale) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBytes:&seqLen length:sizeof(seqLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+
+    // Shared memory: K tile [TILE_KV, headDim] + V tile [TILE_KV, headDim]
+    int FA2V2_TILE_KV = 32;
+    int sharedMemSize = 2 * FA2V2_TILE_KV * headDim * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    // Grid: (ceil(seqLen / tileQ), numKVHeads)
+    // tileQ = max(1, 8 / headsPerKV): 8 for headsPerKV=1, 2 for headsPerKV=4, 1 for headsPerKV=8
+    int headsPerKV = numQHeads / numKVHeads;
+    int tileQ = 8 / headsPerKV;
+    if (tileQ < 1) tileQ = 1;
+    if (tileQ > 8) tileQ = 8;
+    int numQTiles = (seqLen + tileQ - 1) / tileQ;
+
+    MTLSize threadgroups = MTLSizeMake(numQTiles, numKVHeads, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);  // 8 simdgroups * 32 threads
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
     finish_encode(encoder, cmdBuffer, shouldCommit);

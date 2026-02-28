@@ -1371,19 +1371,13 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			}
 		} else {
 			// Prefill: use causal SDPAPrefill
-			if useFP16KVCache {
-				// FP16 path: convert Q to FP16, use FA2 F16, convert output back to FP32
-				// Note: kF16Ptr and vF16Ptr already contain the F16 converted K/V from step 4
-				b.fp16Ops.ConvertF32ToF16(qPtr, qF16Ptr, qSize)
-				b.fp16Ops.SDPAPrefillF16(qF16Ptr, kF16Ptr, vF16Ptr, attnOutF16Ptr, seqLen, numHeads, numKVHeads, headDim, scale)
-				b.fp16Ops.ConvertF16ToF32(attnOutF16Ptr, attnOutPtr, qSize)
+			// Always use FP32 path for prefill — FA2v2 kernel is dramatically faster
+			// than the FP16 FA2v1 path (11x at seq128), and kPtr/vPtr still hold
+			// the original FP32 K/V in scratch memory even when KV cache is FP16.
+			if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
+				b.softCapOps.SDPAPrefillSoftCap(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap)
 			} else {
-				// FP32 path
-				if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
-					b.softCapOps.SDPAPrefillSoftCap(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap)
-				} else {
-					b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
-				}
+				b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
 			}
 		}
 	})

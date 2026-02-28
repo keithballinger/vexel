@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"vexel/inference/backend/metal"
+	"vexel/inference/runtime"
 )
 
 // TestThroughputPrefill measures prefill throughput (tokens/second) at various
@@ -514,6 +515,43 @@ func TestModelLoadTime(t *testing.T) {
 	for i, d := range times {
 		t.Logf("  Run %d: %.0f ms", i+1, float64(d.Microseconds())/1000)
 	}
+}
+
+// TestPrefillPerOpProfile measures the per-operation time breakdown for a 128-token
+// prefill forward pass. Profiling adds Sync() between every operation, so total time
+// is inflated, but the RELATIVE proportions are accurate.
+//
+// Track: close_prefill_gap, Phase 0 Task 0.2.
+func TestPrefillPerOpProfile(t *testing.T) {
+	m, b, c := setupModel(t, false)
+	defer b.Close()
+	defer c.Free()
+
+	tokens := generateTokenSequence(128)
+
+	// Warmup without profiling
+	for i := 0; i < 2; i++ {
+		_, err := m.DecodeWithGPUKV(tokens, 0)
+		if err != nil {
+			t.Fatalf("Warmup failed: %v", err)
+		}
+		b.Sync()
+		c.Reset()
+	}
+
+	// Enable profiling and run one forward pass
+	runtime.EnableProfiling()
+	runtime.ResetProfile()
+
+	c.Reset()
+	_, err := m.DecodeWithGPUKV(tokens, 0)
+	if err != nil {
+		t.Fatalf("Profiled forward pass failed: %v", err)
+	}
+	b.Sync()
+
+	runtime.PrintProfile()
+	runtime.DisableProfiling()
 }
 
 // sortDurations sorts a slice of time.Duration in ascending order.
