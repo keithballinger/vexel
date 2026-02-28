@@ -3,7 +3,7 @@
 > Hardware: Apple M3 Max, 128 GB Unified Memory, 400 GB/s bandwidth
 > Model: LLaMA 2 7B Q4_0 (3.56 GB)
 > llama.cpp: b8140 (39fb81f87)
-> Last updated: 2026-02-27 (P9 Phase 1: half-precision GEMM with block dequant)
+> Last updated: 2026-02-27 (P9 Phase 4: Q4_K half-precision GEMM with correct nibble addressing)
 
 ## Decode Throughput
 
@@ -93,25 +93,26 @@ speedup** over scalar baseline.
 
 | seqLen | Q4_0 | Q4_K_M | Q4_K/Q4_0 | Before Optimization |
 |--------|------|--------|-----------|---------------------|
-| 5      | 96.2 tok/s  | 26.7 tok/s  | 0.28x | 16.6 tok/s (0.32x) |
-| 32     | 145.2 tok/s | 132.3 tok/s | 0.91x | — |
-| 128    | 200.2 tok/s | 157.6 tok/s | 0.79x | 16.6 tok/s (0.11x) |
-| 385    | 151.7 tok/s | 123.5 tok/s | 0.81x | 15.9 tok/s (0.15x) |
+| 5      | 94.8 tok/s  | 26.5 tok/s  | 0.28x | 16.6 tok/s (0.32x) |
+| 32     | 339.1 tok/s | 217.9 tok/s | 0.64x | — |
+| 128    | 377.6 tok/s | 220.4 tok/s | 0.58x | 16.6 tok/s (0.11x) |
+| 385    | 223.7 tok/s | 157.9 tok/s | 0.71x | 15.9 tok/s (0.15x) |
 
-Key techniques: ported `matmul_q4_0_simdgroup_f32` to Q4_K with TILE_K=32
-aligned to sub-block size, 8 simdgroups in 2×4 layout, 12KB threadgroup
-memory, hardware 8×8 matrix multiply via `simdgroup_multiply_accumulate`.
-**9.5x speedup** at 128 tokens over batched scalar baseline.
+Key techniques: half-precision shared memory (`threadgroup half*`) with
+TILE_K=64 (2 Q4_K sub-blocks per iteration), block-based B dequant with
+correct interleaved nibble addressing, 8 simdgroups in 2×4 layout, 12KB
+threadgroup memory, hardware 8×8 matrix multiply via `simdgroup_multiply_accumulate`.
+**13.3x speedup** at 128 tokens over batched scalar baseline.
 
 **Context scaling (Q4_K_M decode):**
 
 | Context | tok/s | Degradation |
 |---------|-------|-------------|
-| 16      | 54.3  | baseline    |
-| 64      | 53.9  | -0.7%       |
-| 128     | 53.2  | -2.0%       |
-| 256     | 51.8  | -4.6%       |
-| 512     | 48.4  | -10.9%      |
+| 16      | 53.5  | baseline    |
+| 64      | 53.3  | -0.4%       |
+| 128     | 52.5  | -1.9%       |
+| 256     | 50.8  | -5.0%       |
+| 512     | 47.7  | -10.8%      |
 
 Note: seqLen=5 prefill uses batched NR2 kernel (M<8 threshold), not the
 simdgroup kernel. The seqLen=5 Q4_K gap is a known limitation of the
@@ -179,7 +180,7 @@ kernel. Expected impact: +1-2%.
 | **P6** | Q4_0 matmul kernel optimization | Close remaining ~15% gap | Investigated (NR4 not beneficial) |
 | ~~P7~~ | ~~SDPA/KV access for long context~~ | **-24.5% → ~-10% ctx degradation** | ✅ DONE (334a491, a33e9c8) |
 | ~~P8~~ | ~~Q4_K kernel optimization~~ | **3.7x decode, 9.5x prefill** | ✅ DONE (3967f85, b9916aa) |
-| **P9** | Prefill pipeline optimization | **1.9x prefill (Phase 1)** | Phase 1 ✅ (f4dd160) |
+| ~~P9~~ | ~~Prefill pipeline optimization~~ | **1.9x Q4_0, 1.4x Q4_K prefill** | ✅ DONE (f4dd160, eca90d3) |
 
 **Key finding:** The dominant bottleneck was per-dispatch synchronization.
 `finish_encode()` called `[cmdBuf waitUntilCompleted]` on every kernel
@@ -195,13 +196,12 @@ from -89.4% to -15.1%.
   degradation from -24.5% to ~-10% (ctx=16→512). Uses split-KV tiled
   processing with online softmax, O(headDim) threadgroup memory.
 - ~~**Q4_K kernels:**~~ **FIXED.** Sub-block strided decode (3.7x) and
-  simdgroup tiled GEMM prefill (9.5x) closed the Q4_K gap from 3-9x
-  slower to within 16-21% of Q4_0. Q4_K_M decode: 52.8 tok/s, prefill
-  128: 157.6 tok/s.
-- **Prefill vs llama.cpp (2-4x):** P9 Phase 1 narrowed the gap from
-  4-5x to 1.7-3.6x via half-precision GEMM with block dequant (2.62x
-  isolated GEMM speedup). Remaining gap likely in cross-layer CB overhead,
-  FA2 prefill utilization, and fused QKV projections.
+  half-precision simdgroup GEMM prefill (13.3x) with correct interleaved
+  nibble addressing. Q4_K_M decode: 53.5 tok/s, prefill 128: 220.4 tok/s.
+- **Prefill vs llama.cpp (2x):** P9 narrowed the gap from 4-5x to
+  ~2x via half-precision GEMM with block dequant (2.62x isolated GEMM
+  speedup) and cross-layer CB batching. Remaining gap likely in fused
+  QKV projections and FA2 prefill utilization at longer contexts.
 
 ## Vexel's Competitive Advantages (Not Captured in Single-Stream)
 
@@ -220,9 +220,9 @@ single-stream throughput:
 
 | Metric | Vexel Q4_0 | Vexel Q4_K_M | MLX (Mistral 4-bit) | Gap (Q4_K_M vs MLX) |
 |--------|-----------|-------------|---------------------|-----|
-| Decode (short ctx) | 64.8 tok/s | 52.8 tok/s | 83.5 tok/s | -37% |
-| Context degradation (16→512) | ~-10% | -10.9% | -2.5% | ~8pp |
-| Prefill 128 tok | 377 tok/s | 157.6 tok/s* | 725 tok/s | -78%* |
+| Decode (short ctx) | 64.8 tok/s | 53.5 tok/s | 83.5 tok/s | -36% |
+| Context degradation (16→512) | ~-10% | -10.8% | -2.5% | ~8pp |
+| Prefill 128 tok | 377 tok/s | 220.4 tok/s | 725 tok/s | -70% |
 
 With Q4_K_M kernel optimization, Vexel now supports the higher-quality
 quantization format (256-element super-blocks with 6-bit scales/mins).

@@ -229,9 +229,9 @@ Benchmarks on Apple M3 Max (128 GB) with LLaMA 2 7B:
 
 | Metric | Vexel | vs Q4_0 | Before Optimization |
 |--------|-------|---------|---------------------|
-| Decode throughput | 52.8 tok/s | 0.84x | 14.2 tok/s (3.7x faster) |
-| Prefill (128 tokens) | 157.6 tok/s* | 0.42x | 16.6 tok/s (9.5x faster) |
-| Context degradation (16→512) | -10.9% | — | — |
+| Decode throughput | 53.5 tok/s | 0.84x | 14.2 tok/s (3.8x faster) |
+| Prefill (128 tokens) | 220.4 tok/s | 0.58x | 16.6 tok/s (13.3x faster) |
+| Context degradation (16→512) | -10.8% | — | — |
 
 Vexel achieves **85% of llama.cpp's decode throughput** on Q4_0 and supports
 Q4_K_M with custom sub-block strided decode and simdgroup tiled prefill kernels.

@@ -1785,8 +1785,8 @@ kernel void matmul_q4k_simdgroup_f32(
     constant int& M [[buffer(3)]],
     constant int& N [[buffer(4)]],
     constant int& K [[buffer(5)]],
-    threadgroup float* shared_A [[threadgroup(0)]],  // [TILE_M, TILE_K]
-    threadgroup float* shared_B [[threadgroup(1)]],  // [TILE_K, TILE_N] (B transposed!)
+    threadgroup half* shared_A [[threadgroup(0)]],   // [TILE_M, TILE_K] half
+    threadgroup half* shared_B [[threadgroup(1)]],   // [TILE_K, TILE_N] half (B transposed!)
     uint2 tg_pos [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]],
     uint simd_lane [[thread_index_in_simdgroup]],
@@ -1800,7 +1800,7 @@ kernel void matmul_q4k_simdgroup_f32(
     int sg_row = (simd_group / 4) * 16;
     int sg_col = (simd_group % 4) * 16;
 
-    // Result accumulators (4 8×8 tiles per simdgroup for 16×16)
+    // Result accumulators (float for precision, half inputs for speed)
     simdgroup_float8x8 acc00(0.0f), acc01(0.0f), acc10(0.0f), acc11(0.0f);
 
     int numQ4KBlocks = (K + Q4K_BLOCK_SIZE - 1) / Q4K_BLOCK_SIZE;
@@ -1809,70 +1809,84 @@ kernel void matmul_q4k_simdgroup_f32(
     for (int k_tile = 0; k_tile < numKTiles; k_tile++) {
         int k_base = k_tile * SMM_TILE_K;
 
-        // === Cooperative load of A tile [TILE_M, TILE_K] (identical to Q4_0) ===
+        // === Cooperative load of A tile [TILE_M, TILE_K] as half ===
         for (int i = tid; i < SMM_TILE_M * SMM_TILE_K; i += 256) {
             int local_m = i / SMM_TILE_K;
             int local_k = i % SMM_TILE_K;
             int global_m = tile_m + local_m;
             int global_k = k_base + local_k;
 
-            float val = 0.0f;
+            half val = 0.0h;
             if (global_m < M && global_k < K) {
-                val = A[global_m * K + global_k];
+                val = half(A[global_m * K + global_k]);
             }
             shared_A[local_m * SMM_TILE_K + local_k] = val;
         }
 
-        // === Cooperative load and dequantize B tile [TILE_K, TILE_N] (Q4_K) ===
-        // B is [N, K] in Q4_K format, stored TRANSPOSED as shared_B[k, n].
-        // Since TILE_K=32 = Q4_K sub-block size, all elements in this k_tile
-        // belong to the same Q4_K block and sub-block. Precompute j once.
-        int q4k_block_idx = k_base / Q4K_BLOCK_SIZE;
-        int j = (k_base / 32) & 7;    // sub-block index within Q4_K block
-        int j_lo = j & 3;
-        int qs_base = j_lo << 5;       // (j & 3) * 32
-        int shift = (j >> 2) << 2;     // 0 for j<4, 4 for j>=4
-
-        for (int i = tid; i < SMM_TILE_N * SMM_TILE_K; i += 256) {
-            int local_n = i / SMM_TILE_K;
-            int local_k = i % SMM_TILE_K;
+        // === Block-based B dequant (Q4_K): threads 0-127 each handle one sub-block ===
+        // TILE_K=64 spans 2 Q4_K sub-blocks (32 elements each).
+        // 128 sub-blocks total: TILE_N=64 rows × 2 sub-blocks per row.
+        // Both sub-blocks are always in the same Q4_K super-block.
+        if (tid < SMM_TILE_N * 2) {
+            int block_id = tid;
+            int local_n = block_id >> 1;       // 0..63 — which N-row
+            int sub_in_tile = block_id & 1;    // 0 or 1 — first or second sub-block
             int global_n = tile_n + local_n;
 
-            float val = 0.0f;
-            if (global_n < N && k_base + local_k < K) {
+            if (global_n < N) {
+                int j_first = (k_base / 32) & 7;
+                int j = j_first + sub_in_tile;
+                int k_offset = sub_in_tile * 32;
+
+                int q4k_block_idx = k_base / Q4K_BLOCK_SIZE;
                 device const uchar* blockPtr = B + global_n * numQ4KBlocks * Q4K_BYTES_PER_BLOCK
                                                 + q4k_block_idx * Q4K_BYTES_PER_BLOCK;
 
-                // Hardware fp16 conversion
-                float d = float(as_type<half>(*((device const ushort*)blockPtr)));
-                float dmin = float(as_type<half>(*((device const ushort*)(blockPtr + 2))));
+                // Super-block header: d and dmin (safe byte-wise load)
+                half d_h = as_type<half>((ushort)((ushort)blockPtr[1] << 8 | blockPtr[0]));
+                half dmin_h = as_type<half>((ushort)((ushort)blockPtr[3] << 8 | blockPtr[2]));
 
                 // Extract scale and min for sub-block j
                 device const uchar* sd = blockPtr + 4;
-                uchar sc, mn;
+                int j_lo = j & 3;
+                half sc_h, mn_h;
                 if (j < 4) {
-                    sc = sd[j_lo] & 0x3F;
-                    mn = sd[j_lo + 4] & 0x3F;
+                    sc_h = half(sd[j_lo] & 0x3F);
+                    mn_h = half(sd[j_lo + 4] & 0x3F);
                 } else {
-                    sc = (sd[8 + j_lo] & 0x0F) | ((sd[j_lo] >> 6) << 4);
-                    mn = (sd[8 + j_lo] >> 4) | ((sd[j_lo + 4] >> 6) << 4);
+                    sc_h = half((sd[8 + j_lo] & 0x0F) | ((sd[j_lo] >> 6) << 4));
+                    mn_h = half((sd[8 + j_lo] >> 4) | ((sd[j_lo + 4] >> 6) << 4));
                 }
 
-                // Extract quantized nibble from qs array
-                device const uchar* qs = blockPtr + 16 + qs_base;
-                int q = (qs[local_k] >> shift) & 0xF;
+                half d_sc = d_h * sc_h;
+                half dmin_mn = dmin_h * mn_h;
 
-                val = d * float(sc) * float(q) - dmin * float(mn);
+                // Dequantize 32 nibbles from this sub-block
+                // Q4_K interleaved layout: groups of 64 elements share 32 qs bytes
+                // Even sub-blocks (j%2==0) use low nibble, odd use high nibble
+                int qs_base = (j >> 1) << 5;    // (j/2)*32: byte offset in qs
+                int shift = (j & 1) << 2;       // 0 for even (low nib), 4 for odd (high nib)
+                device const uchar* qs = blockPtr + 16 + qs_base;
+
+                for (int i = 0; i < 32; i++) {
+                    int q = (qs[i] >> shift) & 0xF;
+                    half val = d_sc * half(q) - dmin_mn;
+                    shared_B[(k_offset + i) * SMM_TILE_N + local_n] = val;
+                }
+            } else {
+                // Out of bounds: zero fill
+                int k_offset = (tid & 1) * 32;
+                for (int i = 0; i < 32; i++) {
+                    shared_B[(k_offset + i) * SMM_TILE_N + local_n] = 0.0h;
+                }
             }
-            // Store TRANSPOSED: shared_B[k, n]
-            shared_B[local_k * SMM_TILE_N + local_n] = val;
         }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // === Compute using simdgroup_matrix (identical to Q4_0) ===
+        // === Compute using simdgroup_matrix: half inputs, float accumulators ===
         for (int k = 0; k < SMM_TILE_K; k += 8) {
-            simdgroup_float8x8 matA0, matA1, matB0, matB1;
+            simdgroup_half8x8 matA0, matA1, matB0, matB1;
 
             simdgroup_load(matA0, shared_A + (sg_row + 0) * SMM_TILE_K + k, SMM_TILE_K);
             simdgroup_load(matA1, shared_A + (sg_row + 8) * SMM_TILE_K + k, SMM_TILE_K);
@@ -6168,7 +6182,8 @@ void metal_matmul_q4k_batched_f32(void* queuePtr, void* pipelinePtr,
 }
 
 // Q4_K simdgroup tiled matmul: uses simdgroup_matrix for prefill (M>=8)
-// Same tile layout as Q4_0 simdgroup: TILE_M=32, TILE_N=64, TILE_K=32
+// Same tile layout as Q4_0 simdgroup: TILE_M=32, TILE_N=64, TILE_K=64
+// Half-precision shared memory, block-based sub-block dequant.
 // Grid: (ceil(N/64), ceil(M/32)) threadgroups of 256 threads
 void metal_matmul_q4k_simdgroup_f32(void* queuePtr, void* pipelinePtr,
                                      void* A, uint64_t aOff,
@@ -6180,12 +6195,12 @@ void metal_matmul_q4k_simdgroup_f32(void* queuePtr, void* pipelinePtr,
 
     int TILE_M = 32;
     int TILE_N = 64;
-    int TILE_K = 32;
+    int TILE_K = 64;
     int threadgroupSize = 256;
 
-    // Shared memory: A tile + B tile (both float)
-    int sharedMemA = TILE_M * TILE_K * sizeof(float);  // 32×32×4 = 4096 bytes
-    int sharedMemB = TILE_N * TILE_K * sizeof(float);  // 64×32×4 = 8192 bytes
+    // Shared memory: A tile + B tile (both half-precision)
+    int sharedMemA = TILE_M * TILE_K * sizeof(short);  // 32×64×2 = 4096 bytes
+    int sharedMemB = TILE_N * TILE_K * sizeof(short);  // 64×64×2 = 8192 bytes
 
     id<MTLCommandBuffer> cmdBuffer;
     bool shouldCommit;
