@@ -737,114 +737,106 @@ kernel void matvec_q4_0_optimized_f32(
 }
 
 // =============================================================================
-// Q4_0 TILED MATMUL WITH SIMDGROUP_MATRIX
+// Q4_0 TILED MATMUL WITH SIMDGROUP_MATRIX (HALF-PRECISION)
 // =============================================================================
 // C[M,N] = A[M,K] @ B[N,K]^T where B is Q4_0 quantized
 // Uses simdgroup_matrix operations for 8x8 tiled computation
 // Each threadgroup computes a TILE_M x TILE_N output tile
-// Threads cooperatively load A and B tiles into threadgroup memory
+// Threads cooperatively load A and dequant B tiles into half-precision
+// threadgroup memory. simdgroup_half8x8 inputs with float accumulators
+// gives 2x MAC throughput on Apple Silicon AMX units.
 //
-// Tile sizes: TILE_M=32, TILE_N=32, TILE_K=32 (matches Q4_0 block size)
+// Tile sizes: TILE_M=32, TILE_N=64, TILE_K=64 (2 Q4_0 blocks per K-tile)
 // Threadgroup: 256 threads = 8 simdgroups
 // 8 simdgroups in 2×4 layout, each computes a 16×16 output tile = 32×64 total
-// Optimized for prefill batch sizes (M=32, 64, 128) — Track 4 Phase 1.
+// TILE_K=64 halves barrier count: 64 barriers for K=4096 vs 128 with TILE_K=32
+// Block-based B dequant: threads 0-127 each handle one Q4_0 block (32 values)
+// with one scale load per block (32x fewer scale reads).
+// Shared memory: 4096 (A, half) + 8192 (B, half) = 12288 bytes total
 
 constant int SMM_TILE_M = 32;
-constant int SMM_TILE_N = 64;  // Doubled from 32 to utilize all 8 simdgroups
-constant int SMM_TILE_K = 32;  // Must match Q4_0 block size
+constant int SMM_TILE_N = 64;
+constant int SMM_TILE_K = 64;
 
 kernel void matmul_q4_0_simdgroup_f32(
-    device const float* A [[buffer(0)]],           // [M, K] activations
-    device const uchar* B [[buffer(1)]],           // [N, K] in Q4_0 format
-    device float* C [[buffer(2)]],                 // [M, N] output
+    device const float* A [[buffer(0)]],
+    device const uchar* B [[buffer(1)]],
+    device float* C [[buffer(2)]],
     constant int& M [[buffer(3)]],
     constant int& N [[buffer(4)]],
     constant int& K [[buffer(5)]],
-    threadgroup float* shared_A [[threadgroup(0)]],  // [TILE_M, TILE_K]
-    threadgroup float* shared_B [[threadgroup(1)]],  // [TILE_K, TILE_N] (B transposed!)
+    threadgroup half* shared_A [[threadgroup(0)]],
+    threadgroup half* shared_B [[threadgroup(1)]],
     uint2 tg_pos [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]],
     uint simd_lane [[thread_index_in_simdgroup]],
     uint simd_group [[simdgroup_index_in_threadgroup]]
 ) {
-    // Output tile position
     int tile_m = tg_pos.y * SMM_TILE_M;
     int tile_n = tg_pos.x * SMM_TILE_N;
-
-    // Early exit for out-of-bounds tiles
     if (tile_m >= M || tile_n >= N) return;
 
-    // Each simdgroup computes a 16x16 portion of the output tile
-    // 8 simdgroups in 2×4 grid of 16×16 tiles = 32×64 output
-    int sg_row = (simd_group / 4) * 16;  // 0 or 16
-    int sg_col = (simd_group % 4) * 16;  // 0, 16, 32, or 48
+    int sg_row = (simd_group / 4) * 16;
+    int sg_col = (simd_group % 4) * 16;
 
-    // Initialize result accumulators (4 8x8 tiles per simdgroup for 16x16)
     simdgroup_float8x8 acc00(0.0f), acc01(0.0f), acc10(0.0f), acc11(0.0f);
 
-    // Process K dimension in TILE_K chunks
     int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
     int numKTiles = (K + SMM_TILE_K - 1) / SMM_TILE_K;
 
     for (int k_tile = 0; k_tile < numKTiles; k_tile++) {
         int k_base = k_tile * SMM_TILE_K;
 
-        // === Cooperative load of A tile [TILE_M, TILE_K] ===
-        // 256 threads load 32×32 = 1024 elements = 4 elements per thread
+        // === Cooperative A loading: all 256 threads, float → half ===
         for (int i = tid; i < SMM_TILE_M * SMM_TILE_K; i += 256) {
             int local_m = i / SMM_TILE_K;
             int local_k = i % SMM_TILE_K;
             int global_m = tile_m + local_m;
             int global_k = k_base + local_k;
-
-            float val = 0.0f;
-            if (global_m < M && global_k < K) {
-                val = A[global_m * K + global_k];
-            }
+            half val = (global_m < M && global_k < K) ? (half)A[global_m * K + global_k] : (half)0;
             shared_A[local_m * SMM_TILE_K + local_k] = val;
         }
 
-        // === Cooperative load and dequantize B tile, storing TRANSPOSED [TILE_K, TILE_N] ===
-        // B is [N, K] in Q4_0 format, we store as B^T[K, N] = shared_B[k, n]
-        // This allows simdgroup_multiply_accumulate to compute C += A @ B^T correctly
-        int q4_block_idx = k_tile;  // Which Q4_0 block along K dimension
-
-        for (int i = tid; i < SMM_TILE_N * SMM_TILE_K; i += 256) {
-            int local_n = i / SMM_TILE_K;
-            int local_k = i % SMM_TILE_K;
+        // === Block-based B dequant: each thread handles one Q4_0 block ===
+        // 128 blocks (64 N-cols × 2 K-blocks), threads 0-127 each get one block
+        // One scale load per 32 values (vs per value in flat approach)
+        if (tid < SMM_TILE_N * 2) {
+            int block_id = tid;
+            int local_n = block_id >> 1;          // 0-63 (N column)
+            int block_in_tile = block_id & 1;     // 0-1 (which Q4_0 block)
+            int k_offset = block_in_tile * 32;
             int global_n = tile_n + local_n;
+            int q4_block_idx = k_tile * 2 + block_in_tile;
 
-            float val = 0.0f;
-            if (global_n < N && k_base + local_k < K) {
-                // Get Q4_0 block for row global_n, block q4_block_idx
+            if (global_n < N && k_base + k_offset < K) {
                 device const uchar* blockPtr = B + global_n * numBlocks * Q4_BYTES_PER_BLOCK
                                                 + q4_block_idx * Q4_BYTES_PER_BLOCK;
-
-                // Read scale
                 ushort scale_u16 = ((ushort)blockPtr[1] << 8) | blockPtr[0];
-                float scale = q4_f16_to_f32(scale_u16);
+                half scale = as_type<half>(scale_u16);
 
-                // Dequantize element at local_k within the 32-element block
-                // Q4_0 layout: low nibbles at positions 0-15, high nibbles at 16-31
-                int byte_idx = local_k < 16 ? local_k : (local_k - 16);
-                uchar byte_val = blockPtr[2 + byte_idx];
-                int quant_val = local_k < 16 ? (byte_val & 0xF) : (byte_val >> 4);
-                val = scale * float(quant_val - 8);
+                // Process all 32 nibbles with one scale load
+                for (int j = 0; j < 16; j++) {
+                    uchar byte_val = blockPtr[2 + j];
+                    half lo = scale * (half)((byte_val & 0xF) - 8);
+                    half hi = scale * (half)(((byte_val >> 4) & 0xF) - 8);
+                    shared_B[(k_offset + j) * SMM_TILE_N + local_n] = lo;
+                    shared_B[(k_offset + j + 16) * SMM_TILE_N + local_n] = hi;
+                }
+            } else {
+                for (int j = 0; j < 32; j++) {
+                    shared_B[(k_offset + j) * SMM_TILE_N + local_n] = (half)0;
+                }
             }
-            // Store TRANSPOSED: shared_B[k, n] instead of shared_B[n, k]
-            shared_B[local_k * SMM_TILE_N + local_n] = val;
         }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // === Compute using simdgroup_matrix (all 8 simdgroups active) ===
-        // C[m,n] += A[m,k] @ B^T[k,n] via simdgroup_multiply_accumulate
+        // === simdgroup_multiply_accumulate: half8x8 inputs → float accumulation ===
         for (int k = 0; k < SMM_TILE_K; k += 8) {
-            simdgroup_float8x8 matA0, matA1, matB0, matB1;
+            simdgroup_half8x8 matA0, matA1, matB0, matB1;
 
             simdgroup_load(matA0, shared_A + (sg_row + 0) * SMM_TILE_K + k, SMM_TILE_K);
             simdgroup_load(matA1, shared_A + (sg_row + 8) * SMM_TILE_K + k, SMM_TILE_K);
-
             simdgroup_load(matB0, shared_B + k * SMM_TILE_N + (sg_col + 0), SMM_TILE_N);
             simdgroup_load(matB1, shared_B + k * SMM_TILE_N + (sg_col + 8), SMM_TILE_N);
 
@@ -857,7 +849,6 @@ kernel void matmul_q4_0_simdgroup_f32(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    // === Store results (all 8 simdgroups store their 16×16 tile) ===
     int out_m = tile_m + sg_row;
     int out_n = tile_n + sg_col;
 
@@ -6336,15 +6327,15 @@ void metal_matmul_q4_0_simdgroup_f32(void* queuePtr, void* pipelinePtr,
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
     id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
 
-    // Tile sizes from kernel: SMM_TILE_M=32, SMM_TILE_N=64, SMM_TILE_K=32
+    // Tile sizes from kernel: SMM_TILE_M=32, SMM_TILE_N=64, SMM_TILE_K=64
     int TILE_M = 32;
-    int TILE_N = 64;   // Doubled for full 8-simdgroup utilization (Track 4)
-    int TILE_K = 32;
+    int TILE_N = 64;
+    int TILE_K = 64;   // 2 Q4_0 blocks per K-tile
     int threadgroupSize = 256;  // 8 simdgroups of 32 threads
 
-    // Shared memory: A tile + B tile (both float)
-    int sharedMemA = TILE_M * TILE_K * sizeof(float);  // 32×32×4 = 4096 bytes
-    int sharedMemB = TILE_N * TILE_K * sizeof(float);  // 64×32×4 = 8192 bytes
+    // Shared memory: half-precision A and B tiles with TILE_K=64
+    int sharedMemA = TILE_M * TILE_K * 2;  // 32×64×2 = 4096 bytes (half)
+    int sharedMemB = TILE_N * TILE_K * 2;  // 64×64×2 = 8192 bytes (half)
 
     id<MTLCommandBuffer> cmdBuffer;
     bool shouldCommit;
@@ -7030,11 +7021,11 @@ void metal_matmul_q4_0_simdgroup_f32_offset(void* queuePtr, void* pipelinePtr,
 
     int TILE_M = 32;
     int TILE_N = 64;
-    int TILE_K = 32;
-    int threadgroupSize = 256;
+    int TILE_K = 64;   // 2 Q4_0 blocks per K-tile
+    int threadgroupSize = 256;  // 8 simdgroups
 
-    int sharedMemA = TILE_M * TILE_K * sizeof(float);
-    int sharedMemB = TILE_N * TILE_K * sizeof(float);
+    int sharedMemA = TILE_M * TILE_K * 2;  // half precision: 32×64×2 = 4096 bytes
+    int sharedMemB = TILE_N * TILE_K * 2;  // half precision: 64×64×2 = 8192 bytes
 
     id<MTLCommandBuffer> cmdBuffer;
     bool shouldCommit;
