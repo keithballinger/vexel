@@ -67,6 +67,7 @@ type Backend struct {
 	matvecQ4V2Pipeline          unsafe.Pointer // llama.cpp-matched: 64 threads, NR0=4, fused nibble-masking
 	matvecQ4V2F16InPipeline     unsafe.Pointer // v2 variant with FP16 activation input
 	matvecQ4V2AddPipeline       unsafe.Pointer // v2 variant that adds to output (fuses matmul + residual)
+	ropeScatterKVF16Pipeline    unsafe.Pointer // Fused RoPE + KV scatter for FP16 decode
 	matvecQ4NR2Pipeline         unsafe.Pointer
 	matvecQ4NR4Pipeline         unsafe.Pointer
 	matvecQ4CollabPipeline      unsafe.Pointer
@@ -287,6 +288,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.scatterKVF32ToF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("scatter_kv_f32_to_f16"))
 	b.matvecQ4V2F16InPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_v2_f16in_f32"))
 	b.matvecQ4V2AddPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4_0_v2_add_f32"))
+	b.ropeScatterKVF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_scatter_kv_f16"))
 
 	// Q8_0 quantization pipelines
 	b.quantizeF32ToQ8_0Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("quantize_f32_to_q8_0"))
@@ -1661,6 +1663,23 @@ func (b *Backend) MatMulQ4_0_Add(a, bMat, out tensor.DevicePtr, n, k int) {
 	C.metal_matvec_q4_0_v2_add_f32(b.queue, b.matvecQ4V2AddPipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(n), C.int(k))
+}
+
+// RoPEScatterKVF16 applies RoPE to Q (in-place) and K, then scatters K and V to KV cache.
+// Fuses 2 dispatches (RoPE + ScatterKV) into 1 for FP16 decode (M=1).
+func (b *Backend) RoPEScatterKVF16(q, srcK, dstK, srcV, dstV tensor.DevicePtr,
+	numQHeads, numKVHeads, headDim, startPos, ropeDim int, theta float32,
+	maxSeqLen, seqPos int) {
+	b.profiler.RecordDispatch("RoPE+ScatterKV")
+	if b.ropeScatterKVF16Pipeline == nil {
+		panic("RoPEScatterKVF16 called but pipeline unavailable")
+	}
+	C.metal_rope_scatter_kv_f16(b.queue, b.ropeScatterKVF16Pipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(srcK.Addr()), unsafe.Pointer(dstK.Addr()),
+		unsafe.Pointer(srcV.Addr()), unsafe.Pointer(dstV.Addr()),
+		C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.int(startPos), C.int(ropeDim), C.float(theta),
+		C.int(maxSeqLen), C.int(seqPos))
 }
 
 func (b *Backend) ScatterKVF32ToF16(src, dst tensor.DevicePtr, newTokens, numKVHeads, headDim, maxSeqLen, seqPos int) {

@@ -529,3 +529,188 @@ func TestMatVecQ4_0_Add(t *testing.T) {
 	}
 }
 
+// TestRoPEScatterKVF16 verifies the fused RoPE+Scatter kernel against separate dispatches.
+// Compares: fused RoPE_Scatter(Q, K, V) vs separate RoPE(Q, K) + ScatterKV(K, V).
+func TestRoPEScatterKVF16(t *testing.T) {
+	b, err := NewBackend(0)
+	if err != nil {
+		t.Skipf("Metal backend not available: %v", err)
+	}
+	defer b.Close()
+
+	configs := []struct {
+		name                      string
+		numQHeads, numKVHeads     int
+		headDim, ropeDim          int
+		startPos, maxSeqLen       int
+		theta                     float32
+	}{
+		{"small", 4, 4, 64, 64, 5, 128, 10000.0},
+		{"llama2_7b", 32, 32, 128, 128, 10, 2048, 10000.0},
+		{"llama2_gqa", 32, 8, 128, 128, 42, 2048, 10000.0},
+	}
+
+	rng := rand.New(rand.NewSource(42))
+
+	for _, cfg := range configs {
+		t.Run(cfg.name, func(t *testing.T) {
+			qSize := cfg.numQHeads * cfg.headDim
+			kvSize := cfg.numKVHeads * cfg.headDim
+			cacheSize := cfg.numKVHeads * cfg.maxSeqLen * cfg.headDim
+
+			// Generate random FP16 Q, K, V data
+			qData := make([]byte, qSize*2)
+			kData := make([]byte, kvSize*2)
+			vData := make([]byte, kvSize*2)
+			for i := 0; i < qSize; i++ {
+				v := rng.Float32()*2 - 1
+				binary.LittleEndian.PutUint16(qData[i*2:], float32ToFloat16CPU(v))
+			}
+			for i := 0; i < kvSize; i++ {
+				v := rng.Float32()*2 - 1
+				binary.LittleEndian.PutUint16(kData[i*2:], float32ToFloat16CPU(v))
+			}
+			for i := 0; i < kvSize; i++ {
+				v := rng.Float32()*2 - 1
+				binary.LittleEndian.PutUint16(vData[i*2:], float32ToFloat16CPU(v))
+			}
+
+			// Allocate GPU buffers
+			qSepPtr := b.Alloc(qSize * 2)
+			kSepPtr := b.Alloc(kvSize * 2)
+			vSepPtr := b.Alloc(kvSize * 2)
+			dstKSepPtr := b.Alloc(cacheSize * 2)
+			dstVSepPtr := b.Alloc(cacheSize * 2)
+			qFusedPtr := b.Alloc(qSize * 2)
+			kFusedPtr := b.Alloc(kvSize * 2)
+			vFusedPtr := b.Alloc(kvSize * 2)
+			dstKFusedPtr := b.Alloc(cacheSize * 2)
+			dstVFusedPtr := b.Alloc(cacheSize * 2)
+
+			defer b.Free(qSepPtr)
+			defer b.Free(kSepPtr)
+			defer b.Free(vSepPtr)
+			defer b.Free(dstKSepPtr)
+			defer b.Free(dstVSepPtr)
+			defer b.Free(qFusedPtr)
+			defer b.Free(kFusedPtr)
+			defer b.Free(vFusedPtr)
+			defer b.Free(dstKFusedPtr)
+			defer b.Free(dstVFusedPtr)
+
+			// Zero cache buffers
+			zeros := make([]byte, cacheSize*2)
+			b.ToDevice(dstKSepPtr, zeros)
+			b.ToDevice(dstVSepPtr, zeros)
+			b.ToDevice(dstKFusedPtr, zeros)
+			b.ToDevice(dstVFusedPtr, zeros)
+
+			// Upload same data to both paths
+			b.ToDevice(qSepPtr, qData)
+			b.ToDevice(kSepPtr, kData)
+			b.ToDevice(vSepPtr, vData)
+			b.ToDevice(qFusedPtr, qData)
+			b.ToDevice(kFusedPtr, kData)
+			b.ToDevice(vFusedPtr, vData)
+
+			// === Separate path: RoPE(Q, K) + ScatterKV(K, V) ===
+			b.RoPEF16(qSepPtr, kSepPtr, cfg.headDim, cfg.numQHeads, cfg.numKVHeads,
+				1, cfg.startPos, cfg.ropeDim, cfg.theta, false)
+			b.ScatterKVF16Fused(kSepPtr, dstKSepPtr, vSepPtr, dstVSepPtr,
+				1, cfg.numKVHeads, cfg.headDim, cfg.maxSeqLen, cfg.startPos)
+			b.Sync()
+
+			// === Fused path: RoPEScatterKVF16 ===
+			b.RoPEScatterKVF16(qFusedPtr, kFusedPtr, dstKFusedPtr, vFusedPtr, dstVFusedPtr,
+				cfg.numQHeads, cfg.numKVHeads, cfg.headDim,
+				cfg.startPos, cfg.ropeDim, cfg.theta,
+				cfg.maxSeqLen, cfg.startPos)
+			b.Sync()
+
+			// Compare Q outputs (RoPE applied in-place)
+			qSepOut := make([]byte, qSize*2)
+			qFusedOut := make([]byte, qSize*2)
+			b.ToHost(qSepOut, qSepPtr)
+			b.ToHost(qFusedOut, qFusedPtr)
+
+			var maxDiff float64
+			maxDiffIdx := 0
+			for i := 0; i < qSize; i++ {
+				sepVal := float64(float16ToFloat32CPU(binary.LittleEndian.Uint16(qSepOut[i*2:])))
+				fusedVal := float64(float16ToFloat32CPU(binary.LittleEndian.Uint16(qFusedOut[i*2:])))
+				diff := math.Abs(sepVal - fusedVal)
+				if diff > maxDiff {
+					maxDiff = diff
+					maxDiffIdx = i
+				}
+			}
+			t.Logf("  Q: max_diff=%.6f at idx=%d (dim=%d)", maxDiff, maxDiffIdx, qSize)
+			if maxDiff > 0.001 {
+				t.Fatalf("  Q mismatch: diff=%.6f at idx=%d", maxDiff, maxDiffIdx)
+			}
+
+			// Compare K cache outputs
+			dstKSepOut := make([]byte, cacheSize*2)
+			dstKFusedOut := make([]byte, cacheSize*2)
+			b.ToHost(dstKSepOut, dstKSepPtr)
+			b.ToHost(dstKFusedOut, dstKFusedPtr)
+
+			maxDiff = 0
+			maxDiffIdx = 0
+			for i := 0; i < cacheSize; i++ {
+				sepVal := float64(float16ToFloat32CPU(binary.LittleEndian.Uint16(dstKSepOut[i*2:])))
+				fusedVal := float64(float16ToFloat32CPU(binary.LittleEndian.Uint16(dstKFusedOut[i*2:])))
+				diff := math.Abs(sepVal - fusedVal)
+				if diff > maxDiff {
+					maxDiff = diff
+					maxDiffIdx = i
+				}
+			}
+			t.Logf("  K cache: max_diff=%.6f at idx=%d (size=%d)", maxDiff, maxDiffIdx, cacheSize)
+			if maxDiff > 0.001 {
+				t.Fatalf("  K cache mismatch: diff=%.6f at idx=%d", maxDiff, maxDiffIdx)
+			}
+
+			// Compare V cache outputs
+			dstVSepOut := make([]byte, cacheSize*2)
+			dstVFusedOut := make([]byte, cacheSize*2)
+			b.ToHost(dstVSepOut, dstVSepPtr)
+			b.ToHost(dstVFusedOut, dstVFusedPtr)
+
+			maxDiff = 0
+			maxDiffIdx = 0
+			for i := 0; i < cacheSize; i++ {
+				sepVal := float64(float16ToFloat32CPU(binary.LittleEndian.Uint16(dstVSepOut[i*2:])))
+				fusedVal := float64(float16ToFloat32CPU(binary.LittleEndian.Uint16(dstVFusedOut[i*2:])))
+				diff := math.Abs(sepVal - fusedVal)
+				if diff > maxDiff {
+					maxDiff = diff
+					maxDiffIdx = i
+				}
+			}
+			t.Logf("  V cache: max_diff=%.6f at idx=%d (size=%d)", maxDiff, maxDiffIdx, cacheSize)
+			if maxDiff > 0.001 {
+				t.Fatalf("  V cache mismatch: diff=%.6f at idx=%d", maxDiff, maxDiffIdx)
+			}
+		})
+	}
+}
+
+// float32ToFloat16CPU converts f32 to f16 (truncation, not rounding) for test data generation.
+func float32ToFloat16CPU(f float32) uint16 {
+	bits := math.Float32bits(f)
+	sign := (bits >> 31) & 1
+	exp := int((bits>>23)&0xFF) - 127
+	mant := bits & 0x7FFFFF
+
+	if exp > 15 {
+		return uint16(sign<<15 | 0x7C00)
+	}
+	if exp < -14 {
+		return uint16(sign << 15)
+	}
+	return uint16(sign<<15 | uint32(exp+15)<<10 | (mant >> 13))
+}
+
+// float16ToFloat32CPU is defined in q4_kernel_test.go
+

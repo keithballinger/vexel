@@ -256,6 +256,21 @@ func (c *GPUKVCache) GetKV(layerIdx int) (k, v tensor.DevicePtr, seqLen int) {
 	return c.kBuffers[layerIdx], c.vBuffers[layerIdx], c.seqLen
 }
 
+// ReserveKV returns KV cache buffer pointers and current position for direct writing.
+// The caller is responsible for writing K/V data at the returned seqPos.
+// Updates the internal seqLen after the last layer.
+func (c *GPUKVCache) ReserveKV(layerIdx int, newTokens int) (dstK, dstV tensor.DevicePtr, seqPos, fullSeqLen, maxSeqLen int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	seqPos = c.seqLen
+	fullSeqLen = c.seqLen + newTokens
+	maxSeqLen = c.maxSeqLen
+	if layerIdx == c.numLayers-1 {
+		c.seqLen += newTokens
+	}
+	return c.kBuffers[layerIdx], c.vBuffers[layerIdx], seqPos, fullSeqLen, maxSeqLen
+}
+
 // Truncate rolls back the KV cache to a specific sequence length.
 // This is used for speculative decoding when draft tokens are rejected.
 // The cache buffers are not cleared - we just update the sequence pointer.

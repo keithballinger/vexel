@@ -1241,16 +1241,44 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	}
 
 	// 3. RoPE - Apply to Q and K
+	// 4. Append K/V to GPU cache and get pointers for SDPA
 	// Barrier: RoPE reads qPtr, kPtr written by QKV projections above (scratch buffer)
 	barrier()
-	profileOp("RoPE", func() {
-		if useFP16Path {
-			// FP16 path: apply RoPE directly to FP16 Q and K
-			b.fp16Ops.RoPEF16(qF16Ptr, kF16Ptr, headDim, numHeads, numKVHeads, seqLen, startPos, b.RoPEDim, float32(b.RoPETheta), b.RoPENeox)
-		} else {
-			b.applyRoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, startPos)
+
+	// Try fused RoPE + KV scatter for FP16 decode (M=1): saves 1 dispatch per layer.
+	type ropeScatterKV interface {
+		RoPEScatterKVF16(q, srcK, dstK, srcV, dstV tensor.DevicePtr,
+			numQHeads, numKVHeads, headDim, startPos, ropeDim int, theta float32,
+			maxSeqLen, seqPos int)
+	}
+	var fullKPtr, fullVPtr tensor.DevicePtr
+	var fullSeqLen int
+	didFuseRoPEScatter := false
+
+	if useFP16Path && seqLen == 1 && !b.RoPENeox {
+		if fusedRS, ok := b.backend.(ropeScatterKV); ok {
+			// Fused path: RoPE Q + RoPE K + Scatter K + Scatter V in single dispatch
+			dstK, dstV, seqPos, fSeqLen, maxSL := gpuCache.ReserveKV(layerIdx, seqLen)
+			profileOp("RoPE+ScatterKV", func() {
+				fusedRS.RoPEScatterKVF16(qF16Ptr, kF16Ptr, dstK, vF16Ptr, dstV,
+					numHeads, numKVHeads, headDim, startPos, b.RoPEDim, float32(b.RoPETheta),
+					maxSL, seqPos)
+			})
+			fullKPtr, fullVPtr, fullSeqLen = dstK, dstV, fSeqLen
+			didFuseRoPEScatter = true
 		}
-	})
+	}
+
+	if !didFuseRoPEScatter {
+		profileOp("RoPE", func() {
+			if useFP16Path {
+				// FP16 path: apply RoPE directly to FP16 Q and K
+				b.fp16Ops.RoPEF16(qF16Ptr, kF16Ptr, headDim, numHeads, numKVHeads, seqLen, startPos, b.RoPEDim, float32(b.RoPETheta), b.RoPENeox)
+			} else {
+				b.applyRoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, startPos)
+			}
+		})
+	}
 
 	// Debug L15 after RoPE
 	if debugL15 {
@@ -1268,18 +1296,16 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		b.debugBlockTensor(fmt.Sprintf("L%d K after RoPE (before cache)", layerIdx), kPtr, kvSize)
 	}
 
-	// 4. Append K/V to GPU cache and get pointers for SDPA
-	// Barrier: KV cache reads kPtr, vPtr written by RoPE (scratch buffer)
-	barrier()
+	if !didFuseRoPEScatter {
+		// Barrier: KV cache reads kPtr, vPtr written by RoPE (scratch buffer)
+		barrier()
 
-	var fullKPtr, fullVPtr tensor.DevicePtr
-	var fullSeqLen int
-	profileOp("KVCache", func() {
-		if useFP16Path {
-			// FP16 path: K and V already in FP16 (from fused kernel), no conversion needed
-			// AppendKV uses CopyBufferBatched which integrates with command batching
-			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kF16Ptr, vF16Ptr, tensor.Float16, seqLen)
-		} else if useFP16KVCache {
+		profileOp("KVCache", func() {
+			if useFP16Path {
+				// FP16 path: K and V already in FP16 (from fused kernel), no conversion needed
+				// AppendKV uses CopyBufferBatched which integrates with command batching
+				fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kF16Ptr, vF16Ptr, tensor.Float16, seqLen)
+			} else if useFP16KVCache {
 			// Explicitly convert F32->F16 here so we have dense F16 buffers for SDPAPrefillF16
 			// This is required because SDPAPrefillF16 needs [seqLen, numKVHeads, headDim] in F16
 			b.fp16Ops.ConvertF32ToF16(kPtr, kF16Ptr, kvSize)
@@ -1298,6 +1324,7 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kPtr, vPtr, tensor.Float32, seqLen)
 		}
 	})
+	} // end !didFuseRoPEScatter
 
 	// Debug: check KV cache fullSeqLen
 	if debugDecode && (layerIdx <= 1 || layerIdx >= 30) {

@@ -4293,6 +4293,85 @@ kernel void scatter_kv_f16_fused(
     dstV[dstOffset] = srcV[gid];
 }
 
+// Fused RoPE + KV Scatter for FP16 decode (M=1).
+// Combines 2 dispatches (RoPE + ScatterKV) into 1.
+// - Applies RoPE to Q in-place
+// - Applies RoPE to K and scatters directly to K cache
+// - Scatters V directly to V cache (no RoPE)
+// Thread grid: [max(numQHeads, numKVHeads), 1, 1]
+// Each thread handles one head's worth of RoPE and/or scatter.
+kernel void rope_scatter_kv_f16(
+    device half* q [[buffer(0)]],             // [1, numQHeads, headDim] — Q, RoPE applied in-place
+    device const half* srcK [[buffer(1)]],    // [1, numKVHeads, headDim] — K source
+    device half* dstK [[buffer(2)]],          // K cache: [numKVHeads, maxSeqLen, headDim]
+    device const half* srcV [[buffer(3)]],    // [1, numKVHeads, headDim] — V source
+    device half* dstV [[buffer(4)]],          // V cache: [numKVHeads, maxSeqLen, headDim]
+    constant int& numQHeads [[buffer(5)]],
+    constant int& numKVHeads [[buffer(6)]],
+    constant int& headDim [[buffer(7)]],
+    constant int& startPos [[buffer(8)]],     // Position for RoPE frequencies
+    constant int& ropeDim [[buffer(9)]],      // Dimensions to rotate (can be < headDim)
+    constant float& theta [[buffer(10)]],     // RoPE theta base
+    constant int& maxSeqLen [[buffer(11)]],   // KV cache max sequence length
+    constant int& seqPos [[buffer(12)]],      // Current position in KV cache for scatter
+    uint gid [[thread_position_in_grid]]
+) {
+    int head = gid;
+    int halfRopeDim = ropeDim / 2;
+
+    // 1. Apply RoPE to Q head (if within Q head range)
+    if (head < numQHeads) {
+        int qOffset = head * headDim;  // M=1, so pos=0: (0 * numQHeads + head) * headDim
+        for (int j = 0; j < halfRopeDim; j++) {
+            float freq = 1.0f / pow(theta, float(2 * j) / float(ropeDim));
+            float angle = float(startPos) * freq;
+            float cos_val = cos(angle);
+            float sin_val = sin(angle);
+
+            // LLaMA-style interleaved: pairs are (2j, 2j+1)
+            int idx0 = j * 2;
+            int idx1 = j * 2 + 1;
+
+            float q0 = float(q[qOffset + idx0]);
+            float q1 = float(q[qOffset + idx1]);
+            q[qOffset + idx0] = half(q0 * cos_val - q1 * sin_val);
+            q[qOffset + idx1] = half(q0 * sin_val + q1 * cos_val);
+        }
+    }
+
+    // 2. Apply RoPE to K head and scatter to K cache (if within KV head range)
+    if (head < numKVHeads) {
+        int srcKOffset = head * headDim;  // M=1: (0 * numKVHeads + head) * headDim
+        int dstKOffset = head * maxSeqLen * headDim + seqPos * headDim;
+
+        for (int j = 0; j < halfRopeDim; j++) {
+            float freq = 1.0f / pow(theta, float(2 * j) / float(ropeDim));
+            float angle = float(startPos) * freq;
+            float cos_val = cos(angle);
+            float sin_val = sin(angle);
+
+            int idx0 = j * 2;
+            int idx1 = j * 2 + 1;
+
+            float k0 = float(srcK[srcKOffset + idx0]);
+            float k1 = float(srcK[srcKOffset + idx1]);
+            dstK[dstKOffset + idx0] = half(k0 * cos_val - k1 * sin_val);
+            dstK[dstKOffset + idx1] = half(k0 * sin_val + k1 * cos_val);
+        }
+        // Copy non-rotated dims (if ropeDim < headDim) with RoPE applied (pass-through)
+        for (int j = ropeDim; j < headDim; j++) {
+            dstK[dstKOffset + j] = srcK[srcKOffset + j];
+        }
+
+        // 3. Scatter V to cache (no RoPE)
+        int srcVOffset = head * headDim;
+        int dstVOffset = head * maxSeqLen * headDim + seqPos * headDim;
+        for (int j = 0; j < headDim; j++) {
+            dstV[dstVOffset + j] = srcV[srcVOffset + j];
+        }
+    }
+}
+
 // Reshape KV cache for paged attention
 // Copies data from src [numTokens, numKVHeads, headDim] to paged blocks.
 // blockIndices: [numTokens] int32, physical block index for each token
@@ -9100,6 +9179,44 @@ void metal_scatter_kv_f16_fused(void* queuePtr, void* pipelinePtr,
     int threadgroupSize = 256;
     MTLSize gridSize = MTLSizeMake(totalElements, 1, 1);
     MTLSize tgSize = MTLSizeMake(threadgroupSize, 1, 1);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
+
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Fused RoPE + KV Scatter for FP16 decode (M=1).
+// Replaces separate RoPE + ScatterKV dispatches with a single dispatch.
+void metal_rope_scatter_kv_f16(void* queuePtr, void* pipelinePtr,
+                                void* q, void* srcK, void* dstK,
+                                void* srcV, void* dstV,
+                                int numQHeads, int numKVHeads, int headDim,
+                                int startPos, int ropeDim, float theta,
+                                int maxSeqLen, int seqPos) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)srcK offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)dstK offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)srcV offset:0 atIndex:3];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)dstV offset:0 atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&startPos length:sizeof(startPos) atIndex:8];
+    [encoder setBytes:&ropeDim length:sizeof(ropeDim) atIndex:9];
+    [encoder setBytes:&theta length:sizeof(theta) atIndex:10];
+    [encoder setBytes:&maxSeqLen length:sizeof(maxSeqLen) atIndex:11];
+    [encoder setBytes:&seqPos length:sizeof(seqPos) atIndex:12];
+
+    int maxHeads = numQHeads > numKVHeads ? numQHeads : numKVHeads;
+    MTLSize gridSize = MTLSizeMake(maxHeads, 1, 1);
+    MTLSize tgSize = MTLSizeMake(maxHeads < 64 ? maxHeads : 64, 1, 1);
     [encoder dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
 
     finish_encode(encoder, cmdBuffer, shouldCommit);

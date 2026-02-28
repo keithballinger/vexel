@@ -545,6 +545,14 @@ void metal_matvec_q4_0_v2_add_f32(void* queue, void* pipeline,
                                    void* A, void* B, void* C,
                                    int N, int K);
 
+// Fused RoPE + KV Scatter for FP16 decode (M=1)
+void metal_rope_scatter_kv_f16(void* queue, void* pipeline,
+                                void* q, void* srcK, void* dstK,
+                                void* srcV, void* dstV,
+                                int numQHeads, int numKVHeads, int headDim,
+                                int startPos, int ropeDim, float theta,
+                                int maxSeqLen, int seqPos);
+
 // Reshape KV cache for paged attention
 // Copies data from src [numTokens, numKVHeads, headDim] to paged blocks.
 // pageTable: [numTokens] mapping each logical token to (blockID, offsetInBlock)
