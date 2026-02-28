@@ -24,10 +24,10 @@ prefill).
 
 **Batched throughput leader:** vllm-mlx — 4.3x aggregate scaling at 16 concurrent.
 
-**Vexel current numbers (LLaMA 2 7B Q4_0, Apple Silicon):**
-- Decode: ~44 tok/s
-- Prefill (128 tokens): ~200 tok/s
-- TTFT (5-token prompt): ~80 ms
+**Vexel current numbers (LLaMA 2 7B Q4_0, M3 Max):**
+- Decode: ~65 tok/s
+- Prefill (128 tokens): ~717 tok/s
+- TTFT (5-token prompt): ~52 ms (1000/19.4 ≈ tok interval from 97 tok/s at seqLen=5)
 
 ---
 
@@ -62,9 +62,9 @@ prefill).
 - No built-in continuous batching — single-stream only.
 
 ### Vexel vs MLX Gap
-MLX achieves ~230 tok/s on M2 Ultra vs Vexel's ~44 tok/s on comparable hardware.
-The gap is primarily in Metal kernel optimization (MLX has Apple's internal
-expertise) and model format (MLX uses its own optimized weight layout).
+MLX achieves ~230 tok/s on M2 Ultra. Vexel decode: ~65 tok/s on M3 Max.
+Decode gap is primarily Q4_0 matmul BW utilization (69.7% vs MLX's ~80%).
+Prefill gap largely closed: Vexel 717 tok/s vs MLX ~725 tok/s at seqLen=128 (Q4_0).
 
 ---
 
@@ -93,8 +93,10 @@ expertise) and model format (MLX uses its own optimized weight layout).
 - ~20-30% slower than MLX on Apple Silicon due to cross-platform abstractions.
 
 ### Vexel vs llama.cpp
-llama.cpp's M3 Max Q4_0 decode (~66 tok/s) vs Vexel's ~44 tok/s.
-Gap is in Metal kernel matmul throughput and memory access patterns.
+llama.cpp M3 Max Q4_0: decode ~76 tok/s, prefill 128: ~803 tok/s.
+Vexel: decode ~65 tok/s (-15%), prefill 128: ~717 tok/s (-11%).
+Decode gap is Q4_0 matvec BW utilization (69.7% vs 82.0%).
+Prefill gap largely closed via TILE_K=32 GEMM + FA2v2 + fused projections.
 
 ---
 

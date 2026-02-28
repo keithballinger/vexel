@@ -123,4 +123,8 @@ GEMM: ~240ms/pass (58%) = 5,500 GFLOPS vs llama.cpp ~13,000 GFLOPS.
     - Gap to llama.cpp: 803/717 = **1.12×** (was 2.13×)
     - Decode throughput: unchanged (~66 tok/s)
     - All existing tests pass (90+ backend, all runtime except 2 pre-existing M=2 failures)
-- [ ] Task 4.2: Update tracking docs
+- [x] Task 4.2: Update tracking docs
+    - RESULTS.md: Updated prefill table (717 tok/s), added campaign summary,
+      per-dimension GFLOPS table, P10 roadmap entry, closed prefill gap note
+    - COMPETITORS.md: Updated Vexel numbers (decode 65, prefill 717),
+      updated vs MLX and vs llama.cpp gap analysis

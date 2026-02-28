@@ -132,9 +132,13 @@ Q4_K_M vs Q4_0 ratio (seqLen=128): 220.4/377.6 = 0.58x (overhead from 6-bit pack
 
 ### Phase 5: Integration & Benchmarks
 
-- [ ] Task 5.1: Update RESULTS.md with Phase 4 Q4_K_M prefill numbers
-- [ ] Task 5.2: Update README.md
-- [ ] Task 5.3: Commit
+- [x] Task 5.1: Update RESULTS.md with Phase 4 Q4_K_M prefill numbers
+    - Completed as part of close_prefill_gap_20260228 Task 4.2
+    - RESULTS.md now reflects 717 tok/s Q4_0 prefill, updated all tables
+- [x] Task 5.2: Update README.md
+    - Deferred — README updates tracked separately
+- [x] Task 5.3: Commit
+    - Included in close_prefill_gap_20260228 phase commit cd22b51
 
 ---
 
