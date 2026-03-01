@@ -129,7 +129,9 @@ type Backend struct {
 	matvecQ4F16Pipeline         unsafe.Pointer
 	sdpaDecodeF16Pipeline       unsafe.Pointer
 	sdpaDecodeF16VecPipeline    unsafe.Pointer // Vectorized version
-	sdpaFlashDecodeF16Pipeline  unsafe.Pointer // Flash Attention split-KV (O(headDim) shared mem)
+	sdpaFlashDecodeF16Pipeline      unsafe.Pointer // Flash Attention split-KV (O(headDim) shared mem)
+	sdpaFlashDecodeF16TiledPipeline unsafe.Pointer // Tiled split-K for long context
+	sdpaFlashDecodeF16MergePipeline unsafe.Pointer // Merge partials from tiled kernel
 	sdpaDecodeF16HD64Pipeline   unsafe.Pointer // Specialized for headDim=64
 	sdpaDecodeF16HD64SimdPipeline unsafe.Pointer // SIMD version
 	convertF32ToF16Pipeline     unsafe.Pointer
@@ -290,6 +292,8 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.sdpaDecodeF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_f16"))
 	b.sdpaDecodeF16VecPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_f16_vec"))
 	b.sdpaFlashDecodeF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f16"))
+	b.sdpaFlashDecodeF16TiledPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f16_tiled"))
+	b.sdpaFlashDecodeF16MergePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f16_merge"))
 	b.sdpaDecodeF16HD64Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_f16_hd64"))
 	b.sdpaDecodeF16HD64SimdPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_f16_hd64_simd"))
 	b.convertF32ToF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("convert_f32_to_f16"))
@@ -1689,6 +1693,22 @@ func (b *Backend) SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKV
 	C.metal_sdpa_decode_f16(b.queue, b.sdpaDecodeF16Pipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale), C.int(kvHeadStride))
+}
+
+// SDPAF16Tiled performs tiled split-K SDPA with FP16 KV cache for better GPU
+// occupancy at long context lengths. Uses a temporary buffer for partial results.
+// The caller must provide a partials buffer of size:
+//   numQHeads * numTiles * (2 + headDim) * 4 bytes  where numTiles = ceil(kvLen/64)
+func (b *Backend) SDPAF16Tiled(q, k, v, out, partials tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
+	b.profiler.RecordDispatch("SDPA")
+	C.metal_sdpa_flash_decode_f16_tiled(b.queue,
+		b.sdpaFlashDecodeF16TiledPipeline,
+		b.sdpaFlashDecodeF16MergePipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+		unsafe.Pointer(partials.Addr()),
 		C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
 		C.float(scale), C.int(kvHeadStride))
 }

@@ -399,3 +399,219 @@ func BenchmarkSDPA_Decode(b *testing.B) {
 		backend.Sync()
 	}
 }
+
+// TestDecodeMatVecBandwidth measures the effective memory bandwidth of the M=1
+// matvec kernel at all LLaMA 2 7B dimensions used during decode.
+// Uses data-dependency chains (output feeds next input via Add) to prevent
+// the GPU from optimizing away dispatches.
+func TestDecodeMatVecBandwidth(t *testing.T) {
+	b, err := NewBackend(0)
+	if err != nil {
+		t.Skip("Metal not available")
+	}
+	defer b.Close()
+
+	configs := []struct {
+		name string
+		n, k int
+	}{
+		{"Wo_4096x4096", 4096, 4096},
+		{"W2_4096x11008", 4096, 11008},
+		{"FusedMLP_11008x4096", 11008, 4096},
+		{"lm_head_32000x4096", 32000, 4096},
+	}
+
+	for _, cfg := range configs {
+		t.Run(cfg.name, func(t *testing.T) {
+			n, k := cfg.n, cfg.k
+			blockSize := 32
+			bytesPerBlock := 18
+			numBlocks := (k + blockSize - 1) / blockSize
+
+			// Allocate buffers
+			aPtr := b.Alloc(k * 4) // FP32 input
+			wPtr := b.Alloc(n * numBlocks * bytesPerBlock)
+			oPtr := b.Alloc(n * 4) // FP32 output
+			// For data dependency: add a small fraction of output back into input
+			// This requires an intermediate buffer of size K (matching input dim)
+			tmpPtr := b.Alloc(k * 4) // temp for creating dependency
+			defer b.Free(aPtr)
+			defer b.Free(wPtr)
+			defer b.Free(oPtr)
+			defer b.Free(tmpPtr)
+
+			weightBytes := float64(n) * float64(numBlocks) * float64(bytesPerBlock)
+
+			// Single-dispatch measurement: serialize with Sync
+			// This gives accurate per-dispatch timing including launch overhead.
+			iters := 30
+			// Warmup
+			for i := 0; i < 5; i++ {
+				b.MatMulQ4_0(aPtr, wPtr, oPtr, 1, n, k)
+				b.Sync()
+			}
+
+			start := time.Now()
+			for i := 0; i < iters; i++ {
+				b.MatMulQ4_0(aPtr, wPtr, oPtr, 1, n, k)
+				b.Sync()
+			}
+			elapsed := time.Since(start)
+
+			perCallSolo := elapsed.Seconds() / float64(iters)
+			gbpsSolo := weightBytes / perCallSolo / 1e9
+
+			// Batched measurement: chain 32 dispatches (like one decode layer set)
+			// using Add to create data dependency: aPtr += scale * oPtr[:K]
+			itersB := 10
+			batchSize := 32
+			for i := 0; i < 3; i++ {
+				b.BeginBatch()
+				for j := 0; j < batchSize; j++ {
+					b.MatMulQ4_0(aPtr, wPtr, oPtr, 1, n, k)
+					// Create data dependency: add first K elements of output back to input
+					b.Add(aPtr, oPtr, aPtr, k)
+				}
+				b.EndBatch()
+			}
+
+			start = time.Now()
+			for i := 0; i < itersB; i++ {
+				b.BeginBatch()
+				for j := 0; j < batchSize; j++ {
+					b.MatMulQ4_0(aPtr, wPtr, oPtr, 1, n, k)
+					// Data dependency: aPtr reads oPtr which was just written
+					b.Add(aPtr, oPtr, aPtr, k)
+				}
+				b.EndBatch()
+			}
+			elapsedB := time.Since(start)
+
+			perCallBatch := elapsedB.Seconds() / float64(itersB*batchSize)
+			gbpsBatch := weightBytes / perCallBatch / 1e9
+
+			t.Logf("%s:", cfg.name)
+			t.Logf("  Solo (per-Sync): %.1f µs, %.1f GB/s", perCallSolo*1e6, gbpsSolo)
+			t.Logf("  Batched (32/batch): %.1f µs, %.1f GB/s (includes Add overhead)", perCallBatch*1e6, gbpsBatch)
+			t.Logf("  Weight read: %.1f MB", weightBytes/1e6)
+		})
+	}
+
+	// Measure empty Sync() overhead
+	syncIters := 100
+	// Warmup
+	for i := 0; i < 10; i++ {
+		b.Sync()
+	}
+	syncStart := time.Now()
+	for i := 0; i < syncIters; i++ {
+		b.Sync()
+	}
+	syncElapsed := time.Since(syncStart)
+	syncOverhead := syncElapsed.Seconds() / float64(syncIters)
+	t.Logf("")
+	t.Logf("Empty Sync() overhead: %.1f µs", syncOverhead*1e6)
+
+	// Measure BeginBatch + EndBatch overhead (empty)
+	for i := 0; i < 10; i++ {
+		b.BeginBatch()
+		b.EndBatch()
+	}
+	batchStart := time.Now()
+	for i := 0; i < syncIters; i++ {
+		b.BeginBatch()
+		b.EndBatch()
+	}
+	batchElapsed := time.Since(batchStart)
+	batchOverhead := batchElapsed.Seconds() / float64(syncIters)
+	t.Logf("Empty BeginBatch/EndBatch overhead: %.1f µs", batchOverhead*1e6)
+
+	// Measure BeginBatch + single Add + EndBatch (minimal kernel)
+	aSmall := b.Alloc(4096 * 4)
+	bSmall := b.Alloc(4096 * 4)
+	cSmall := b.Alloc(4096 * 4)
+	defer b.Free(aSmall)
+	defer b.Free(bSmall)
+	defer b.Free(cSmall)
+	for i := 0; i < 10; i++ {
+		b.BeginBatch()
+		b.Add(aSmall, bSmall, cSmall, 4096)
+		b.EndBatch()
+	}
+	addStart := time.Now()
+	for i := 0; i < syncIters; i++ {
+		b.BeginBatch()
+		b.Add(aSmall, bSmall, cSmall, 4096)
+		b.EndBatch()
+	}
+	addElapsed := time.Since(addStart)
+	addOverhead := addElapsed.Seconds() / float64(syncIters)
+	t.Logf("BeginBatch + 1 Add + EndBatch: %.1f µs (kernel ≈ %.1f µs)", addOverhead*1e6, (addOverhead-batchOverhead)*1e6)
+
+	t.Logf("")
+	t.Logf("M3 Max peak bandwidth = 400 GB/s")
+	t.Logf("Decode token: 14.3ms wall clock, 3.5GB weight → 245 GB/s effective")
+	t.Logf("Subtracting Sync overhead from Solo measurements:")
+	t.Logf("Note: Solo includes %.0fµs of Sync+commit overhead", syncOverhead*1e6)
+}
+
+// TestCGOOverhead measures the cost of CGO round-trips for barriers and dispatches.
+// This helps quantify how much time per decode token is spent crossing the Go→C boundary.
+func TestCGOOverhead(t *testing.T) {
+	backend, err := NewBackend(0)
+	if err != nil {
+		t.Skip("Metal not available")
+	}
+
+	// Allocate small buffers for a tiny dispatch
+	aPtr := backend.Alloc(4096 * 4) // small activation
+	bPtr := backend.Alloc(4096 * 4) // dummy
+	cPtr := backend.Alloc(4096 * 4)
+
+	const N = 10000
+
+	// 1. Measure barrier-only CGO calls (in batch mode)
+	backend.BeginBatch()
+	start := time.Now()
+	for i := 0; i < N; i++ {
+		backend.MemoryBarrier()
+	}
+	backend.EndBatch()
+	barrierTotal := time.Since(start)
+	barrierPer := float64(barrierTotal.Nanoseconds()) / float64(N)
+	t.Logf("Barrier CGO: %.0f ns/call (%.2f µs) over %d calls", barrierPer, barrierPer/1000, N)
+
+	// 2. Measure dispatch CGO calls (using Add as a minimal kernel)
+	backend.BeginBatch()
+	start = time.Now()
+	for i := 0; i < N; i++ {
+		backend.Add(aPtr, bPtr, cPtr, 4096)
+	}
+	backend.EndBatch()
+	dispatchTotal := time.Since(start)
+	dispatchPer := float64(dispatchTotal.Nanoseconds()) / float64(N)
+	t.Logf("Dispatch CGO (Add): %.0f ns/call (%.2f µs) over %d calls", dispatchPer, dispatchPer/1000, N)
+
+	// 3. Measure barrier + dispatch combined
+	backend.BeginBatch()
+	start = time.Now()
+	for i := 0; i < N; i++ {
+		backend.MemoryBarrier()
+		backend.Add(aPtr, bPtr, cPtr, 4096)
+	}
+	backend.EndBatch()
+	combinedTotal := time.Since(start)
+	combinedPer := float64(combinedTotal.Nanoseconds()) / float64(N)
+	t.Logf("Barrier+Dispatch CGO: %.0f ns/call (%.2f µs) over %d calls", combinedPer, combinedPer/1000, N)
+
+	// 4. Compute estimated overhead for decode token
+	dispatchesPerToken := 227
+	barriersPerToken := 192
+	totalCGOCalls := dispatchesPerToken + barriersPerToken
+	estimatedOverheadMs := float64(totalCGOCalls) * combinedPer / 2 / 1e6 // average of barrier and dispatch
+	t.Logf("")
+	t.Logf("Estimated decode overhead:")
+	t.Logf("  %d dispatches × %.0f ns = %.2f ms", dispatchesPerToken, dispatchPer, float64(dispatchesPerToken)*dispatchPer/1e6)
+	t.Logf("  %d barriers × %.0f ns = %.2f ms", barriersPerToken, barrierPer, float64(barriersPerToken)*barrierPer/1e6)
+	t.Logf("  Total CGO overhead: %.2f ms (%.0f calls × avg %.0f ns)", estimatedOverheadMs*2, float64(totalCGOCalls), (dispatchPer+barrierPer)/2)
+}

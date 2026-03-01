@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"time"
 )
 
 // cpuSDPADecodeF32 computes single-query SDPA on CPU for reference.
@@ -287,5 +288,108 @@ func TestSDPAFlashDecodeF16_ContextScaling(t *testing.T) {
 				t.Fatalf("ctx=%d: max_diff=%.6f exceeds tolerance 5e-3", kvLen, maxDiff)
 			}
 		})
+	}
+}
+
+// TestSDPAFlashDecodeF16_Throughput measures SDPA F16 decode latency at various
+// context lengths. Uses batch mode to simulate real inference (many dispatches
+// per command buffer) and isolates SDPA scaling from matvec overhead.
+func TestSDPAFlashDecodeF16_Throughput(t *testing.T) {
+	backend, err := NewBackend(0)
+	if err != nil {
+		t.Skipf("Metal backend not available: %v", err)
+	}
+	defer backend.Close()
+
+	if backend.sdpaFlashDecodeF16Pipeline == nil {
+		t.Skip("Flash Attention F16 decode pipeline not available")
+	}
+
+	// LLaMA 2 7B config: 32 Q heads, 8 KV heads (GQA 4:1), headDim=128
+	numQHeads := 32
+	numKVHeads := 8
+	headDim := 128
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+	numLayers := 32 // simulate full model
+
+	contextLengths := []int{16, 32, 64, 128, 256, 512, 1024, 2048}
+	warmup := 10
+	iters := 100
+
+	type result struct {
+		kvLen       int
+		avgUs       float64 // per SDPA call (single layer)
+		batchedUs   float64 // 32 layers batched, per iteration
+	}
+	var results []result
+
+	for _, kvLen := range contextLengths {
+		kvHeadStride := kvLen * headDim
+
+		// Allocate FP16 buffers
+		qBuf := backend.Alloc(numQHeads * headDim * 2)
+		kBuf := backend.Alloc(numKVHeads * kvLen * headDim * 2)
+		vBuf := backend.Alloc(numKVHeads * kvLen * headDim * 2)
+		outBuf := backend.Alloc(numQHeads * headDim * 2)
+
+		// === Measurement 1: single-dispatch (with Sync) ===
+		for i := 0; i < warmup; i++ {
+			backend.SDPAF16(qBuf, kBuf, vBuf, outBuf, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+			backend.Sync()
+		}
+		start := time.Now()
+		for i := 0; i < iters; i++ {
+			backend.SDPAF16(qBuf, kBuf, vBuf, outBuf, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+			backend.Sync()
+		}
+		singleUs := float64(time.Since(start).Microseconds()) / float64(iters)
+
+		// === Measurement 2: batched (32 layers per command buffer) ===
+		for i := 0; i < warmup; i++ {
+			backend.BeginBatch()
+			for l := 0; l < numLayers; l++ {
+				backend.SDPAF16(qBuf, kBuf, vBuf, outBuf, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+			}
+			backend.EndBatch()
+			backend.Sync()
+		}
+		start = time.Now()
+		for i := 0; i < iters; i++ {
+			backend.BeginBatch()
+			for l := 0; l < numLayers; l++ {
+				backend.SDPAF16(qBuf, kBuf, vBuf, outBuf, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+			}
+			backend.EndBatch()
+			backend.Sync()
+		}
+		batchedUs := float64(time.Since(start).Microseconds()) / float64(iters)
+
+		results = append(results, result{kvLen, singleUs, batchedUs})
+
+		backend.Free(qBuf)
+		backend.Free(kBuf)
+		backend.Free(vBuf)
+		backend.Free(outBuf)
+	}
+
+	// Report
+	t.Logf("\n=== SDPA F16 Decode Throughput (LLaMA 2 7B: 32Q/8KV, hd128) ===")
+	t.Logf("%-8s  %10s  %14s  %14s  %12s", "kvLen", "single µs", "32-layer µs", "per-layer µs", "eff BW GB/s")
+	for _, r := range results {
+		perLayer := r.batchedUs / float64(numLayers)
+		// KV data read per call: numKVHeads * kvLen * headDim * 2 bytes * 2 (K+V)
+		// But GQA: 4 Q heads share same KV head, actual unique reads depend on cache
+		kvBytes := float64(numKVHeads) * float64(r.kvLen) * float64(headDim) * 2.0 * 2.0
+		effBW := kvBytes / (perLayer * 1e-6) / 1e9
+		t.Logf("%-8d  %10.1f  %14.1f  %14.1f  %12.1f", r.kvLen, r.avgUs, r.batchedUs, perLayer, effBW)
+	}
+
+	// Context scaling
+	if len(results) >= 6 {
+		base := results[0].batchedUs
+		ctx512 := results[5].batchedUs
+		overhead := ctx512 - base
+		t.Logf("\nBatched 32-layer overhead ctx=16→512: %.1f µs (%.1f%% increase)", overhead, (overhead/base)*100)
+		t.Logf("As fraction of decode budget (14ms): %.1f%%", (overhead/14000)*100)
 	}
 }

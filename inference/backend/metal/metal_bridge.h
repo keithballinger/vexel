@@ -693,6 +693,15 @@ void metal_sdpa_flash_decode_f16(void* queue, void* pipeline,
                                   int kvLen, int numQHeads, int numKVHeads, int headDim,
                                   float scale, int kvHeadStride);
 
+// Tiled Flash Attention SDPA F16 (split-K approach for better GPU occupancy)
+void metal_sdpa_flash_decode_f16_tiled(void* queue,
+                                        void* tilePipeline,
+                                        void* mergePipeline,
+                                        void* Q, void* K, void* V, void* out,
+                                        void* partials,
+                                        int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                        float scale, int kvHeadStride);
+
 // Q8_0 NR2 matvec: C = A @ B^T where A is [1,K] F32, B is [N,K] Q8_0
 void metal_matvec_q8_0_nr2_f32(void* queue, void* pipeline,
                                 void* A, uint64_t aOff,

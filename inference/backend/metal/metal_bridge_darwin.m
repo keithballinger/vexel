@@ -5823,6 +5823,238 @@ kernel void sdpa_flash_decode_f16(
     }
 }
 
+// =============================================================================
+// Tiled Flash Attention SDPA decode for FP16 KV cache (Split-K approach)
+//
+// Two-kernel design for better GPU occupancy at long context lengths:
+//   1. sdpa_flash_decode_f16_tiled: Grid = (numQHeads, numTiles)
+//      Each TG handles ONE Q head × ONE tile of KV positions.
+//      All 256 threads cooperatively load K/V tiles into shared memory.
+//      8 simdgroups split the tile positions with online softmax.
+//      Writes per-TG partial (max, sum, accumulator) to temp buffer.
+//
+//   2. sdpa_flash_decode_f16_merge: Grid = numQHeads
+//      Merges numTiles partials per Q head using online softmax correction.
+//      Writes final output.
+//
+// At ctx=512 with TILE_KV=64: grid = 32×8 = 256 TGs vs current 32 TGs (8× more).
+// Cooperative tile loading enables sequential burst reads (better memory pipelining)
+// and shared memory access (~1 cycle vs ~200ns device latency).
+// =============================================================================
+constant int TILED_F16_THREADS = 256;  // 8 simdgroups × 32 threads
+constant int TILED_F16_NUM_SG = 8;
+constant int TILED_F16_TILE_KV = 64;  // KV positions per tile
+
+kernel void sdpa_flash_decode_f16_tiled(
+    device const half* Q [[buffer(0)]],             // [numQHeads, headDim] in FP16
+    device const half* K [[buffer(1)]],             // [numKVHeads, maxSeqLen, headDim] in FP16
+    device const half* V [[buffer(2)]],             // [numKVHeads, maxSeqLen, headDim] in FP16
+    device float* partials [[buffer(3)]],           // [numQHeads, numTiles, 2 + headDim] temp buffer
+    constant int& kvLen [[buffer(4)]],
+    constant int& numQHeads [[buffer(5)]],
+    constant int& numKVHeads [[buffer(6)]],
+    constant int& headDim [[buffer(7)]],
+    constant float& scale [[buffer(8)]],
+    constant int& kvHeadStride [[buffer(9)]],       // Stride between KV heads
+    constant int& numTiles [[buffer(10)]],
+    threadgroup float* shared [[threadgroup(0)]],
+    uint2 gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int qHead = gid.x;
+    int tileIdx = gid.y;
+    if (qHead >= numQHeads || tileIdx >= numTiles) return;
+
+    // GQA: map Q head to KV head
+    int headsPerKV = numQHeads / numKVHeads;
+    int kvHead = qHead / headsPerKV;
+    int kvBase = kvHead * kvHeadStride;
+
+    // Tile boundaries
+    int tileStart = tileIdx * TILED_F16_TILE_KV;
+    int tileEnd = min(tileStart + TILED_F16_TILE_KV, kvLen);
+    int actualTileSize = tileEnd - tileStart;
+    if (actualTileSize <= 0) return;
+
+    int elemsPerThread = headDim / 32;
+    int threadBase = simd_lane * elemsPerThread;
+
+    // Load Q into registers
+    float q_reg[8];  // supports up to headDim=256
+    for (int e = 0; e < elemsPerThread; e++) {
+        q_reg[e] = float(Q[qHead * headDim + threadBase + e]);
+    }
+
+    // Shared memory layout:
+    //   tile_data: [TILE_KV, headDim] in half (reused for K and V)
+    //   sg_merge:  [2*NUM_SG + NUM_SG*headDim] in float (for cross-SG merge)
+    threadgroup half* tile_data = (threadgroup half*)shared;
+    int tileFloats = (TILED_F16_TILE_KV * headDim + 1) / 2;  // half → float slots
+    threadgroup float* sg_merge = shared + tileFloats;
+
+    // Split tile positions across simdgroups
+    int sgChunk = (actualTileSize + TILED_F16_NUM_SG - 1) / TILED_F16_NUM_SG;
+    int sgStart = simd_group * sgChunk;
+    int sgEnd = min(sgStart + sgChunk, actualTileSize);
+
+    // Per-SG online softmax state
+    float m_i = -INFINITY;
+    float l_i = 0.0f;
+    float o_i[8];
+    for (int e = 0; e < 8; e++) o_i[e] = 0.0f;
+
+    // === Phase 1: Cooperative K tile load + Q·K scores ===
+    int loadElems = actualTileSize * headDim;
+    for (int idx = (int)tid; idx < loadElems; idx += TILED_F16_THREADS) {
+        int localPos = idx / headDim;
+        int localDim = idx % headDim;
+        tile_data[idx] = K[kvBase + (tileStart + localPos) * headDim + localDim];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Compute Q·K scores from shared memory, store in registers
+    float scores[8];  // max TILE_KV/NUM_SG = 64/8 = 8 scores per SG
+    int numScores = sgEnd - sgStart;
+    for (int s = 0; s < numScores; s++) {
+        int localPos = sgStart + s;
+        float partial = 0.0f;
+        for (int e = 0; e < elemsPerThread; e++) {
+            partial += q_reg[e] * float(tile_data[localPos * headDim + threadBase + e]);
+        }
+        scores[s] = simd_sum(partial) * scale;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // === Phase 2: Cooperative V tile load + weighted accumulation ===
+    for (int idx = (int)tid; idx < loadElems; idx += TILED_F16_THREADS) {
+        int localPos = idx / headDim;
+        int localDim = idx % headDim;
+        tile_data[idx] = V[kvBase + (tileStart + localPos) * headDim + localDim];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Online softmax + V accumulation from shared memory
+    for (int s = 0; s < numScores; s++) {
+        float score = scores[s];
+        float m_new = max(m_i, score);
+        float alpha = exp(m_i - m_new);
+        float p = exp(score - m_new);
+        l_i = l_i * alpha + p;
+
+        int localPos = sgStart + s;
+        for (int e = 0; e < elemsPerThread; e++) {
+            o_i[e] = o_i[e] * alpha + p * float(tile_data[localPos * headDim + threadBase + e]);
+        }
+        m_i = m_new;
+    }
+
+    // === Cross-SG merge within this tile ===
+    threadgroup float* sg_maxs = sg_merge;
+    threadgroup float* sg_sums = sg_merge + TILED_F16_NUM_SG;
+    threadgroup float* sg_accs = sg_merge + 2 * TILED_F16_NUM_SG;
+
+    if (simd_lane == 0) {
+        sg_maxs[simd_group] = m_i;
+        sg_sums[simd_group] = l_i;
+    }
+    for (int e = 0; e < elemsPerThread; e++) {
+        sg_accs[simd_group * headDim + threadBase + e] = o_i[e];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // SG0 merges and writes tile partial to temp buffer
+    if (simd_group == 0) {
+        float global_max = sg_maxs[0];
+        for (int s = 1; s < TILED_F16_NUM_SG; s++) {
+            global_max = max(global_max, sg_maxs[s]);
+        }
+
+        float total_sum = 0.0f;
+        float result[8];
+        for (int e = 0; e < 8; e++) result[e] = 0.0f;
+
+        for (int s = 0; s < TILED_F16_NUM_SG; s++) {
+            float w = (sg_sums[s] > 0.0f) ? exp(sg_maxs[s] - global_max) : 0.0f;
+            total_sum += sg_sums[s] * w;
+            for (int e = 0; e < elemsPerThread; e++) {
+                result[e] += sg_accs[s * headDim + threadBase + e] * w;
+            }
+        }
+
+        // Write partial: [max, sum, acc[0..headDim-1]]
+        int partialStride = 2 + headDim;
+        int partialBase = (qHead * numTiles + tileIdx) * partialStride;
+
+        if (simd_lane == 0) {
+            partials[partialBase + 0] = global_max;
+            partials[partialBase + 1] = total_sum;
+        }
+        for (int e = 0; e < elemsPerThread; e++) {
+            partials[partialBase + 2 + threadBase + e] = result[e];
+        }
+    }
+}
+
+// Merge kernel: combines tile partials per Q head using online softmax correction.
+// Grid: numQHeads threadgroups, 256 threads each.
+// Only simdgroup 0 (32 threads) does active work.
+kernel void sdpa_flash_decode_f16_merge(
+    device const float* partials [[buffer(0)]],    // [numQHeads, numTiles, 2 + headDim]
+    device half* out [[buffer(1)]],                // [numQHeads, headDim] in FP16
+    constant int& numQHeads [[buffer(2)]],
+    constant int& headDim [[buffer(3)]],
+    constant int& numTiles [[buffer(4)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int qHead = gid;
+    if (qHead >= numQHeads || simd_group != 0) return;
+
+    int elemsPerThread = headDim / 32;
+    int threadBase = simd_lane * elemsPerThread;
+    int partialStride = 2 + headDim;
+
+    // Find global max across all tiles
+    float global_max = -INFINITY;
+    for (int t = 0; t < numTiles; t++) {
+        int base = (qHead * numTiles + t) * partialStride;
+        float tile_max = partials[base + 0];
+        // Only consider tiles that had actual data (sum > 0)
+        if (partials[base + 1] > 0.0f) {
+            global_max = max(global_max, tile_max);
+        }
+    }
+
+    // Merge with online softmax correction
+    float total_sum = 0.0f;
+    float result[8];
+    for (int e = 0; e < 8; e++) result[e] = 0.0f;
+
+    for (int t = 0; t < numTiles; t++) {
+        int base = (qHead * numTiles + t) * partialStride;
+        float tile_sum = partials[base + 1];
+        if (tile_sum <= 0.0f) continue;  // empty tile
+
+        float tile_max = partials[base + 0];
+        float w = exp(tile_max - global_max);
+        total_sum += tile_sum * w;
+
+        for (int e = 0; e < elemsPerThread; e++) {
+            result[e] += partials[base + 2 + threadBase + e] * w;
+        }
+    }
+
+    // Normalize and write output
+    float inv_l = (total_sum > 0.0f) ? (1.0f / total_sum) : 0.0f;
+    int outBase = qHead * headDim;
+    for (int e = 0; e < elemsPerThread; e++) {
+        out[outBase + threadBase + e] = half(result[e] * inv_l);
+    }
+}
+
 // Q4_0 Matrix-vector with FP16 input/output
 // A: [1, K] in FP16, B: [N, K] in Q4_0 format, C: [1, N] in FP16
 // Uses FP32 accumulation for precision, 2x bandwidth savings on activations
@@ -10252,6 +10484,71 @@ void metal_sdpa_flash_decode_f16(void* queuePtr, void* pipelinePtr,
     MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Tiled Flash Attention SDPA decode for FP16 KV cache (split-K approach).
+// Two-dispatch: tile kernel computes per-tile partials, merge kernel combines them.
+// Uses batch mode internally to encode both dispatches into a single command buffer.
+void metal_sdpa_flash_decode_f16_tiled(void* queuePtr,
+                                        void* tilePipelinePtr,
+                                        void* mergePipelinePtr,
+                                        void* Q, void* K, void* V, void* out,
+                                        void* partials,
+                                        int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                        float scale, int kvHeadStride) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> tilePipeline = (__bridge id<MTLComputePipelineState>)tilePipelinePtr;
+    id<MTLComputePipelineState> mergePipeline = (__bridge id<MTLComputePipelineState>)mergePipelinePtr;
+
+    int tileKV = 64;  // TILED_F16_TILE_KV
+    int numTiles = (kvLen + tileKV - 1) / tileKV;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    // === Dispatch 1: Tile kernel ===
+    [encoder setComputePipelineState:tilePipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)partials offset:0 atIndex:3];
+    [encoder setBytes:&kvLen length:sizeof(kvLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+    [encoder setBytes:&kvHeadStride length:sizeof(kvHeadStride) atIndex:9];
+    [encoder setBytes:&numTiles length:sizeof(numTiles) atIndex:10];
+
+    // Shared memory: tile_data (TILE_KV * headDim halfs = TILE_KV * headDim * 2 bytes)
+    //              + sg_merge (2*8 + 8*headDim floats)
+    int numSG = 8;
+    int tileDataBytes = tileKV * headDim * sizeof(short);  // half = 2 bytes
+    int sgMergeBytes = (2 * numSG + numSG * headDim) * sizeof(float);
+    int sharedMemSize = tileDataBytes + sgMergeBytes;
+    // Align tile data to 4 bytes for float* access to sg_merge
+    sharedMemSize = ((sharedMemSize + 3) / 4) * 4;
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    // 2D grid: (numQHeads, numTiles)
+    MTLSize tileThreadgroups = MTLSizeMake(numQHeads, numTiles, 1);
+    MTLSize tileThreadsPerGroup = MTLSizeMake(256, 1, 1);
+    [encoder dispatchThreadgroups:tileThreadgroups threadsPerThreadgroup:tileThreadsPerGroup];
+
+    // === Dispatch 2: Merge kernel ===
+    [encoder setComputePipelineState:mergePipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)partials offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:1];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:2];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:3];
+    [encoder setBytes:&numTiles length:sizeof(numTiles) atIndex:4];
+
+    MTLSize mergeThreadgroups = MTLSizeMake(numQHeads, 1, 1);
+    MTLSize mergeThreadsPerGroup = MTLSizeMake(256, 1, 1);
+    [encoder dispatchThreadgroups:mergeThreadgroups threadsPerThreadgroup:mergeThreadsPerGroup];
+
     finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
