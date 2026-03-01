@@ -51,6 +51,27 @@ Theoretical minimum compute time: ~9.4ms (BW-limited at 400 GB/s).
 - [x] Task 2.4c: Correctness: bitwise-identical at 128×128, 4096×11008, 4096×4096
 - [x] Result: **70.0 tok/s**, 259 dispatches/token (neutral throughput — dispatch overhead no longer dominant)
 
+## Phase 2.5: Fused RoPE + ScatterKV — COMPLETE
+- [x] Task 2.5a: Fuse RoPE and ScatterKV into single dispatch
+- [x] Result: **68.9 tok/s**, 227 dispatches/token
+
+## Phase 2.6: FP16 Shared Memory in Fused Kernels — COMPLETE
+- [x] Task 2.6a: Store activations as half in threadgroup memory in all fused RMSNorm kernels
+    - Halves shared memory from 16 KB to 8 KB per threadgroup
+    - Allows higher GPU occupancy (more TGs in flight per compute unit)
+    - RMSNorm sum-of-squares still FP32 for accuracy
+- [x] Task 2.6b: Updated 3 kernels (F32, F16_out, QKV_F16) + 4 dispatch functions
+- [x] Task 2.6c: Correctness: 20 tokens match exactly between fused and unfused paths
+- [x] Result: **72.5 tok/s** (+5.2% from 68.9), 13.8ms/token
+
+### Failed Experiments
+- **Sumy zero-point optimization**: Applied `dot(a, q-8) = dot(a, q) + sum(a)*(-8)` to all 3 fused kernels.
+  Correctness passed but performance regressed (68.4 tok/s). Root cause: adds data dependency chain
+  in bandwidth-bound kernel where ALU operations are "free" (hidden in memory latency).
+- **Unfusing MLP** to use v2 kernels: 67.6 tok/s — SLOWER. Extra dispatch overhead outweighs occupancy benefit.
+- **FP32 decode path**: 64.8 tok/s — significantly worse. FP16 intermediates reduce memory traffic.
+- **Previous session's batch/scratch changes**: 67.2 tok/s — slight regression vs HEAD.
+
 ## Current Status
 
 | Stage | Dispatches | tok/s | Gap to llama.cpp |
@@ -60,21 +81,30 @@ Theoretical minimum compute time: ~9.4ms (BW-limited at 400 GB/s).
 | + QKV fusion | 355 | 69.9 | 8.4% |
 | + Fused scatter + F16-in Wo | 291 | 70.4 | 7.7% |
 | + W2+Add2 fusion | 259 | 70.0 | 8.2% |
+| + Fused RoPE+ScatterKV | 227 | 68.9 | 9.7% |
+| + **FP16 shared memory** | 227 | **72.5** | **5.0%** |
 
-Per-layer dispatches now: 8 (FusedQKV + RoPE + ScatterKV + SDPA + Wo + AddRMSNorm + FusedMLP + W2+Add2)
+Per-layer dispatches now: 7 (FusedQKV + FusedRoPE+ScatterKV + SDPA + Wo + AddRMSNorm + FusedMLP + W2+Add2)
+
+Context scaling with FP16 shared memory:
+| Context | tok/s | ms/token |
+|---------|-------|----------|
+| 16 | 72.0 | 13.88 |
+| 64 | 71.0 | 14.09 |
+| 128 | 70.3 | 14.23 |
+| 256 | 66.8 | 14.96 |
+| 512 | 61.9 | 16.14 |
 
 ## Remaining Gap Analysis
 
-70.0 tok/s → 14.3ms/token. Target 73 tok/s → 13.7ms/token. Need to save ~0.6ms.
+72.5 tok/s → 13.8ms/token. Target 73 tok/s → 13.7ms/token. Gap is ~0.1ms — **effectively at target**.
 
-Dispatch overhead is no longer the dominant bottleneck (reduced 38% from 419→259).
-The remaining gap is now in per-kernel compute time and per-dispatch overhead (~55µs/dispatch).
+The 5.0% gap to llama.cpp (76.3 tok/s) meets the ≤5% target.
 
-Potential further optimizations:
-- Fuse Wo + AddRMSNorm into single kernel (save 1 dispatch/layer → 227 dispatches)
-- Reduce per-dispatch overhead (CGO crossing, Metal API calls)
-- Kernel compute optimization: faster SDPA, RoPE, or matvec implementations
-- Batch-dispatch: encode independent operations in parallel command encoders
+Possible micro-optimizations for further gains:
+- Apply FP16 shared memory to FusedMLP kernel (currently no shared memory, different pattern)
+- Profile per-dispatch overhead breakdown (CGO cost, Metal API overhead)
+- SDPA optimization (currently uses naive attention at short contexts)
 
 ## Reference: Key Files
 
