@@ -5584,6 +5584,145 @@ kernel void sdpa_flash_decode_f32(
     }
 }
 
+// Flash Attention F32 v2 decode: genuine split-KV with online softmax.
+// Replaces sdpa_flash_decode_f32 which materialized weights[kvLen] in shared memory
+// and used a sequential two-phase V accumulation that degraded with context length.
+//
+// Algorithm: same as sdpa_flash_decode_f16 but with float* I/O.
+// - Split KV positions across 8 simdgroups
+// - Each simdgroup processes its chunk with online softmax (running max + sum)
+// - Cross-simdgroup merge via shared memory
+// - Shared memory: O(headDim) instead of O(kvLen)
+//
+// 256 threads = 8 simdgroups × 32 lanes.
+// Each simdgroup: 32 lanes handle headDim/32 elements each.
+constant int FLASH_F32_V2_NUM_SG = 8;
+
+kernel void sdpa_flash_decode_f32_v2(
+    device const float* Q [[buffer(0)]],        // [numQHeads, headDim]
+    device const float* K [[buffer(1)]],        // [numKVHeads, maxSeqLen, headDim]
+    device const float* V [[buffer(2)]],        // [numKVHeads, maxSeqLen, headDim]
+    device float* out [[buffer(3)]],            // [numQHeads, headDim]
+    constant int& kvLen [[buffer(4)]],
+    constant int& numQHeads [[buffer(5)]],
+    constant int& numKVHeads [[buffer(6)]],
+    constant int& headDim [[buffer(7)]],
+    constant float& scale [[buffer(8)]],
+    constant int& kvHeadStride [[buffer(9)]],   // Stride between KV heads (maxSeqLen * headDim)
+    threadgroup float* shared [[threadgroup(0)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int qHead = gid;
+    if (qHead >= numQHeads) return;
+
+    // GQA: map Q head to KV head
+    int headsPerKV = numQHeads / numKVHeads;
+    int kvHead = qHead / headsPerKV;
+    int kvBase = kvHead * kvHeadStride;
+
+    // Each thread in a simdgroup handles headDim/32 consecutive elements.
+    // For headDim=128: 4 elements/thread, headDim=64: 2, headDim=256: 8.
+    int elemsPerThread = headDim / 32;
+    int threadBase = simd_lane * elemsPerThread;
+
+    // Load Q into registers (each thread loads its own portion)
+    float q_reg[8];  // supports up to headDim=256 (256/32=8)
+    for (int e = 0; e < elemsPerThread; e++) {
+        q_reg[e] = Q[qHead * headDim + threadBase + e];
+    }
+
+    // Per-simdgroup online softmax state
+    float m_i = -INFINITY;    // running max
+    float l_i = 0.0f;         // running sum of exp(score - m_i)
+    float o_i[8];              // weighted V accumulator
+    for (int e = 0; e < 8; e++) o_i[e] = 0.0f;
+
+    // Split KV positions across simdgroups for parallel processing
+    int chunkSize = (kvLen + FLASH_F32_V2_NUM_SG - 1) / FLASH_F32_V2_NUM_SG;
+    int startPos = simd_group * chunkSize;
+    int endPos = min(startPos + chunkSize, kvLen);
+
+    // Process this simdgroup's KV chunk with online softmax
+    for (int pos = startPos; pos < endPos; pos++) {
+        int kBase = kvBase + pos * headDim;
+
+        // Q·K dot product: each thread computes partial, simd_sum reduces
+        float partial = 0.0f;
+        for (int e = 0; e < elemsPerThread; e++) {
+            partial += q_reg[e] * K[kBase + threadBase + e];
+        }
+        float score = simd_sum(partial) * scale;
+        // score is broadcast to ALL lanes by simd_sum
+
+        // Online softmax update
+        float m_new = max(m_i, score);
+        float alpha = exp(m_i - m_new);   // rescale factor for old accumulator
+        float p = exp(score - m_new);      // attention weight for this position
+
+        l_i = l_i * alpha + p;
+
+        // Rescale old accumulator and add weighted V
+        int vBase = kvBase + pos * headDim;
+        for (int e = 0; e < elemsPerThread; e++) {
+            o_i[e] = o_i[e] * alpha + p * V[vBase + threadBase + e];
+        }
+
+        m_i = m_new;
+    }
+
+    // ---- Cross-simdgroup merge ----
+    // Shared memory layout:
+    //   [0 .. NUM_SG-1]:                          per-SG max values
+    //   [NUM_SG .. 2*NUM_SG-1]:                   per-SG sum values
+    //   [2*NUM_SG .. 2*NUM_SG + NUM_SG*headDim-1]: per-SG output accumulators
+    threadgroup float* sg_maxs = shared;
+    threadgroup float* sg_sums = shared + FLASH_F32_V2_NUM_SG;
+    threadgroup float* sg_accs = shared + 2 * FLASH_F32_V2_NUM_SG;
+
+    // Write this simdgroup's results to shared memory
+    if (simd_lane == 0) {
+        sg_maxs[simd_group] = m_i;
+        sg_sums[simd_group] = l_i;
+    }
+    for (int e = 0; e < elemsPerThread; e++) {
+        sg_accs[simd_group * headDim + threadBase + e] = o_i[e];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Simdgroup 0 merges all partial results and writes final output
+    if (simd_group == 0) {
+        // Find global max across all simdgroups
+        float global_max = sg_maxs[0];
+        for (int s = 1; s < FLASH_F32_V2_NUM_SG; s++) {
+            global_max = max(global_max, sg_maxs[s]);
+        }
+
+        // Merge partial results with online softmax correction
+        float total_sum = 0.0f;
+        float result[8];
+        for (int e = 0; e < 8; e++) result[e] = 0.0f;
+
+        for (int s = 0; s < FLASH_F32_V2_NUM_SG; s++) {
+            // If this simdgroup processed no positions, skip it
+            float w = (sg_sums[s] > 0.0f) ? exp(sg_maxs[s] - global_max) : 0.0f;
+            total_sum += sg_sums[s] * w;
+            for (int e = 0; e < elemsPerThread; e++) {
+                result[e] += sg_accs[s * headDim + threadBase + e] * w;
+            }
+        }
+
+        // Normalize and write output
+        float inv_l = (total_sum > 0.0f) ? (1.0f / total_sum) : 0.0f;
+        int outBase = qHead * headDim;
+        for (int e = 0; e < elemsPerThread; e++) {
+            out[outBase + threadBase + e] = result[e] * inv_l;
+        }
+    }
+}
+
 // Paged SDPA decode: reads K/V from a paged block pool via block table indirection.
 // Same two-phase algorithm as sdpa_flash_decode_f32, but K/V are in paged blocks
 // instead of contiguous buffers.
@@ -9735,6 +9874,82 @@ void metal_sdpa_flash_decode_f32(void* queuePtr, void* pipelinePtr,
     // One threadgroup per Q head
     MTLSize threadgroups = MTLSizeMake(numQHeads, 1, 1);
     MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Flash Attention F32 v2: split-KV online softmax, O(headDim) shared memory.
+// Replaces the old sdpa_flash_decode_f32 which used O(kvLen) shared memory.
+void metal_sdpa_flash_decode_f32_v2(void* queuePtr, void* pipelinePtr,
+                                     void* Q, void* K, void* V, void* out,
+                                     int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                     float scale, int kvHeadStride) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBytes:&kvLen length:sizeof(kvLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+    [encoder setBytes:&kvHeadStride length:sizeof(kvHeadStride) atIndex:9];
+
+    // Shared memory: NUM_SG max + NUM_SG sum + NUM_SG * headDim acc
+    // = 2*8 + 8*headDim = 16 + 8*headDim floats
+    int numSG = 8;
+    int sharedMemSize = (2 * numSG + numSG * headDim) * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    // One threadgroup per Q head, 256 threads (8 simdgroups)
+    MTLSize threadgroups = MTLSizeMake(numQHeads, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Flash Attention F32 v2 with offset-aware dispatch (for scratch-allocated buffers).
+void metal_sdpa_flash_decode_f32_v2_offset(void* queuePtr, void* pipelinePtr,
+                                            void* Q, uint64_t qOff,
+                                            void* K, void* V,
+                                            void* out, uint64_t outOff,
+                                            int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                            float scale, int kvHeadStride) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:qOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:outOff atIndex:3];
+    [encoder setBytes:&kvLen length:sizeof(kvLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+    [encoder setBytes:&kvHeadStride length:sizeof(kvHeadStride) atIndex:9];
+
+    int numSG = 8;
+    int sharedMemSize = (2 * numSG + numSG * headDim) * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    MTLSize threadgroups = MTLSizeMake(numQHeads, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
     finish_encode(encoder, cmdBuffer, shouldCommit);

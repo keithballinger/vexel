@@ -95,7 +95,8 @@ type Backend struct {
 	mulPipeline                 unsafe.Pointer
 	argmaxPipeline              unsafe.Pointer
 	sdpaDecodePipeline          unsafe.Pointer
-	sdpaFlashDecodePipeline     unsafe.Pointer
+	sdpaFlashDecodePipeline       unsafe.Pointer
+	sdpaFlashDecodeF32V2Pipeline  unsafe.Pointer // Flash F32 v2: split-KV online softmax, O(headDim) shared mem
 	sdpaPrefillPipeline         unsafe.Pointer
 	flashAttention2Pipeline     unsafe.Pointer
 	flashAttention2V2Pipeline  unsafe.Pointer
@@ -243,6 +244,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.argmaxPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("argmax_f32"))
 	b.sdpaDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_gqa_f32"))
 	b.sdpaFlashDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f32"))
+	b.sdpaFlashDecodeF32V2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f32_v2"))
 	b.sdpaPrefillPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_prefill_f32"))
 	b.flashAttention2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("flash_attention_2_f32"))
 	b.flashAttention2V2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("flash_attention_2_v2_f32"))
@@ -1224,8 +1226,18 @@ func (b *Backend) RoPEOffset(q, k tensor.DevicePtr, headDim, numHeads, numKVHead
 // Q and out use offsets (scratch-allocated), K/V (KV cache) at offset 0.
 func (b *Backend) SDPAOffset(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
 	b.profiler.RecordDispatch("SDPA")
+	// Prefer Flash F32 v2 (split-KV online softmax, O(headDim) shared mem)
+	// over old Flash F32 (materializes weights[kvLen], O(kvLen) shared mem)
+	if b.sdpaFlashDecodeF32V2Pipeline != nil && headDim%32 == 0 {
+		C.metal_sdpa_flash_decode_f32_v2_offset(b.queue, b.sdpaFlashDecodeF32V2Pipeline,
+			unsafe.Pointer(q.Addr()), C.uint64_t(q.Offset()),
+			unsafe.Pointer(k.Addr()), unsafe.Pointer(v.Addr()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+			C.float(scale), C.int(kvHeadStride))
+		return
+	}
 	useFlash := b.sdpaFlashDecodePipeline != nil && kvLen >= 16
-
 	if useFlash {
 		C.metal_sdpa_flash_decode_f32_offset(b.queue, b.sdpaFlashDecodePipeline,
 			unsafe.Pointer(q.Addr()), C.uint64_t(q.Offset()),
@@ -1365,10 +1377,18 @@ func (b *Backend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHea
 		return
 	}
 	b.profiler.RecordDispatch("SDPA")
-	// Use Flash Decoding for longer KV lengths where parallelism helps
-	// For short sequences, the overhead of threadgroup sync isn't worth it
+	// Prefer Flash F32 v2 (split-KV online softmax, O(headDim) shared mem)
+	// over old Flash F32 (materializes weights[kvLen], O(kvLen) shared mem)
+	if b.sdpaFlashDecodeF32V2Pipeline != nil && headDim%32 == 0 {
+		C.metal_sdpa_flash_decode_f32_v2(b.queue, b.sdpaFlashDecodeF32V2Pipeline,
+			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+			unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+			C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+			C.float(scale), C.int(kvHeadStride))
+		return
+	}
+	// Fallback to old Flash or naive SDPA
 	useFlash := b.sdpaFlashDecodePipeline != nil && kvLen >= 16
-
 	if useFlash {
 		C.metal_sdpa_flash_decode_f32(b.queue, b.sdpaFlashDecodePipeline,
 			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),

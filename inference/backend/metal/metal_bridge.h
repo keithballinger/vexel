@@ -469,6 +469,19 @@ void metal_sdpa_flash_decode_f32(void* queue, void* pipeline,
                                   int kvLen, int numQHeads, int numKVHeads, int headDim,
                                   float scale, int kvHeadStride);
 
+// Flash Attention F32 v2: split-KV online softmax, O(headDim) shared memory.
+void metal_sdpa_flash_decode_f32_v2(void* queue, void* pipeline,
+                                     void* Q, void* K, void* V, void* out,
+                                     int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                     float scale, int kvHeadStride);
+
+void metal_sdpa_flash_decode_f32_v2_offset(void* queue, void* pipeline,
+                                            void* Q, uint64_t qOff,
+                                            void* K, void* V,
+                                            void* out, uint64_t outOff,
+                                            int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                            float scale, int kvHeadStride);
+
 // SDPA decode with logit soft-capping (Gemma 2)
 // Applies cap * tanh(score / cap) before softmax
 void metal_sdpa_softcap_decode_f32(void* queue, void* pipeline,
