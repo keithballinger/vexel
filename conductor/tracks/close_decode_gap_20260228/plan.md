@@ -55,7 +55,7 @@ Theoretical minimum compute time: ~9.4ms (BW-limited at 400 GB/s).
 - [x] Task 2.5a: Fuse RoPE and ScatterKV into single dispatch
 - [x] Result: **68.9 tok/s**, 227 dispatches/token
 
-## Phase 2.6: FP16 Shared Memory in Fused Kernels — COMPLETE
+## Phase 2.6: FP16 Shared Memory in Fused Kernels — COMPLETE [checkpoint: 5e2ab26]
 - [x] Task 2.6a: Store activations as half in threadgroup memory in all fused RMSNorm kernels
     - Halves shared memory from 16 KB to 8 KB per threadgroup
     - Allows higher GPU occupancy (more TGs in flight per compute unit)
