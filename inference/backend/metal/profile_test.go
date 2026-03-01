@@ -10,6 +10,7 @@ import (
 	"unsafe"
 
 	"vexel/inference/pkg/gguf"
+	"vexel/inference/tensor"
 )
 
 func TestProfileOperations(t *testing.T) {
@@ -614,4 +615,1037 @@ func TestCGOOverhead(t *testing.T) {
 	t.Logf("  %d dispatches × %.0f ns = %.2f ms", dispatchesPerToken, dispatchPer, float64(dispatchesPerToken)*dispatchPer/1e6)
 	t.Logf("  %d barriers × %.0f ns = %.2f ms", barriersPerToken, barrierPer, float64(barriersPerToken)*barrierPer/1e6)
 	t.Logf("  Total CGO overhead: %.2f ms (%.0f calls × avg %.0f ns)", estimatedOverheadMs*2, float64(totalCGOCalls), (dispatchPer+barrierPer)/2)
+}
+
+// TestRealisticDecodeSimulation simulates the full LLaMA 2 7B Q4_0 fused decode
+// pipeline with DIFFERENT weights per layer (no L2 cache reuse across layers).
+// This measures the true effective memory bandwidth of the decode pipeline.
+func TestRealisticDecodeSimulation(t *testing.T) {
+	b, err := NewBackend(0)
+	if err != nil {
+		t.Skip("Metal not available")
+	}
+	defer b.Close()
+
+	// LLaMA 2 7B Q4_0 config
+	numLayers := 32
+	hiddenSize := 4096
+	numKVHeads := 8
+	headDim := 128
+	intermediateSize := 11008
+
+	blockSize := 32
+	bytesPerBlock := 18
+	numBlocks4096 := (hiddenSize + blockSize - 1) / blockSize
+	numBlocks11008 := (intermediateSize + blockSize - 1) / blockSize
+
+	// Per-layer weight sizes in Q4_0
+	type layerWeights struct {
+		wq, wk, wv, wo, w1, w3, w2 tensor.DevicePtr
+	}
+
+	// Allocate DIFFERENT weights for each layer (forces device memory reads)
+	layers := make([]layerWeights, numLayers)
+	var totalWeightBytes int64
+	for l := 0; l < numLayers; l++ {
+		// Wq [4096, 4096]: N=4096, K=4096
+		wqSize := hiddenSize * numBlocks4096 * bytesPerBlock
+		layers[l].wq = b.Alloc(wqSize)
+		totalWeightBytes += int64(wqSize)
+
+		// Wk [1024, 4096]: N=numKVHeads*headDim=1024, K=4096
+		kvDim := numKVHeads * headDim
+		wkSize := kvDim * numBlocks4096 * bytesPerBlock
+		layers[l].wk = b.Alloc(wkSize)
+		totalWeightBytes += int64(wkSize)
+
+		// Wv [1024, 4096]
+		layers[l].wv = b.Alloc(wkSize)
+		totalWeightBytes += int64(wkSize)
+
+		// Wo [4096, 4096]
+		layers[l].wo = b.Alloc(wqSize)
+		totalWeightBytes += int64(wqSize)
+
+		// W1 [11008, 4096]: N=11008, K=4096
+		w1Size := intermediateSize * numBlocks4096 * bytesPerBlock
+		layers[l].w1 = b.Alloc(w1Size)
+		totalWeightBytes += int64(w1Size)
+
+		// W3 [11008, 4096]
+		layers[l].w3 = b.Alloc(w1Size)
+		totalWeightBytes += int64(w1Size)
+
+		// W2 [4096, 11008]: N=4096, K=11008
+		w2Size := hiddenSize * numBlocks11008 * bytesPerBlock
+		layers[l].w2 = b.Alloc(w2Size)
+		totalWeightBytes += int64(w2Size)
+	}
+
+	// LM head [32000, 4096]
+	lmHeadSize := 32000 * numBlocks4096 * bytesPerBlock
+	lmHead := b.Alloc(lmHeadSize)
+	totalWeightBytes += int64(lmHeadSize)
+
+	// Activation buffers (reused across layers)
+	x := b.Alloc(hiddenSize * 4)           // main hidden state [4096] F32
+	gate := b.Alloc(intermediateSize * 4)   // MLP intermediate [11008] F32
+	mlpOut := b.Alloc(hiddenSize * 4)       // MLP output [4096] F32
+	lmOut := b.Alloc(32000 * 4)             // logits
+
+	t.Logf("Total weight memory: %.2f GB (%d layers + LM head)", float64(totalWeightBytes)/1e9, numLayers)
+
+	// Benchmark: Dispatch matvec-only pipeline (skip RoPE, SDPA, etc.)
+	// This isolates the matvec bandwidth which is ~75% of total decode time.
+	warmup := 3
+	iters := 20
+
+	kvDim := numKVHeads * headDim
+
+	// Warmup
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			// 3 attention projections
+			b.MatMulQ4_0(x, lw.wq, x, 1, hiddenSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.wk, x, 1, kvDim, hiddenSize)
+			b.MatMulQ4_0(x, lw.wv, x, 1, kvDim, hiddenSize)
+			// Wo
+			b.MatMulQ4_0(x, lw.wo, x, 1, hiddenSize, hiddenSize)
+			// W1 + W3 (MLP)
+			b.MatMulQ4_0(x, lw.w1, gate, 1, intermediateSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.w3, gate, 1, intermediateSize, hiddenSize)
+			// W2
+			b.MatMulQ4_0(gate, lw.w2, mlpOut, 1, hiddenSize, intermediateSize)
+		}
+		// LM head
+		b.MatMulQ4_0(x, lmHead, lmOut, 1, 32000, hiddenSize)
+		b.EndBatch()
+		b.Sync()
+	}
+
+	// Measure
+	start := time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0(x, lw.wq, x, 1, hiddenSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.wk, x, 1, kvDim, hiddenSize)
+			b.MatMulQ4_0(x, lw.wv, x, 1, kvDim, hiddenSize)
+			b.MatMulQ4_0(x, lw.wo, x, 1, hiddenSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.w1, gate, 1, intermediateSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.w3, gate, 1, intermediateSize, hiddenSize)
+			b.MatMulQ4_0(gate, lw.w2, mlpOut, 1, hiddenSize, intermediateSize)
+		}
+		b.MatMulQ4_0(x, lmHead, lmOut, 1, 32000, hiddenSize)
+		b.EndBatch()
+		b.Sync()
+	}
+	elapsed := time.Since(start)
+
+	perToken := elapsed.Seconds() / float64(iters)
+	gbps := float64(totalWeightBytes) / perToken / 1e9
+	toksPerSec := 1.0 / perToken
+
+	t.Logf("\n=== Realistic Decode Simulation (LLaMA 2 7B Q4_0, matvec-only) ===")
+	t.Logf("  Per-token time: %.2f ms", perToken*1e3)
+	t.Logf("  Effective BW:   %.1f GB/s (%.1f%% of 400 GB/s peak)", gbps, gbps/400*100)
+	t.Logf("  Throughput:     %.1f tok/s (matvec-limited ceiling)", toksPerSec)
+	t.Logf("  Weight data:    %.2f GB per token", float64(totalWeightBytes)/1e9)
+
+	// How much non-matvec overhead we can afford
+	targetToksPerSec := 76.3 // llama.cpp Q4_0
+	targetPerToken := 1.0 / targetToksPerSec
+	nonMatvecBudget := targetPerToken - perToken
+	t.Logf("\n  llama.cpp target: 76.3 tok/s = %.2f ms/token", targetPerToken*1e3)
+	if nonMatvecBudget > 0 {
+		t.Logf("  Non-matvec budget: %.2f ms (to beat llama.cpp)", nonMatvecBudget*1e3)
+	} else {
+		t.Logf("  ⚠ Matvec alone exceeds llama.cpp budget by %.2f ms", -nonMatvecBudget*1e3)
+	}
+}
+
+// TestNonMatvecOverheadBreakdown measures every non-matvec operation at LLaMA 2 7B
+// decode dimensions. This identifies exactly where the 3+ ms of non-matvec overhead goes.
+//
+// Per layer, the fused decode path dispatches:
+//   1. FusedRMSNorm+QKV (3 matvec dispatches — counted in matvec budget)
+//   2. barrier
+//   3. RoPE+ScatterKV (1 dispatch)
+//   4. barrier
+//   5. SDPA F16 (1 dispatch)
+//   6. barrier
+//   7. Wo (1 matvec — counted in matvec budget)
+//   8. barrier
+//   9. AddRMSNorm (1 dispatch)
+//  10. barrier
+//  11. FusedMLP (1 matvec — counted in matvec budget)
+//  12. barrier
+//  13. W2+Add2 (1 matvec — counted in matvec budget)
+//
+// Non-matvec per layer: RoPE+ScatterKV + SDPA + AddRMSNorm + 6 barriers
+func TestNonMatvecOverheadBreakdown(t *testing.T) {
+	b, err := NewBackend(0)
+	if err != nil {
+		t.Skip("Metal not available")
+	}
+	defer b.Close()
+
+	// LLaMA 2 7B config
+	hiddenSize := 4096
+	numQHeads := 32
+	numKVHeads := 8
+	headDim := 128
+	kvLen := 16 // ctx=16 baseline
+
+	// Allocate activation buffers at realistic dimensions
+	// Q after projection: [numQHeads * headDim] F16 = [4096] = 8192 bytes
+	qF16 := b.Alloc(numQHeads * headDim * 2)
+	// K,V src after projection: [numKVHeads * headDim] F16
+	kSrcF16 := b.Alloc(numKVHeads * headDim * 2)
+	vSrcF16 := b.Alloc(numKVHeads * headDim * 2)
+	// KV cache: [numKVHeads, maxSeqLen, headDim] F16
+	maxSeqLen := 2048
+	kvHeadStride := maxSeqLen * headDim
+	kCacheF16 := b.Alloc(numKVHeads * maxSeqLen * headDim * 2)
+	vCacheF16 := b.Alloc(numKVHeads * maxSeqLen * headDim * 2)
+	// SDPA output: [numQHeads * headDim] F16
+	sdpaOut := b.Alloc(numQHeads * headDim * 2)
+	// Hidden state: [4096] F32
+	x := b.Alloc(hiddenSize * 4)
+	residual := b.Alloc(hiddenSize * 4)
+	normWeight := b.Alloc(hiddenSize * 4)
+	normOut := b.Alloc(hiddenSize * 4)
+
+	iters := 50
+	warmup := 10
+	theta := float32(10000.0)
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+
+	// =====================================================================
+	// 1. RoPE+ScatterKV F16
+	// =====================================================================
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		b.RoPEScatterKVF16(qF16, kSrcF16, kCacheF16, vSrcF16, vCacheF16,
+			numQHeads, numKVHeads, headDim, 0, headDim, theta, maxSeqLen, 0)
+		b.EndBatch()
+	}
+	start := time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		b.RoPEScatterKVF16(qF16, kSrcF16, kCacheF16, vSrcF16, vCacheF16,
+			numQHeads, numKVHeads, headDim, i%maxSeqLen, headDim, theta, maxSeqLen, i%maxSeqLen)
+		b.EndBatch()
+	}
+	ropeScatterTime := time.Since(start).Seconds() / float64(iters)
+
+	// =====================================================================
+	// 2. SDPA F16 at ctx=16 and ctx=512
+	// =====================================================================
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		b.SDPAF16(qF16, kCacheF16, vCacheF16, sdpaOut, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+		b.EndBatch()
+	}
+	start = time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		b.SDPAF16(qF16, kCacheF16, vCacheF16, sdpaOut, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+		b.EndBatch()
+	}
+	sdpa16Time := time.Since(start).Seconds() / float64(iters)
+
+	kvLen512 := 512
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		b.SDPAF16(qF16, kCacheF16, vCacheF16, sdpaOut, kvLen512, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+		b.EndBatch()
+	}
+	start = time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		b.SDPAF16(qF16, kCacheF16, vCacheF16, sdpaOut, kvLen512, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+		b.EndBatch()
+	}
+	sdpa512Time := time.Since(start).Seconds() / float64(iters)
+
+	// =====================================================================
+	// 3. AddRMSNorm
+	// =====================================================================
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		b.AddRMSNorm(x, residual, normWeight, normOut, 1, hiddenSize, 1e-6)
+		b.EndBatch()
+	}
+	start = time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		b.AddRMSNorm(x, residual, normWeight, normOut, 1, hiddenSize, 1e-6)
+		b.EndBatch()
+	}
+	addRMSNormTime := time.Since(start).Seconds() / float64(iters)
+
+	// =====================================================================
+	// 4. Memory Barrier overhead (batched)
+	// =====================================================================
+	barriersPerLayer := 6
+	totalBarriers := barriersPerLayer * 32
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		for j := 0; j < totalBarriers; j++ {
+			b.MemoryBarrier()
+		}
+		b.EndBatch()
+	}
+	start = time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		for j := 0; j < totalBarriers; j++ {
+			b.MemoryBarrier()
+		}
+		b.EndBatch()
+	}
+	barrierTotalTime := time.Since(start).Seconds() / float64(iters)
+	barrierPerTime := barrierTotalTime / float64(totalBarriers)
+
+	// =====================================================================
+	// 5. BeginBatch/EndBatch overhead
+	// =====================================================================
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		b.EndBatch()
+	}
+	start = time.Now()
+	for i := 0; i < iters*5; i++ {
+		b.BeginBatch()
+		b.EndBatch()
+	}
+	batchOverhead := time.Since(start).Seconds() / float64(iters*5)
+
+	// =====================================================================
+	// Report
+	// =====================================================================
+	t.Logf("\n=== Non-MatVec Overhead Breakdown (LLaMA 2 7B Q4_0 decode) ===")
+	t.Logf("")
+	t.Logf("Per-dispatch latency (including BeginBatch/EndBatch):")
+	t.Logf("  RoPE+ScatterKV F16:  %.1f µs", ropeScatterTime*1e6)
+	t.Logf("  SDPA F16 (ctx=16):   %.1f µs", sdpa16Time*1e6)
+	t.Logf("  SDPA F16 (ctx=512):  %.1f µs", sdpa512Time*1e6)
+	t.Logf("  AddRMSNorm:          %.1f µs", addRMSNormTime*1e6)
+	t.Logf("  MemoryBarrier:       %.2f µs", barrierPerTime*1e6)
+	t.Logf("  BeginBatch/EndBatch: %.1f µs", batchOverhead*1e6)
+	t.Logf("")
+
+	// Per-token costs (× 32 layers)
+	numLayers := 32
+	ropeTotal := ropeScatterTime * float64(numLayers)
+	sdpa16Total := sdpa16Time * float64(numLayers)
+	sdpa512Total := sdpa512Time * float64(numLayers)
+	addNormTotal := addRMSNormTime * float64(numLayers)
+	barrierTotal := barrierPerTime * float64(totalBarriers)
+	batchTotal := batchOverhead // 1 batch per token
+
+	total16 := ropeTotal + sdpa16Total + addNormTotal + barrierTotal + batchTotal
+	total512 := ropeTotal + sdpa512Total + addNormTotal + barrierTotal + batchTotal
+
+	t.Logf("Per-token costs (× %d layers):", numLayers)
+	t.Logf("  RoPE+ScatterKV:  %.2f ms (×%d = %.1f µs each)", ropeTotal*1e3, numLayers, ropeScatterTime*1e6)
+	t.Logf("  SDPA F16@ctx16:  %.2f ms", sdpa16Total*1e3)
+	t.Logf("  SDPA F16@ctx512: %.2f ms", sdpa512Total*1e3)
+	t.Logf("  AddRMSNorm:      %.2f ms", addNormTotal*1e3)
+	t.Logf("  Barriers (%d):   %.2f ms", totalBarriers, barrierTotal*1e3)
+	t.Logf("  Batch overhead:  %.2f ms", batchTotal*1e3)
+	t.Logf("  ─────────────────────────")
+	t.Logf("  Total @ctx16:    %.2f ms", total16*1e3)
+	t.Logf("  Total @ctx512:   %.2f ms", total512*1e3)
+	t.Logf("")
+	t.Logf("Budget analysis (matvec ceiling from TestRealisticDecodeSimulation ≈ 10.86ms):")
+	matvecMs := 10.86
+	t.Logf("  Matvec:          %.2f ms", matvecMs)
+	t.Logf("  + Non-matvec:    %.2f ms (ctx=16)", total16*1e3)
+	t.Logf("  = Predicted:     %.2f ms → %.1f tok/s", matvecMs+total16*1e3, 1000.0/(matvecMs+total16*1e3))
+	t.Logf("  Actual decode:   ~14.3 ms → ~70 tok/s")
+	t.Logf("  llama.cpp:       13.11 ms → 76.3 tok/s")
+	unexplained := 14.3 - matvecMs - total16*1e3
+	if unexplained > 0 {
+		t.Logf("  Unexplained gap: %.2f ms (CGO overhead, batch encoding, pipeline switches?)", unexplained)
+	}
+
+	// =====================================================================
+	// 6. Batched non-matvec: all 32 layers in one command buffer
+	// This measures realistic amortized cost with GPU pipelining.
+	// =====================================================================
+	t.Logf("")
+	t.Logf("=== Batched Non-MatVec (32 layers in single command buffer) ===")
+
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			b.MemoryBarrier()
+			b.RoPEScatterKVF16(qF16, kSrcF16, kCacheF16, vSrcF16, vCacheF16,
+				numQHeads, numKVHeads, headDim, i%maxSeqLen, headDim, theta, maxSeqLen, i%maxSeqLen)
+			b.MemoryBarrier()
+			b.SDPAF16(qF16, kCacheF16, vCacheF16, sdpaOut, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+			b.MemoryBarrier()
+			// (Wo matvec would go here — skipped)
+			b.MemoryBarrier()
+			b.AddRMSNorm(x, residual, normWeight, normOut, 1, hiddenSize, 1e-6)
+			b.MemoryBarrier()
+			// (FusedMLP matvec would go here — skipped)
+			b.MemoryBarrier()
+			// (W2+Add2 matvec would go here — skipped)
+		}
+		b.EndBatch()
+	}
+
+	start = time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			b.MemoryBarrier()
+			b.RoPEScatterKVF16(qF16, kSrcF16, kCacheF16, vSrcF16, vCacheF16,
+				numQHeads, numKVHeads, headDim, i%maxSeqLen, headDim, theta, maxSeqLen, i%maxSeqLen)
+			b.MemoryBarrier()
+			b.SDPAF16(qF16, kCacheF16, vCacheF16, sdpaOut, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+			b.MemoryBarrier()
+			b.MemoryBarrier()
+			b.AddRMSNorm(x, residual, normWeight, normOut, 1, hiddenSize, 1e-6)
+			b.MemoryBarrier()
+			b.MemoryBarrier()
+		}
+		b.EndBatch()
+	}
+	batchedNonMatvec16 := time.Since(start).Seconds() / float64(iters)
+
+	// Same for ctx=512
+	start = time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			b.MemoryBarrier()
+			b.RoPEScatterKVF16(qF16, kSrcF16, kCacheF16, vSrcF16, vCacheF16,
+				numQHeads, numKVHeads, headDim, i%maxSeqLen, headDim, theta, maxSeqLen, i%maxSeqLen)
+			b.MemoryBarrier()
+			b.SDPAF16(qF16, kCacheF16, vCacheF16, sdpaOut, kvLen512, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+			b.MemoryBarrier()
+			b.MemoryBarrier()
+			b.AddRMSNorm(x, residual, normWeight, normOut, 1, hiddenSize, 1e-6)
+			b.MemoryBarrier()
+			b.MemoryBarrier()
+		}
+		b.EndBatch()
+	}
+	batchedNonMatvec512 := time.Since(start).Seconds() / float64(iters)
+
+	t.Logf("  Batched non-matvec @ctx16:   %.2f ms (vs %.2f ms individual sum)", batchedNonMatvec16*1e3, total16*1e3)
+	t.Logf("  Batched non-matvec @ctx512:  %.2f ms (vs %.2f ms individual sum)", batchedNonMatvec512*1e3, total512*1e3)
+	t.Logf("")
+	t.Logf("  Predicted decode @ctx16:  %.2f ms (matvec) + %.2f ms (non-matvec) = %.2f ms → %.1f tok/s",
+		matvecMs, batchedNonMatvec16*1e3, matvecMs+batchedNonMatvec16*1e3, 1000.0/(matvecMs+batchedNonMatvec16*1e3))
+	t.Logf("  Predicted decode @ctx512: %.2f ms (matvec) + %.2f ms (non-matvec) = %.2f ms → %.1f tok/s",
+		matvecMs, batchedNonMatvec512*1e3, matvecMs+batchedNonMatvec512*1e3, 1000.0/(matvecMs+batchedNonMatvec512*1e3))
+}
+
+// TestFusedVsPlainKernels benchmarks fused kernels against equivalent plain matvecs.
+// This measures the per-kernel overhead of fused operations.
+func TestFusedVsPlainKernels(t *testing.T) {
+	b, err := NewBackend(0)
+	if err != nil {
+		t.Skip("Metal not available")
+	}
+	defer b.Close()
+
+	// LLaMA 2 7B dims
+	hiddenSize := 4096
+	numKVHeads := 8
+	headDim := 128
+	kvDim := numKVHeads * headDim // 1024
+	intermediateSize := 11008
+	numLayers := 32
+
+	blockSize := 32
+	bytesPerBlock := 18
+	numBlocks4096 := (hiddenSize + blockSize - 1) / blockSize
+	numBlocks11008 := (intermediateSize + blockSize - 1) / blockSize
+
+	// DIFFERENT weights per layer to force device memory reads (no L2 cache reuse)
+	type layerW struct {
+		wq, wk, wv, wo, w1, w3, w2 tensor.DevicePtr
+		normWeight                  tensor.DevicePtr
+	}
+	layers := make([]layerW, numLayers)
+	for l := 0; l < numLayers; l++ {
+		layers[l].wq = b.Alloc(hiddenSize * numBlocks4096 * bytesPerBlock)
+		layers[l].wk = b.Alloc(kvDim * numBlocks4096 * bytesPerBlock)
+		layers[l].wv = b.Alloc(kvDim * numBlocks4096 * bytesPerBlock)
+		layers[l].wo = b.Alloc(hiddenSize * numBlocks4096 * bytesPerBlock)
+		layers[l].w1 = b.Alloc(intermediateSize * numBlocks4096 * bytesPerBlock)
+		layers[l].w3 = b.Alloc(intermediateSize * numBlocks4096 * bytesPerBlock)
+		layers[l].w2 = b.Alloc(hiddenSize * numBlocks11008 * bytesPerBlock)
+		layers[l].normWeight = b.Alloc(hiddenSize * 4)
+	}
+
+	// Activations
+	x := b.Alloc(hiddenSize * 4)
+	qOut := b.Alloc(hiddenSize * 4) // F32
+	kOut := b.Alloc(kvDim * 4)      // F32
+	vOut := b.Alloc(kvDim * 4)      // F32
+	qF16 := b.Alloc(hiddenSize * 2) // F16
+	kF16 := b.Alloc(kvDim * 2)      // F16
+	vF16 := b.Alloc(kvDim * 2)      // F16
+	gate := b.Alloc(intermediateSize * 4)
+	mlpOut := b.Alloc(hiddenSize * 4)
+	residual := b.Alloc(hiddenSize * 4)
+	normOut := b.Alloc(hiddenSize * 4)
+
+	iters := 20
+	warmup := 5
+
+	// =====================================================================
+	// 1. FusedRMSNormQKV_F16 (1 dispatch) vs 3× MatMulQ4_0 (3 dispatches)
+	// =====================================================================
+	qkvWeightBytes := float64(hiddenSize+kvDim+kvDim) * float64(numBlocks4096) * float64(bytesPerBlock)
+
+	// Plain: 3 separate MatMulQ4_0
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0(x, lw.wq, qOut, 1, hiddenSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.wk, kOut, 1, kvDim, hiddenSize)
+			b.MatMulQ4_0(x, lw.wv, vOut, 1, kvDim, hiddenSize)
+		}
+		b.EndBatch()
+	}
+	start := time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0(x, lw.wq, qOut, 1, hiddenSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.wk, kOut, 1, kvDim, hiddenSize)
+			b.MatMulQ4_0(x, lw.wv, vOut, 1, kvDim, hiddenSize)
+		}
+		b.EndBatch()
+	}
+	plainQKVTime := time.Since(start).Seconds() / float64(iters)
+	plainQKVPerLayer := plainQKVTime / float64(numLayers)
+
+	// Fused: FusedRMSNormQKV_F16 (1 dispatch)
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0_FusedRMSNormQKV_F16(x, lw.normWeight, lw.wq, lw.wk, lw.wv, qF16, kF16, vF16,
+				hiddenSize, kvDim, hiddenSize, 1e-6)
+		}
+		b.EndBatch()
+	}
+	start = time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0_FusedRMSNormQKV_F16(x, lw.normWeight, lw.wq, lw.wk, lw.wv, qF16, kF16, vF16,
+				hiddenSize, kvDim, hiddenSize, 1e-6)
+		}
+		b.EndBatch()
+	}
+	fusedQKVTime := time.Since(start).Seconds() / float64(iters)
+	fusedQKVPerLayer := fusedQKVTime / float64(numLayers)
+
+	t.Logf("=== FusedRMSNormQKV_F16 vs 3× plain MatMulQ4_0 (×%d layers, DIFFERENT weights) ===", numLayers)
+	t.Logf("  3× plain MatMulQ4_0:       %.2f ms total, %.1f µs/layer (%.1f GB/s)",
+		plainQKVTime*1e3, plainQKVPerLayer*1e6, qkvWeightBytes/plainQKVPerLayer/1e9)
+	t.Logf("  FusedRMSNormQKV_F16:       %.2f ms total, %.1f µs/layer (%.1f GB/s)",
+		fusedQKVTime*1e3, fusedQKVPerLayer*1e6, qkvWeightBytes/fusedQKVPerLayer/1e9)
+	t.Logf("  Ratio: %.2fx (fused/plain)", fusedQKVPerLayer/plainQKVPerLayer)
+
+	// =====================================================================
+	// 2. FusedMLP (1 dispatch) vs 2× MatMulQ4_0 (2 dispatches)
+	// =====================================================================
+	mlpWeightBytes := float64(2*intermediateSize) * float64(numBlocks4096) * float64(bytesPerBlock)
+
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0(x, lw.w1, gate, 1, intermediateSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.w3, gate, 1, intermediateSize, hiddenSize)
+		}
+		b.EndBatch()
+	}
+	start = time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0(x, lw.w1, gate, 1, intermediateSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.w3, gate, 1, intermediateSize, hiddenSize)
+		}
+		b.EndBatch()
+	}
+	plainMLPTime := time.Since(start).Seconds() / float64(iters)
+	plainMLPPerLayer := plainMLPTime / float64(numLayers)
+
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0_FusedMLP(x, lw.w1, lw.w3, gate, 1, intermediateSize, hiddenSize)
+		}
+		b.EndBatch()
+	}
+	start = time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0_FusedMLP(x, lw.w1, lw.w3, gate, 1, intermediateSize, hiddenSize)
+		}
+		b.EndBatch()
+	}
+	fusedMLPTime := time.Since(start).Seconds() / float64(iters)
+	fusedMLPPerLayer := fusedMLPTime / float64(numLayers)
+
+	t.Logf("")
+	t.Logf("=== FusedMLP vs 2× plain MatMulQ4_0 (×%d layers, DIFFERENT weights) ===", numLayers)
+	t.Logf("  2× plain MatMulQ4_0:  %.2f ms total, %.1f µs/layer (%.1f GB/s)",
+		plainMLPTime*1e3, plainMLPPerLayer*1e6, mlpWeightBytes/plainMLPPerLayer/1e9)
+	t.Logf("  FusedMLP:             %.2f ms total, %.1f µs/layer (%.1f GB/s)",
+		fusedMLPTime*1e3, fusedMLPPerLayer*1e6, mlpWeightBytes/fusedMLPPerLayer/1e9)
+	t.Logf("  Ratio: %.2fx (fused/plain)", fusedMLPPerLayer/plainMLPPerLayer)
+
+	// =====================================================================
+	// 3. W2+Add2 (1 dispatch) vs plain MatMulQ4_0 (1 dispatch)
+	// =====================================================================
+	w2WeightBytes := float64(hiddenSize) * float64(numBlocks11008) * float64(bytesPerBlock)
+
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0(gate, lw.w2, mlpOut, 1, hiddenSize, intermediateSize)
+		}
+		b.EndBatch()
+	}
+	start = time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0(gate, lw.w2, mlpOut, 1, hiddenSize, intermediateSize)
+		}
+		b.EndBatch()
+	}
+	plainW2Time := time.Since(start).Seconds() / float64(iters)
+	plainW2PerLayer := plainW2Time / float64(numLayers)
+
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0_Add(gate, lw.w2, mlpOut, hiddenSize, intermediateSize)
+		}
+		b.EndBatch()
+	}
+	start = time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0_Add(gate, lw.w2, mlpOut, hiddenSize, intermediateSize)
+		}
+		b.EndBatch()
+	}
+	fusedW2Time := time.Since(start).Seconds() / float64(iters)
+	fusedW2PerLayer := fusedW2Time / float64(numLayers)
+
+	t.Logf("")
+	t.Logf("=== W2+Add2 vs plain MatMulQ4_0 (×%d layers, DIFFERENT weights) ===", numLayers)
+	t.Logf("  plain MatMulQ4_0:  %.2f ms total, %.1f µs/layer (%.1f GB/s)",
+		plainW2Time*1e3, plainW2PerLayer*1e6, w2WeightBytes/plainW2PerLayer/1e9)
+	t.Logf("  W2+Add2 (fused):   %.2f ms total, %.1f µs/layer (%.1f GB/s)",
+		fusedW2Time*1e3, fusedW2PerLayer*1e6, w2WeightBytes/fusedW2PerLayer/1e9)
+	t.Logf("  Ratio: %.2fx (fused/plain)", fusedW2PerLayer/plainW2PerLayer)
+
+	// =====================================================================
+	// 4. AddRMSNorm timing (batched across layers)
+	// =====================================================================
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.AddRMSNorm(x, residual, lw.normWeight, normOut, 1, hiddenSize, 1e-6)
+		}
+		b.EndBatch()
+	}
+	start = time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.AddRMSNorm(x, residual, lw.normWeight, normOut, 1, hiddenSize, 1e-6)
+		}
+		b.EndBatch()
+	}
+	addNormTime := time.Since(start).Seconds() / float64(iters)
+	addNormPerLayer := addNormTime / float64(numLayers)
+
+	t.Logf("")
+	t.Logf("=== AddRMSNorm (×%d layers batched) ===", numLayers)
+	t.Logf("  Total: %.2f ms, %.1f µs/layer", addNormTime*1e3, addNormPerLayer*1e6)
+
+	// =====================================================================
+	// Summary: estimated cost of fused path overhead
+	// =====================================================================
+	fusedOverheadQKV := (fusedQKVPerLayer - plainQKVPerLayer) * float64(numLayers)
+	fusedOverheadMLP := (fusedMLPPerLayer - plainMLPPerLayer) * float64(numLayers)
+	fusedOverheadW2 := (fusedW2PerLayer - plainW2PerLayer) * float64(numLayers)
+	totalFusedOverhead := fusedOverheadQKV + fusedOverheadMLP + fusedOverheadW2
+
+	t.Logf("")
+	t.Logf("=== Fused Kernel Overhead Summary ===")
+	t.Logf("  QKV fused overhead:  %+.2f ms (%+.1f µs/layer)", fusedOverheadQKV*1e3, (fusedQKVPerLayer-plainQKVPerLayer)*1e6)
+	t.Logf("  MLP fused overhead:  %+.2f ms (%+.1f µs/layer)", fusedOverheadMLP*1e3, (fusedMLPPerLayer-plainMLPPerLayer)*1e6)
+	t.Logf("  W2+Add2 overhead:    %+.2f ms (%+.1f µs/layer)", fusedOverheadW2*1e3, (fusedW2PerLayer-plainW2PerLayer)*1e6)
+	t.Logf("  Total fused overhead: %+.2f ms per token", totalFusedOverhead*1e3)
+}
+
+// TestFullPipelineSimulation simulates the COMPLETE fused decode pipeline:
+// matvec + non-matvec + barriers interleaved exactly as in the real pipeline.
+// This captures the pipeline stall cost that simple sum-of-parts misses.
+func TestFullPipelineSimulation(t *testing.T) {
+	backend, err := NewBackend(0)
+	if err != nil {
+		t.Skip("Metal not available")
+	}
+	defer backend.Close()
+
+	// LLaMA 2 7B Q4_0 config
+	numLayers := 32
+	hiddenSize := 4096
+	numKVHeads := 8
+	numQHeads := 32
+	headDim := 128
+	intermediateSize := 11008
+
+	blockSize := 32
+	bytesPerBlock := 18
+	numBlocks4096 := (hiddenSize + blockSize - 1) / blockSize
+	numBlocks11008 := (intermediateSize + blockSize - 1) / blockSize
+
+	// Per-layer weights (DIFFERENT per layer to prevent L2 reuse)
+	type layerW struct {
+		wq, wk, wv, wo, w1, w3, w2 tensor.DevicePtr
+	}
+
+	layers := make([]layerW, numLayers)
+	var totalWeightBytes int64
+	kvDim := numKVHeads * headDim
+	for l := 0; l < numLayers; l++ {
+		wqSize := hiddenSize * numBlocks4096 * bytesPerBlock
+		wkSize := kvDim * numBlocks4096 * bytesPerBlock
+		w1Size := intermediateSize * numBlocks4096 * bytesPerBlock
+		w2Size := hiddenSize * numBlocks11008 * bytesPerBlock
+
+		layers[l].wq = backend.Alloc(wqSize)
+		layers[l].wk = backend.Alloc(wkSize)
+		layers[l].wv = backend.Alloc(wkSize)
+		layers[l].wo = backend.Alloc(wqSize)
+		layers[l].w1 = backend.Alloc(w1Size)
+		layers[l].w3 = backend.Alloc(w1Size)
+		layers[l].w2 = backend.Alloc(w2Size)
+		totalWeightBytes += int64(wqSize*2 + wkSize*2 + w1Size*2 + w2Size)
+	}
+	lmHead := backend.Alloc(32000 * numBlocks4096 * bytesPerBlock)
+	totalWeightBytes += int64(32000 * numBlocks4096 * bytesPerBlock)
+
+	// Activations
+	x := backend.Alloc(hiddenSize * 4)
+	residual := backend.Alloc(hiddenSize * 4)
+	normWeight := backend.Alloc(hiddenSize * 4)
+	normOut := backend.Alloc(hiddenSize * 4)
+	qF16 := backend.Alloc(numQHeads * headDim * 2)
+	kSrcF16 := backend.Alloc(numKVHeads * headDim * 2)
+	vSrcF16 := backend.Alloc(numKVHeads * headDim * 2)
+	maxSeqLen := 2048
+	kvHeadStride := maxSeqLen * headDim
+	kCacheF16 := backend.Alloc(numKVHeads * maxSeqLen * headDim * 2)
+	vCacheF16 := backend.Alloc(numKVHeads * maxSeqLen * headDim * 2)
+	sdpaOut := backend.Alloc(numQHeads * headDim * 2)
+	gate := backend.Alloc(intermediateSize * 4)
+	mlpOut := backend.Alloc(hiddenSize * 4)
+	lmOut := backend.Alloc(32000 * 4)
+
+	theta := float32(10000.0)
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+	warmup := 3
+	iters := 20
+
+	t.Logf("Total weight memory: %.2f GB", float64(totalWeightBytes)/1e9)
+
+	for _, kvLen := range []int{16, 512} {
+		name := fmt.Sprintf("ctx=%d", kvLen)
+		t.Run(name, func(t *testing.T) {
+			// Full pipeline dispatch sequence per layer (matching real fused path):
+			//  1. FusedRMSNormQKV_F16 (1 dispatch — norm + Q/K/V)
+			//  2. barrier
+			//  3. RoPE+ScatterKV
+			//  4. barrier
+			//  5. SDPA F16
+			//  6. barrier
+			//  7. Wo (matvec)
+			//  8. barrier
+			//  9. AddRMSNorm
+			// 10. barrier
+			// 11. FusedMLP (1 dispatch — W1+W3+SiLU)
+			// 12. barrier
+			// 13. W2+Add2 (1 dispatch — matvec + residual add)
+
+			dispatch := func(iter int) {
+				backend.BeginBatch()
+				for l := 0; l < numLayers; l++ {
+					lw := layers[l]
+					// Phase 1: FusedRMSNormQKV_F16 (1 dispatch for norm + Q + K + V)
+					backend.MatMulQ4_0_FusedRMSNormQKV_F16(x, normWeight,
+						lw.wq, lw.wk, lw.wv, qF16, kSrcF16, vSrcF16,
+						hiddenSize, kvDim, hiddenSize, 1e-6)
+					// barrier
+					backend.MemoryBarrier()
+					// Phase 2: RoPE+ScatterKV
+					backend.RoPEScatterKVF16(qF16, kSrcF16, kCacheF16, vSrcF16, vCacheF16,
+						numQHeads, numKVHeads, headDim, iter%maxSeqLen, headDim, theta, maxSeqLen, iter%maxSeqLen)
+					// barrier
+					backend.MemoryBarrier()
+					// Phase 3: SDPA
+					backend.SDPAF16(qF16, kCacheF16, vCacheF16, sdpaOut, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+					// barrier
+					backend.MemoryBarrier()
+					// Phase 4: Wo (plain matvec — real pipeline may use F16In variant)
+					backend.MatMulQ4_0(x, lw.wo, x, 1, hiddenSize, hiddenSize)
+					// barrier
+					backend.MemoryBarrier()
+					// Phase 5: AddRMSNorm
+					backend.AddRMSNorm(x, residual, normWeight, normOut, 1, hiddenSize, 1e-6)
+					// barrier
+					backend.MemoryBarrier()
+					// Phase 6: FusedMLP (W1+W3+SiLU in one dispatch)
+					backend.MatMulQ4_0_FusedMLP(x, lw.w1, lw.w3, gate, 1, intermediateSize, hiddenSize)
+					// barrier
+					backend.MemoryBarrier()
+					// Phase 7: W2+Add2 (matvec + residual add)
+					backend.MatMulQ4_0_Add(gate, lw.w2, mlpOut, hiddenSize, intermediateSize)
+				}
+				// LM head
+				backend.MatMulQ4_0(x, lmHead, lmOut, 1, 32000, hiddenSize)
+				backend.EndBatch()
+				backend.Sync()
+			}
+
+			// Warmup
+			for i := 0; i < warmup; i++ {
+				dispatch(i)
+			}
+
+			// Measure
+			start := time.Now()
+			for i := 0; i < iters; i++ {
+				dispatch(i)
+			}
+			elapsed := time.Since(start)
+
+			perToken := elapsed.Seconds() / float64(iters)
+			gbps := float64(totalWeightBytes) / perToken / 1e9
+			toksPerSec := 1.0 / perToken
+
+			t.Logf("\n=== Full Pipeline Simulation (LLaMA 2 7B Q4_0, %s) ===", name)
+			t.Logf("  Per-token time: %.2f ms", perToken*1e3)
+			t.Logf("  Effective BW:   %.1f GB/s (%.1f%% of 400 GB/s)", gbps, gbps/400*100)
+			t.Logf("  Throughput:     %.1f tok/s", toksPerSec)
+			t.Logf("")
+			t.Logf("  llama.cpp target: 76.3 tok/s = 13.11 ms")
+			gap := 13.11 - perToken*1e3
+			if gap > 0 {
+				t.Logf("  ✓ Ahead by %.2f ms (%.1f tok/s surplus)", gap, toksPerSec-76.3)
+			} else {
+				t.Logf("  ✗ Behind by %.2f ms", -gap)
+			}
+			t.Logf("  MLX target: 83.5 tok/s = 11.98 ms")
+		})
+	}
+}
+
+// TestPipelineSimulationAccurate is a more realistic simulation that matches the actual
+// decode pipeline exactly: per-layer KV caches, F16In Wo kernel, extra inter-layer barriers,
+// and final RMSNorm. Compares with the simpler simulation to identify GPU-side overhead.
+func TestPipelineSimulationAccurate(t *testing.T) {
+	backend, err := NewBackend(0)
+	if err != nil {
+		t.Fatalf("NewBackend: %v", err)
+	}
+	defer backend.Close()
+
+	// LLaMA 2 7B Q4_0 config
+	numLayers := 32
+	hiddenSize := 4096
+	numQHeads := 32
+	numKVHeads := 32
+	headDim := 128
+	intermediateSize := 11008
+
+	// Q4_0 sizes
+	bytesPerBlock := 18
+	elemsPerBlock := 32
+	numBlocks4096 := hiddenSize / elemsPerBlock
+	numBlocks11008 := intermediateSize / elemsPerBlock
+
+	// Per-layer weights
+	type layerW struct {
+		wq, wk, wv, wo, w1, w3, w2 tensor.DevicePtr
+	}
+	layers := make([]layerW, numLayers)
+	kvDim := numKVHeads * headDim
+	for l := 0; l < numLayers; l++ {
+		wqSize := hiddenSize * numBlocks4096 * bytesPerBlock
+		wkSize := kvDim * numBlocks4096 * bytesPerBlock
+		w1Size := intermediateSize * numBlocks4096 * bytesPerBlock
+		w2Size := hiddenSize * numBlocks11008 * bytesPerBlock
+		layers[l].wq = backend.Alloc(wqSize)
+		layers[l].wk = backend.Alloc(wkSize)
+		layers[l].wv = backend.Alloc(wkSize)
+		layers[l].wo = backend.Alloc(wqSize)
+		layers[l].w1 = backend.Alloc(w1Size)
+		layers[l].w3 = backend.Alloc(w1Size)
+		layers[l].w2 = backend.Alloc(w2Size)
+	}
+	lmHead := backend.Alloc(32000 * numBlocks4096 * bytesPerBlock)
+
+	// Activations
+	x := backend.Alloc(hiddenSize * 4)
+	residual := backend.Alloc(hiddenSize * 4)
+	normWeight := backend.Alloc(hiddenSize * 4)
+	normOut := backend.Alloc(hiddenSize * 4)
+	woOut := backend.Alloc(hiddenSize * 4)
+	qF16 := backend.Alloc(numQHeads * headDim * 2)
+	kSrcF16 := backend.Alloc(numKVHeads * headDim * 2)
+	vSrcF16 := backend.Alloc(numKVHeads * headDim * 2)
+	sdpaOut := backend.Alloc(numQHeads * headDim * 2)
+	gate := backend.Alloc(intermediateSize * 4)
+	mlpOut := backend.Alloc(hiddenSize * 4)
+	lmOut := backend.Alloc(32000 * 4)
+
+	// Per-layer KV caches (matching actual decode — 32 separate KV cache pairs)
+	maxSeqLen := 2048
+	kvHeadStride := maxSeqLen * headDim
+	type layerKV struct {
+		kCache, vCache tensor.DevicePtr
+	}
+	kvCaches := make([]layerKV, numLayers)
+	for l := 0; l < numLayers; l++ {
+		kvCaches[l].kCache = backend.Alloc(numKVHeads * maxSeqLen * headDim * 2)
+		kvCaches[l].vCache = backend.Alloc(numKVHeads * maxSeqLen * headDim * 2)
+	}
+
+	theta := float32(10000.0)
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+
+	kvLen := 16
+	warmup := 3
+	iters := 20
+
+	// Simple simulation (same as TestFullPipelineSimulation)
+	simpleDispatch := func(iter int) {
+		backend.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			backend.MatMulQ4_0_FusedRMSNormQKV_F16(x, normWeight,
+				lw.wq, lw.wk, lw.wv, qF16, kSrcF16, vSrcF16,
+				hiddenSize, kvDim, hiddenSize, 1e-6)
+			backend.MemoryBarrier()
+			backend.RoPEScatterKVF16(qF16, kSrcF16, kvCaches[0].kCache, vSrcF16, kvCaches[0].vCache,
+				numQHeads, numKVHeads, headDim, iter%maxSeqLen, headDim, theta, maxSeqLen, iter%maxSeqLen)
+			backend.MemoryBarrier()
+			backend.SDPAF16(qF16, kvCaches[0].kCache, kvCaches[0].vCache, sdpaOut,
+				kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+			backend.MemoryBarrier()
+			backend.MatMulQ4_0(x, lw.wo, x, 1, hiddenSize, hiddenSize)
+			backend.MemoryBarrier()
+			backend.AddRMSNorm(x, residual, normWeight, normOut, 1, hiddenSize, 1e-6)
+			backend.MemoryBarrier()
+			backend.MatMulQ4_0_FusedMLP(x, lw.w1, lw.w3, gate, 1, intermediateSize, hiddenSize)
+			backend.MemoryBarrier()
+			backend.MatMulQ4_0_Add(gate, lw.w2, mlpOut, hiddenSize, intermediateSize)
+		}
+		backend.MatMulQ4_0(x, lmHead, lmOut, 1, 32000, hiddenSize)
+		backend.EndBatch()
+		backend.Sync()
+	}
+
+	// Accurate simulation (matching actual decode pipeline)
+	accurateDispatch := func(iter int) {
+		backend.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			lkv := kvCaches[l] // Per-layer KV cache (like actual decode)
+
+			backend.MatMulQ4_0_FusedRMSNormQKV_F16(x, normWeight,
+				lw.wq, lw.wk, lw.wv, qF16, kSrcF16, vSrcF16,
+				hiddenSize, kvDim, hiddenSize, 1e-6)
+			backend.MemoryBarrier()
+			backend.RoPEScatterKVF16(qF16, kSrcF16, lkv.kCache, vSrcF16, lkv.vCache,
+				numQHeads, numKVHeads, headDim, iter%maxSeqLen, headDim, theta, maxSeqLen, iter%maxSeqLen)
+			backend.MemoryBarrier()
+			backend.SDPAF16(qF16, lkv.kCache, lkv.vCache, sdpaOut,
+				kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+			backend.MemoryBarrier()
+			// Use F16In Wo (matching actual decode FP16 path)
+			backend.MatMulQ4_0_F16In(sdpaOut, lw.wo, woOut, hiddenSize, numQHeads*headDim)
+			backend.MemoryBarrier()
+			backend.AddRMSNorm(woOut, x, normWeight, normOut, 1, hiddenSize, 1e-6)
+			backend.MemoryBarrier()
+			backend.MatMulQ4_0_FusedMLP(normOut, lw.w1, lw.w3, gate, 1, intermediateSize, hiddenSize)
+			backend.MemoryBarrier()
+			backend.MatMulQ4_0_Add(gate, lw.w2, x, hiddenSize, intermediateSize)
+			// Extra barrier (from nested EndBatch in actual decode)
+			backend.MemoryBarrier()
+		}
+		// Final RMSNorm (matching actual decode)
+		backend.RMSNorm(x, normWeight, normOut, 1, hiddenSize, 1e-6)
+		backend.MemoryBarrier()
+		backend.MatMulQ4_0(normOut, lmHead, lmOut, 1, 32000, hiddenSize)
+		backend.EndBatch()
+		backend.Sync()
+	}
+
+	// Warmup both
+	for i := 0; i < warmup; i++ {
+		simpleDispatch(i)
+		accurateDispatch(i)
+	}
+
+	// Measure simple
+	start := time.Now()
+	for i := 0; i < iters; i++ {
+		simpleDispatch(i)
+	}
+	simpleMs := float64(time.Since(start).Microseconds()) / 1000.0 / float64(iters)
+
+	// Measure accurate
+	start = time.Now()
+	for i := 0; i < iters; i++ {
+		accurateDispatch(i)
+	}
+	accurateMs := float64(time.Since(start).Microseconds()) / 1000.0 / float64(iters)
+
+	t.Logf("\n=== Pipeline Simulation Comparison (ctx=%d) ===", kvLen)
+	t.Logf("  Simple (shared KV, FP32 Wo):    %.2f ms (%.1f tok/s)", simpleMs, 1000.0/simpleMs)
+	t.Logf("  Accurate (per-layer KV, F16In):  %.2f ms (%.1f tok/s)", accurateMs, 1000.0/accurateMs)
+	t.Logf("  Delta: %.2f ms", accurateMs-simpleMs)
+	if accurateMs > simpleMs {
+		t.Logf("  Per-layer KV + accurate pipeline costs %.2f ms extra", accurateMs-simpleMs)
+	}
 }

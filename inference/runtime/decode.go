@@ -5,11 +5,54 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sync/atomic"
+	"time"
 
 	"vexel/inference/backend"
 	"vexel/inference/memory"
 	"vexel/inference/tensor"
 )
+
+// Decode timing instrumentation — activated by EnableDecodeTiming().
+// Measures Go-side overhead vs GPU execution time to identify bottlenecks.
+// The "layers" measurement captures Go overhead + Metal command encoding
+// (NOT GPU execution), since all dispatches are batched into one command buffer.
+// The "post" measurement captures final norm + lm_head encoding + GPU Sync
+// (which is where ALL GPU execution time appears).
+var (
+	decodeTimingActive atomic.Bool
+	decodeTimingCount  atomic.Int64
+	decodeTimingSetup  atomic.Int64 // nanoseconds: ResetPool + embedding + alloc
+	decodeTimingLayers atomic.Int64 // nanoseconds: layer loop (Go overhead + Metal encoding)
+	decodeTimingPost   atomic.Int64 // nanoseconds: final norm + lm_head + Sync (includes GPU exec)
+	decodeTimingTotal  atomic.Int64 // nanoseconds: entire DecodeWithGPUKV
+)
+
+func init() {
+	if os.Getenv("VEXEL_DECODE_TIMING") == "1" {
+		decodeTimingActive.Store(true)
+	}
+}
+
+// EnableDecodeTiming activates decode timing instrumentation.
+func EnableDecodeTiming() { decodeTimingActive.Store(true) }
+
+// DisableDecodeTiming deactivates decode timing instrumentation.
+func DisableDecodeTiming() { decodeTimingActive.Store(false) }
+
+// PrintDecodeTiming prints accumulated decode timing statistics and resets counters.
+func PrintDecodeTiming() {
+	n := decodeTimingCount.Swap(0)
+	if n == 0 {
+		return
+	}
+	setup := float64(decodeTimingSetup.Swap(0)) / 1e6 / float64(n)
+	layers := float64(decodeTimingLayers.Swap(0)) / 1e6 / float64(n)
+	post := float64(decodeTimingPost.Swap(0)) / 1e6 / float64(n)
+	total := float64(decodeTimingTotal.Swap(0)) / 1e6 / float64(n)
+	fmt.Printf("[DECODE TIMING] n=%d avg: setup=%.3fms layers=%.3fms post=%.3fms total=%.3fms\n",
+		n, setup, layers, post, total)
+}
 
 // Debug flag - set DEBUG_DECODE=1 to enable
 // Using a function to check at runtime instead of package init
@@ -407,8 +450,14 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 		return tensor.Tensor{}, fmt.Errorf("GPU KV cache not initialized")
 	}
 
+	// Timing instrumentation
+	var tStart time.Time
+	if decodeTimingActive.Load() {
+		tStart = time.Now()
+	}
+
 	// Check debug at runtime
-	debugNow := os.Getenv("DEBUG_DECODE") == "1"
+	debugNow := debugDecode
 	if debugNow {
 		fmt.Printf("[DECODE-GPU] ENTERING DecodeWithGPUKV tokens=%v pos=%d debugDecode=%v\n", tokens, pos, debugDecode)
 	}
@@ -473,10 +522,17 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 	// Cross-layer batching: wrap all layers in a single command buffer.
 	// Per-layer BeginBatch/EndBatch calls become nested (refcounted) no-ops,
 	// and the entire forward pass uses one CB with memory barriers between layers.
-	if batcher, ok := m.backend.(backend.Batcher); ok && os.Getenv("VEXEL_GPU_PROFILE") != "1" {
+	if batcher, ok := m.backend.(backend.Batcher); ok && !cachedGPUProfile {
 		batcher.BeginBatch()
 		defer batcher.EndBatch()
 	}
+
+	// Timing: mark end of setup, start of layer loop
+	var tLayersStart time.Time
+	if decodeTimingActive.Load() {
+		tLayersStart = time.Now()
+	}
+
 	if debugNow {
 		fmt.Printf("[DEBUG] debugNow=%v, debugDecode=%v, layers=%d\n", debugNow, debugDecode, len(m.layers))
 	}
@@ -490,6 +546,12 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 			m.backend.Sync()
 			debugTensor(fmt.Sprintf("[GPU] After Layer %d", i), m.backend, state.DevicePtr(), batchSize*hiddenSize)
 		}
+	}
+
+	// Timing: mark end of layer loop
+	var tLayersEnd time.Time
+	if decodeTimingActive.Load() {
+		tLayersEnd = time.Now()
 	}
 
 	if debugDecode {
@@ -530,6 +592,16 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 	m.outputHeadMatMul(lastStatePtr, logitsPtr, 1, vocabSize, hiddenSize)
 
 	m.backend.Sync()
+
+	// Timing: record all sections
+	if decodeTimingActive.Load() {
+		tEnd := time.Now()
+		decodeTimingCount.Add(1)
+		decodeTimingSetup.Add(tLayersStart.Sub(tStart).Nanoseconds())
+		decodeTimingLayers.Add(tLayersEnd.Sub(tLayersStart).Nanoseconds())
+		decodeTimingPost.Add(tEnd.Sub(tLayersEnd).Nanoseconds())
+		decodeTimingTotal.Add(tEnd.Sub(tStart).Nanoseconds())
+	}
 
 	if debugDecode {
 		debugLogits(m.backend, logitsPtr, vocabSize)

@@ -311,6 +311,55 @@ func TestThroughputGPUProfile(t *testing.T) {
 	}
 }
 
+// TestDecodeTimingBreakdown measures where time is spent in the decode pipeline.
+// Separates Go-side overhead (setup, layer loop encoding) from GPU execution.
+// Requires VEXEL_DECODE_TIMING=1 to activate detailed timing in DecodeWithGPUKV.
+func TestDecodeTimingBreakdown(t *testing.T) {
+	runtime.EnableDecodeTiming()
+	defer runtime.DisableDecodeTiming()
+
+	// Reset any prior timing data
+	runtime.PrintDecodeTiming()
+
+	m, b, c := setupModel(t, false)
+	defer b.Close()
+	defer c.Free()
+
+	// Fill some context
+	ctxLen := 16
+	fillToks := generateTokenSequence(ctxLen)
+	logits := getLogits(t, m, b, fillToks, 0)
+	nextToken := argmax(logits)
+	pos := ctxLen
+
+	// Warmup
+	for w := 0; w < 5; w++ {
+		logits = getLogits(t, m, b, []int{nextToken}, pos)
+		nextToken = argmax(logits)
+		pos++
+	}
+
+	// Reset timing counters after warmup
+	runtime.PrintDecodeTiming()
+
+	// Measure 30 tokens
+	const n = 30
+	start := time.Now()
+	for i := 0; i < n; i++ {
+		logits = getLogits(t, m, b, []int{nextToken}, pos)
+		nextToken = argmax(logits)
+		pos++
+	}
+	elapsed := time.Since(start)
+
+	tps := float64(n) / elapsed.Seconds()
+	avgMs := float64(elapsed.Microseconds()) / 1000.0 / float64(n)
+	t.Logf("Overall: %.1f tok/s (%.2f ms/token, n=%d)", tps, avgMs, n)
+
+	// Print timing breakdown
+	runtime.PrintDecodeTiming()
+}
+
 // --- Helpers ---
 
 type prefillResult struct {
