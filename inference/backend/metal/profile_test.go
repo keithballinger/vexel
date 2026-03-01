@@ -1328,7 +1328,7 @@ func TestFullPipelineSimulation(t *testing.T) {
 	// LLaMA 2 7B Q4_0 config
 	numLayers := 32
 	hiddenSize := 4096
-	numKVHeads := 8
+	numKVHeads := 32 // LLaMA 2 7B is MHA (not GQA)
 	numQHeads := 32
 	headDim := 128
 	intermediateSize := 11008
@@ -1647,5 +1647,305 @@ func TestPipelineSimulationAccurate(t *testing.T) {
 	t.Logf("  Delta: %.2f ms", accurateMs-simpleMs)
 	if accurateMs > simpleMs {
 		t.Logf("  Per-layer KV + accurate pipeline costs %.2f ms extra", accurateMs-simpleMs)
+	}
+}
+
+// TestSDPAContextScaling benchmarks the SDPA flash decode F16 kernel in isolation
+// at various context lengths to identify if context degradation is from SDPA or matvec.
+func TestSDPAContextScaling(t *testing.T) {
+	backend, err := NewBackend(0)
+	if err != nil {
+		t.Fatalf("NewBackend: %v", err)
+	}
+	defer backend.Close()
+
+	numQHeads := 32
+	numKVHeads := 32
+	headDim := 128
+	maxSeqLen := 2048
+	kvHeadStride := maxSeqLen * headDim
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+
+	qF16 := backend.Alloc(numQHeads * headDim * 2)
+	kCacheF16 := backend.Alloc(numKVHeads * maxSeqLen * headDim * 2)
+	vCacheF16 := backend.Alloc(numKVHeads * maxSeqLen * headDim * 2)
+	sdpaOut := backend.Alloc(numQHeads * headDim * 2)
+
+	warmup := 5
+	iters := 100
+
+	for _, kvLen := range []int{1, 16, 64, 128, 256, 512, 1024} {
+		// Warmup
+		for i := 0; i < warmup; i++ {
+			backend.SDPAF16(qF16, kCacheF16, vCacheF16, sdpaOut,
+				kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+			backend.Sync()
+		}
+
+		// Measure
+		start := time.Now()
+		for i := 0; i < iters; i++ {
+			backend.SDPAF16(qF16, kCacheF16, vCacheF16, sdpaOut,
+				kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+			backend.Sync()
+		}
+		elapsed := time.Since(start)
+		usPerCall := float64(elapsed.Microseconds()) / float64(iters)
+
+		t.Logf("  kvLen=%4d: %.1f µs (%.3f ms) per SDPA call  [×32 layers = %.2f ms total]",
+			kvLen, usPerCall, usPerCall/1000, usPerCall*32/1000)
+	}
+}
+
+// TestSDPAContextScalingBatched measures SDPA F16 scaling within a batched command buffer,
+// matching how it runs in the actual decode pipeline (32 calls batched together).
+// Compares the standard flash decode vs the tiled split-K variant at each context length.
+func TestSDPAContextScalingBatched(t *testing.T) {
+	backend, err := NewBackend(0)
+	if err != nil {
+		t.Fatalf("NewBackend: %v", err)
+	}
+	defer backend.Close()
+
+	numQHeads := 32
+	numKVHeads := 32
+	headDim := 128
+	maxSeqLen := 2048
+	kvHeadStride := maxSeqLen * headDim
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+	numLayers := 32
+
+	qF16 := backend.Alloc(numQHeads * headDim * 2)
+	kCacheF16 := backend.Alloc(numKVHeads * maxSeqLen * headDim * 2)
+	vCacheF16 := backend.Alloc(numKVHeads * maxSeqLen * headDim * 2)
+	sdpaOut := backend.Alloc(numQHeads * headDim * 2)
+
+	// Tiled partials: numQHeads * ceil(maxKVLen/64) * (2 + headDim) * 4 bytes
+	maxTiles := (2048 + 63) / 64
+	partialsSize := numQHeads * maxTiles * (2 + headDim) * 4
+	partials := backend.Alloc(partialsSize)
+
+	warmup := 5
+	iters := 30
+
+	type result struct {
+		kvLen              int
+		standardMs, tiledMs float64
+	}
+	var results []result
+
+	for _, kvLen := range []int{16, 64, 128, 256, 512, 1024} {
+		// Standard SDPA
+		dispatchStd := func() {
+			backend.BeginBatch()
+			for l := 0; l < numLayers; l++ {
+				backend.SDPAF16(qF16, kCacheF16, vCacheF16, sdpaOut,
+					kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+				backend.MemoryBarrier()
+			}
+			backend.EndBatch()
+			backend.Sync()
+		}
+
+		// Tiled SDPA
+		dispatchTiled := func() {
+			backend.BeginBatch()
+			for l := 0; l < numLayers; l++ {
+				backend.SDPAF16Tiled(qF16, kCacheF16, vCacheF16, sdpaOut, partials,
+					kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+				backend.MemoryBarrier()
+			}
+			backend.EndBatch()
+			backend.Sync()
+		}
+
+		// Warmup
+		for i := 0; i < warmup; i++ {
+			dispatchStd()
+			dispatchTiled()
+		}
+
+		start := time.Now()
+		for i := 0; i < iters; i++ {
+			dispatchStd()
+		}
+		stdMs := float64(time.Since(start).Microseconds()) / 1000.0 / float64(iters)
+
+		start = time.Now()
+		for i := 0; i < iters; i++ {
+			dispatchTiled()
+		}
+		tiledMs := float64(time.Since(start).Microseconds()) / 1000.0 / float64(iters)
+
+		results = append(results, result{kvLen, stdMs, tiledMs})
+		t.Logf("  kvLen=%4d: standard=%.2f ms  tiled=%.2f ms  delta=%.2f ms (%.1f%%)",
+			kvLen, stdMs, tiledMs, stdMs-tiledMs,
+			(stdMs-tiledMs)/stdMs*100)
+	}
+
+	// Print summary with context degradation
+	t.Log("\n--- Context degradation (reference: ctx=16) ---")
+	ref := results[0]
+	for _, r := range results {
+		stdDeg := (r.standardMs - ref.standardMs) / ref.standardMs * 100
+		tiledDeg := (r.tiledMs - ref.tiledMs) / ref.tiledMs * 100
+		t.Logf("  kvLen=%4d: standard +%.1f%%  tiled +%.1f%%",
+			r.kvLen, stdDeg, tiledDeg)
+	}
+}
+
+// TestKVConsolidationSimulation validates that consolidating 64 per-layer KV Metal buffers
+// into 2 contiguous buffers (one for all K, one for all V) recovers the ~1.8ms overhead
+// caused by Metal buffer management with many allocated buffer objects.
+func TestKVConsolidationSimulation(t *testing.T) {
+	backend, err := NewBackend(0)
+	if err != nil {
+		t.Fatalf("NewBackend: %v", err)
+	}
+	defer backend.Close()
+
+	// LLaMA 2 7B Q4_0 config
+	numLayers := 32
+	hiddenSize := 4096
+	numQHeads := 32
+	numKVHeads := 32
+	headDim := 128
+	intermediateSize := 11008
+
+	// Q4_0 sizes
+	bytesPerBlock := 18
+	elemsPerBlock := 32
+	numBlocks4096 := hiddenSize / elemsPerBlock
+	numBlocks11008 := intermediateSize / elemsPerBlock
+
+	// Per-layer weights (same allocation as actual model — 291 buffers)
+	type layerW struct {
+		wq, wk, wv, wo, w1, w3, w2 tensor.DevicePtr
+	}
+	layers := make([]layerW, numLayers)
+	kvDim := numKVHeads * headDim
+	for l := 0; l < numLayers; l++ {
+		wqSize := hiddenSize * numBlocks4096 * bytesPerBlock
+		wkSize := kvDim * numBlocks4096 * bytesPerBlock
+		w1Size := intermediateSize * numBlocks4096 * bytesPerBlock
+		w2Size := hiddenSize * numBlocks11008 * bytesPerBlock
+		layers[l].wq = backend.Alloc(wqSize)
+		layers[l].wk = backend.Alloc(wkSize)
+		layers[l].wv = backend.Alloc(wkSize)
+		layers[l].wo = backend.Alloc(wqSize)
+		layers[l].w1 = backend.Alloc(w1Size)
+		layers[l].w3 = backend.Alloc(w1Size)
+		layers[l].w2 = backend.Alloc(w2Size)
+	}
+	lmHead := backend.Alloc(32000 * numBlocks4096 * bytesPerBlock)
+
+	// Activations
+	x := backend.Alloc(hiddenSize * 4)
+	residual := backend.Alloc(hiddenSize * 4)
+	normWeight := backend.Alloc(hiddenSize * 4)
+	normOut := backend.Alloc(hiddenSize * 4)
+	woOut := backend.Alloc(hiddenSize * 4)
+	qF16 := backend.Alloc(numQHeads * headDim * 2)
+	kSrcF16 := backend.Alloc(numKVHeads * headDim * 2)
+	vSrcF16 := backend.Alloc(numKVHeads * headDim * 2)
+	sdpaOut := backend.Alloc(numQHeads * headDim * 2)
+	gate := backend.Alloc(intermediateSize * 4)
+	lmOut := backend.Alloc(32000 * 4)
+
+	maxSeqLen := 2048
+	kvHeadStride := maxSeqLen * headDim
+	layerKVSize := numKVHeads * maxSeqLen * headDim * 2 // FP16
+
+	// ---- Variant A: 64 separate KV buffers (current approach) ----
+	type layerKV struct {
+		kCache, vCache tensor.DevicePtr
+	}
+	kvSeparate := make([]layerKV, numLayers)
+	for l := 0; l < numLayers; l++ {
+		kvSeparate[l].kCache = backend.Alloc(layerKVSize)
+		kvSeparate[l].vCache = backend.Alloc(layerKVSize)
+	}
+
+	// ---- Variant B: 2 consolidated KV buffers with per-layer offsets ----
+	kContig := backend.AllocPermanent(numLayers * layerKVSize)
+	vContig := backend.AllocPermanent(numLayers * layerKVSize)
+	kvConsolidated := make([]layerKV, numLayers)
+	for l := 0; l < numLayers; l++ {
+		off := uintptr(l * layerKVSize)
+		kvConsolidated[l].kCache = tensor.DevicePtrOffset(kContig, off)
+		kvConsolidated[l].vCache = tensor.DevicePtrOffset(vContig, off)
+	}
+
+	theta := float32(10000.0)
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+
+	kvLen := 16
+	warmup := 5
+	iters := 30
+
+	dispatch := func(kv []layerKV, iter int) {
+		backend.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			lkv := kv[l]
+
+			backend.MatMulQ4_0_FusedRMSNormQKV_F16(x, normWeight,
+				lw.wq, lw.wk, lw.wv, qF16, kSrcF16, vSrcF16,
+				hiddenSize, kvDim, hiddenSize, 1e-6)
+			backend.MemoryBarrier()
+			backend.RoPEScatterKVF16(qF16, kSrcF16, lkv.kCache, vSrcF16, lkv.vCache,
+				numQHeads, numKVHeads, headDim, iter%maxSeqLen, headDim, theta, maxSeqLen, iter%maxSeqLen)
+			backend.MemoryBarrier()
+			backend.SDPAF16(qF16, lkv.kCache, lkv.vCache, sdpaOut,
+				kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+			backend.MemoryBarrier()
+			backend.MatMulQ4_0_F16In(sdpaOut, lw.wo, woOut, hiddenSize, numQHeads*headDim)
+			backend.MemoryBarrier()
+			backend.AddRMSNorm(woOut, x, normWeight, normOut, 1, hiddenSize, 1e-6)
+			backend.MemoryBarrier()
+			backend.MatMulQ4_0_FusedMLP(normOut, lw.w1, lw.w3, gate, 1, intermediateSize, hiddenSize)
+			backend.MemoryBarrier()
+			backend.MatMulQ4_0_Add(gate, lw.w2, x, hiddenSize, intermediateSize)
+			backend.MemoryBarrier()
+		}
+		backend.RMSNorm(x, normWeight, normOut, 1, hiddenSize, 1e-6)
+		backend.MemoryBarrier()
+		backend.MatMulQ4_0(normOut, lmHead, lmOut, 1, 32000, hiddenSize)
+		backend.EndBatch()
+		backend.Sync()
+	}
+
+	_ = residual // suppress unused
+
+	// Warmup both
+	for i := 0; i < warmup; i++ {
+		dispatch(kvSeparate, i)
+		dispatch(kvConsolidated, i)
+	}
+
+	// Measure separate KV (current approach)
+	start := time.Now()
+	for i := 0; i < iters; i++ {
+		dispatch(kvSeparate, i)
+	}
+	separateMs := float64(time.Since(start).Microseconds()) / 1000.0 / float64(iters)
+
+	// Measure consolidated KV (proposed approach)
+	start = time.Now()
+	for i := 0; i < iters; i++ {
+		dispatch(kvConsolidated, i)
+	}
+	consolidatedMs := float64(time.Since(start).Microseconds()) / 1000.0 / float64(iters)
+
+	t.Logf("\n=== KV Cache Consolidation Test (ctx=%d) ===", kvLen)
+	t.Logf("  Separate KV (64 Metal buffers):      %.2f ms (%.1f tok/s)", separateMs, 1000.0/separateMs)
+	t.Logf("  Consolidated KV (2 Metal buffers):    %.2f ms (%.1f tok/s)", consolidatedMs, 1000.0/consolidatedMs)
+	t.Logf("  Delta: %.2f ms (%.1f%% improvement)", separateMs-consolidatedMs,
+		(separateMs-consolidatedMs)/separateMs*100)
+
+	if consolidatedMs < separateMs {
+		t.Logf("  ✓ Consolidation recovers %.2f ms per token!", separateMs-consolidatedMs)
+	} else {
+		t.Logf("  ✗ Consolidation did not help (%.2f ms overhead)", consolidatedMs-separateMs)
 	}
 }
