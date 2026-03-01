@@ -3101,25 +3101,24 @@ kernel void matvec_q4_0_fused_rmsnorm_f32(
     constant int& N [[buffer(4)]],
     constant int& K [[buffer(5)]],
     constant float& eps [[buffer(6)]],
-    threadgroup half* shared_half [[threadgroup(0)]], // FP16 shared memory: halves usage for better occupancy
+    threadgroup float* shared_x [[threadgroup(0)]], // [K+8] shared activations + scratch
     uint gid [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]],
     uint simd_lane [[thread_index_in_simdgroup]],
     uint simd_group [[simdgroup_index_in_threadgroup]]
 ) {
     // Phase 1: Cooperative Load & RMSNorm
-    // Store activations as FP16 in shared memory (8 KB vs 16 KB) for better occupancy.
-    // RMSNorm sum-of-squares computed in FP32 for accuracy.
+    // F32 shared memory for this kernel (F32 output needs full precision activations)
     float localSumSq = 0.0f;
     for (int i = tid; i < K; i += 256) {
         float val = x[i];
-        shared_half[i] = half(val);
+        shared_x[i] = val;
         localSumSq += val * val;
     }
 
     localSumSq = simd_sum(localSumSq);
 
-    threadgroup float* scratch = (threadgroup float*)(shared_half + K);
+    threadgroup float* scratch = shared_x + K;
     if (simd_lane == 0) {
         scratch[simd_group] = localSumSq;
     }
@@ -3156,10 +3155,9 @@ kernel void matvec_q4_0_fused_rmsnorm_f32(
         float4 w0 = w_ptr[0], w1 = w_ptr[1], w2 = w_ptr[2], w3 = w_ptr[3];
         float4 w4 = w_ptr[4], w5 = w_ptr[5], w6 = w_ptr[6], w7 = w_ptr[7];
 
-        // Read activations from FP16 shared memory, convert to float4
-        threadgroup const half4* hx_ptr = (threadgroup const half4*)(shared_half + base_k);
-        float4 x0 = float4(hx_ptr[0]), x1 = float4(hx_ptr[1]), x2 = float4(hx_ptr[2]), x3 = float4(hx_ptr[3]);
-        float4 x4 = float4(hx_ptr[4]), x5 = float4(hx_ptr[5]), x6 = float4(hx_ptr[6]), x7 = float4(hx_ptr[7]);
+        threadgroup const float4* x_ptr = (threadgroup const float4*)(shared_x + base_k);
+        float4 x0 = x_ptr[0], x1 = x_ptr[1], x2 = x_ptr[2], x3 = x_ptr[3];
+        float4 x4 = x_ptr[4], x5 = x_ptr[5], x6 = x_ptr[6], x7 = x_ptr[7];
 
         float4 a0 = x0 * rms * w0, a1 = x1 * rms * w1, a2 = x2 * rms * w2, a3 = x3 * rms * w3;
         float4 a4 = x4 * rms * w4, a5 = x5 * rms * w5, a6 = x6 * rms * w6, a7 = x7 * rms * w7;
@@ -8586,8 +8584,7 @@ void metal_matvec_q4_0_fused_rmsnorm_f32_offset(void* queuePtr, void* pipelinePt
     [encoder setBytes:&k length:sizeof(k) atIndex:5];
     [encoder setBytes:&eps length:sizeof(eps) atIndex:6];
 
-    // FP16 shared memory: k halfs for activations + 8 floats for scratch (RMSNorm reduction)
-    int sharedMemSize = k * sizeof(__fp16) + 8 * sizeof(float);
+    int sharedMemSize = (k + 8) * sizeof(float);
     [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
 
     int outputsPerTG = 32;
@@ -9831,8 +9828,7 @@ void metal_matvec_q4_0_fused_rmsnorm_f32(void* queuePtr, void* pipelinePtr,
     [encoder setBytes:&k length:sizeof(k) atIndex:5];
     [encoder setBytes:&eps length:sizeof(eps) atIndex:6];
 
-    // FP16 shared memory: k halfs for activations + 8 floats for scratch (RMSNorm reduction)
-    int sharedMemSize = k * sizeof(__fp16) + 8 * sizeof(float);
+    int sharedMemSize = (k + 8) * sizeof(float);
     [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
 
     // Grid: 32 outputs per threadgroup (8 simdgroups * 4 outputs)
