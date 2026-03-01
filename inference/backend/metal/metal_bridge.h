@@ -160,6 +160,28 @@ void metal_matmul_q4k_simdgroup_f32(void* queue, void* pipeline,
                                      void* C, uint64_t cOff,
                                      int M, int N, int K);
 
+// Q4_K fused RMSNorm + QKV projections (FP16 output)
+void metal_matvec_q4k_fused_rmsnorm_qkv_f16(void* queue, void* pipeline,
+                                              void* x, void* normWeight,
+                                              void* Wq, void* Wk, void* Wv,
+                                              void* outQ, void* outK, void* outV,
+                                              int qDim, int kvDim, int K, float eps);
+
+// Q4_K fused MLP: SiLU(x @ W1) * (x @ W3)
+void metal_matvec_q4k_fused_mlp_f32(void* queue, void* pipeline,
+                                     void* x, void* W1, void* W3, void* out,
+                                     int N, int K);
+
+// Q4_K matvec with FP16 input, FP32 output
+void metal_matvec_q4k_f16in_f32(void* queue, void* pipeline,
+                                 void* A, void* B, void* C,
+                                 int N, int K);
+
+// Q4_K matvec that adds to output: C += A @ B^T
+void metal_matvec_q4k_add_f32(void* queue, void* pipeline,
+                               void* A, void* B, void* C,
+                               int N, int K);
+
 // Q5_K multi-output matvec
 void metal_matvec_q5k_multi_output_f32(void* queue, void* pipeline,
                                         void* A, uint64_t aOff,

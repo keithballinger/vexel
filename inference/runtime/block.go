@@ -1120,27 +1120,41 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	}
 
 	// 1. RMSNorm + Q/K/V Projections
-	// Try to use fused RMSNorm+MatMul for Decode (seqLen=1) if weights are Q4_0
+	// Try to use fused RMSNorm+MatMul for Decode (seqLen=1) if weights are Q4_0 or Q4_K
 	// Note: Fused kernels assume RMSNorm, so disable for LayerNorm models (Phi, GPT-2)
-	canFuseAttn := seqLen == 1 && b.fusedOps != nil &&
-		b.NormType == NormRMSNorm && // Only use fused kernels for RMSNorm
-		b.Wq.QuantProfile() == tensor.Q4_0 &&
-		b.Wk.QuantProfile() == tensor.Q4_0 &&
-		b.Wv.QuantProfile() == tensor.Q4_0
+	attnQuantProfile := b.Wq.QuantProfile()
+	canFuseAttn := seqLen == 1 && b.NormType == NormRMSNorm &&
+		attnQuantProfile == b.Wk.QuantProfile() && attnQuantProfile == b.Wv.QuantProfile() &&
+		((attnQuantProfile == tensor.Q4_0 && b.fusedOps != nil) ||
+			attnQuantProfile == tensor.Q4_K)
 
 	// FP16 end-to-end path: output Q, K, V directly as FP16 to eliminate conversions
 	// This saves 3 FP32→FP16 conversions per layer (K, V for cache, Q for SDPA)
 	useFP16Path := canFuseAttn && useFP16KVCache
 
-	if useFP16Path {
-		// FP16 path: single fused dispatch for RMSNorm + Q/K/V projections (3→1 dispatch)
+	if useFP16Path && attnQuantProfile == tensor.Q4_K {
+		// Q4_K FP16 path: fused RMSNorm + Q/K/V via inline interface
+		type q4kFusedQKV interface {
+			MatMulQ4_K_FusedRMSNormQKV_F16(x, normWeight, wq, wk, wv, outQ, outK, outV tensor.DevicePtr,
+				qDim, kvDim, k int, eps float32)
+		}
+		if fq, ok := b.backend.(q4kFusedQKV); ok {
+			profileOp("FusedRMSNorm+QKV_F16_Q4K", func() {
+				fq.MatMulQ4_K_FusedRMSNormQKV_F16(xPtr, b.AttnNorm.DevicePtr(),
+					b.Wq.DevicePtr(), b.Wk.DevicePtr(), b.Wv.DevicePtr(),
+					qF16Ptr, kF16Ptr, vF16Ptr,
+					qSize, kvSize, hiddenSize, float32(b.RMSNormEPS))
+			})
+		}
+	} else if useFP16Path {
+		// Q4_0 FP16 path: single fused dispatch for RMSNorm + Q/K/V projections (3→1 dispatch)
 		profileOp("FusedRMSNorm+QKV_F16", func() {
 			b.fusedOps.MatMulQ4_0_FusedRMSNormQKV_F16(xPtr, b.AttnNorm.DevicePtr(),
 				b.Wq.DevicePtr(), b.Wk.DevicePtr(), b.Wv.DevicePtr(),
 				qF16Ptr, kF16Ptr, vF16Ptr,
 				qSize, kvSize, hiddenSize, float32(b.RMSNormEPS))
 		})
-	} else if canFuseAttn {
+	} else if canFuseAttn && attnQuantProfile == tensor.Q4_0 {
 		profileOp("FusedRMSNorm+QKV", func() {
 			// Q
 			b.fusedOps.MatMulQ4_0_FusedRMSNorm(xPtr, b.AttnNorm.DevicePtr(), b.Wq.DevicePtr(), qPtr, 1, qSize, hiddenSize, float32(b.RMSNormEPS))
@@ -1471,7 +1485,17 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			type f16InMatMul interface {
 				MatMulQ4_0_F16In(a, bMat, out tensor.DevicePtr, n, k int)
 			}
-			if useFP16Path && b.Wo.QuantProfile() == tensor.Q4_0 {
+			type q4kF16InMatMul interface {
+				MatMulQ4_K_F16In(a, bMat, out tensor.DevicePtr, n, k int)
+			}
+			if useFP16Path && b.Wo.QuantProfile() == tensor.Q4_K {
+				if f16mm, ok := b.backend.(q4kF16InMatMul); ok {
+					f16mm.MatMulQ4_K_F16In(attnOutF16Ptr, b.Wo.DevicePtr(), woOutputPtr, oDim, numHeads*headDim)
+				} else {
+					b.fp16Ops.ConvertF16ToF32(attnOutF16Ptr, attnOutPtr, qSize)
+					b.matMulTransposedWithBias(attnOutPtr, b.Wo, b.WoBias, woOutputPtr, seqLen, oDim, numHeads*headDim)
+				}
+			} else if useFP16Path && b.Wo.QuantProfile() == tensor.Q4_0 {
 				if f16mm, ok := b.backend.(f16InMatMul); ok {
 					f16mm.MatMulQ4_0_F16In(attnOutF16Ptr, b.Wo.DevicePtr(), woOutputPtr, oDim, numHeads*headDim)
 				} else {
@@ -1526,11 +1550,19 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	type matMulQ4Add interface {
 		MatMulQ4_0_Add(a, bMat, out tensor.DevicePtr, n, k int)
 	}
+	type matMulQ4KAdd interface {
+		MatMulQ4_K_Add(a, bMat, out tensor.DevicePtr, n, k int)
+	}
 	var didFuseW2Add2Ptr matMulQ4Add
+	var didFuseW2Add2Q4KPtr matMulQ4KAdd
 	var didFuseW2Add2 bool
-	if seqLen == 1 && !b.ParallelResidual && !b.HasPostNorms &&
-		b.W2.IsQuantized() && b.W2.QuantProfile() == tensor.Q4_0 {
-		didFuseW2Add2Ptr, _ = b.backend.(matMulQ4Add)
+	if seqLen == 1 && !b.ParallelResidual && !b.HasPostNorms && b.W2.IsQuantized() {
+		switch b.W2.QuantProfile() {
+		case tensor.Q4_0:
+			didFuseW2Add2Ptr, _ = b.backend.(matMulQ4Add)
+		case tensor.Q4_K:
+			didFuseW2Add2Q4KPtr, _ = b.backend.(matMulQ4KAdd)
+		}
 	}
 
 	if b.MLPType == MLPGELU {
@@ -1771,11 +1803,13 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		// Gated MLP: SwiGLU (LLaMA/Mistral) or GeGLU (Gemma)
 		// Fused MLP for FFN (only for RMSNorm + Q4_0 SwiGLU models, decode only)
 		fuseMLP := b.plan == nil || b.plan.Fusion.FuseMLP
-		canFuseFFN := fuseMLP && seqLen == 1 && b.fusedOps != nil &&
+		mlpQuantProfile := b.W1.QuantProfile()
+		canFuseFFN := fuseMLP && seqLen == 1 &&
 			b.NormType == NormRMSNorm &&
 			b.MLPType == MLPSwiGLU && // Fused kernel uses SiLU, not GELU
-			b.W1.QuantProfile() == tensor.Q4_0 &&
-			b.W3.QuantProfile() == tensor.Q4_0
+			mlpQuantProfile == b.W3.QuantProfile() &&
+			((mlpQuantProfile == tensor.Q4_0 && b.fusedOps != nil) ||
+				mlpQuantProfile == tensor.Q4_K)
 
 		if canFuseFFN {
 			// Fully fused MLP: (Add1+RMSNorm) + FusedMLP
@@ -1794,7 +1828,16 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			// Barrier: FusedMLP reads normOutPtr written by AddRMSNorm/RMSNorm2
 			barrier()
 			profileOp("FusedMLP", func() {
-				b.fusedOps.MatMulQ4_0_FusedMLP(normOutPtr, b.W1.DevicePtr(), b.W3.DevicePtr(), gatePtr, 1, w1Dim, hiddenSize)
+				if mlpQuantProfile == tensor.Q4_K {
+					type q4kFusedMLP interface {
+						MatMulQ4_K_FusedMLP(x, w1, w3, out tensor.DevicePtr, seqLen, n, k int)
+					}
+					if q4k, ok := b.backend.(q4kFusedMLP); ok {
+						q4k.MatMulQ4_K_FusedMLP(normOutPtr, b.W1.DevicePtr(), b.W3.DevicePtr(), gatePtr, 1, w1Dim, hiddenSize)
+					}
+				} else {
+					b.fusedOps.MatMulQ4_0_FusedMLP(normOutPtr, b.W1.DevicePtr(), b.W3.DevicePtr(), gatePtr, 1, w1Dim, hiddenSize)
+				}
 			})
 		} else {
 			// Standard path: separate Add1 already happened above (or fused here)
@@ -1879,10 +1922,17 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		// Fused W2+Add2: for M=1 decode with Q4_0 W2 and serial residual (no PostFFNNorm),
 		// compute xPtr += gatePtr @ W2^T in a single dispatch, saving 1 dispatch per layer.
 		if didFuseW2Add2Ptr != nil && !b.W2.DevicePtr().IsNil() {
-			// Fused path: xPtr += gatePtr @ W2^T (single dispatch replaces W2 + Add2)
+			// Fused path (Q4_0): xPtr += gatePtr @ W2^T (single dispatch replaces W2 + Add2)
 			profileOp("W2+Add2", func() {
 				w2Dim := b.W2.Shape().Dims()[0]
 				didFuseW2Add2Ptr.MatMulQ4_0_Add(gatePtr, b.W2.DevicePtr(), xPtr, w2Dim, intermediateSize)
+			})
+			didFuseW2Add2 = true
+		} else if didFuseW2Add2Q4KPtr != nil && !b.W2.DevicePtr().IsNil() {
+			// Fused path (Q4_K): xPtr += gatePtr @ W2^T (single dispatch replaces W2 + Add2)
+			profileOp("W2+Add2", func() {
+				w2Dim := b.W2.Shape().Dims()[0]
+				didFuseW2Add2Q4KPtr.MatMulQ4_K_Add(gatePtr, b.W2.DevicePtr(), xPtr, w2Dim, intermediateSize)
 			})
 			didFuseW2Add2 = true
 		} else {
