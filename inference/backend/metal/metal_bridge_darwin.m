@@ -2021,6 +2021,8 @@ constant int Q4K_BLOCK_SIZE = 256;
 constant int Q4K_BYTES_PER_BLOCK = 144;
 constant int Q4K_OUTPUTS_PER_TG = 8;
 constant int Q4K_NR2_OUTPUTS_PER_TG = 16;
+constant int Q4K_NR4_OUTPUTS_PER_SG = 4;
+constant int Q4K_NR4_OUTPUTS_PER_TG = 32;
 
 constant int Q5K_BLOCK_SIZE = 256;
 constant int Q5K_BYTES_PER_BLOCK = 176;
@@ -2200,6 +2202,190 @@ kernel void matvec_q4k_nr2_f32(
     if (simd_lane == 0) {
         C[row0] = sum0;
         if (row1 < N) C[row1] = sum1;
+    }
+}
+
+// =============================================================================
+// Q4_K NR4 MATVEC — 4 outputs per simdgroup, 32 per threadgroup
+// =============================================================================
+// Maximizes activation reuse: each 32-element sub-block of A is loaded once
+// and reused for 4 weight rows. Q4_K's 144-byte blocks (vs Q4_0's 18-byte)
+// avoid the L1 cache pressure that killed Q4_0 NR4.
+//
+// Grid: ceil(N / Q4K_NR4_OUTPUTS_PER_TG) threadgroups of 256 threads.
+
+kernel void matvec_q4k_nr4_f32(
+    device const float* A [[buffer(0)]],           // [1, K] activations
+    device const uchar* B [[buffer(1)]],           // [N, K] in Q4_K format
+    device float* C [[buffer(2)]],                 // [1, N] output
+    constant int& N [[buffer(3)]],                 // Number of output elements
+    constant int& K [[buffer(4)]],                 // Inner dimension
+    uint gid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int base_output = gid * Q4K_NR4_OUTPUTS_PER_TG + simd_group * Q4K_NR4_OUTPUTS_PER_SG;
+    if (base_output >= N) return;
+
+    // Determine how many valid outputs this SG handles (1..4)
+    int validOutputs = min(Q4K_NR4_OUTPUTS_PER_SG, N - base_output);
+
+    float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
+
+    int numBlocks = (K + Q4K_BLOCK_SIZE - 1) / Q4K_BLOCK_SIZE;
+
+    // Row pointers for up to 4 outputs
+    device const uchar* b_row0 = B + (base_output + 0) * numBlocks * Q4K_BYTES_PER_BLOCK;
+    device const uchar* b_row1 = B + (base_output + 1) * numBlocks * Q4K_BYTES_PER_BLOCK;
+    device const uchar* b_row2 = B + (base_output + 2) * numBlocks * Q4K_BYTES_PER_BLOCK;
+    device const uchar* b_row3 = B + (base_output + 3) * numBlocks * Q4K_BYTES_PER_BLOCK;
+
+    int totalSubBlocks = numBlocks << 3;  // numBlocks * 8
+
+    // Macro: extract scale+min for sub-block j from block at blockPtr,
+    // compute dsc = d*scale, dmn = dmin*min.
+    #define Q4K_NR4_EXTRACT_SCALE(blockPtr, j, dsc_var, dmn_var) \
+    { \
+        float d_val = float(as_type<half>(*((device const ushort*)(blockPtr)))); \
+        float dmin_val = float(as_type<half>(*((device const ushort*)((blockPtr) + 2)))); \
+        device const uchar* sd = (blockPtr) + 4; \
+        int j_lo = (j) & 3; \
+        uchar sc, mn; \
+        if ((j) < 4) { \
+            sc = sd[j_lo] & 0x3F; \
+            mn = sd[j_lo + 4] & 0x3F; \
+        } else { \
+            sc = (sd[8 + j_lo] & 0x0F) | ((sd[j_lo] >> 6) << 4); \
+            mn = (sd[8 + j_lo] >> 4) | ((sd[j_lo + 4] >> 6) << 4); \
+        } \
+        dsc_var = d_val * float(sc); \
+        dmn_var = dmin_val * float(mn); \
+    }
+
+    // Macro: dot product of activation float4[8] with weight nibbles from qs32[8]
+    #define Q4K_NR4_DOT8(a_vec, qs32_ptr, shift, dsc_val, dmn_val, sum_var) \
+    { \
+        for (int i = 0; i < 8; i++) { \
+            float4 a = (a_vec)[i]; \
+            uint w = (qs32_ptr)[i]; \
+            float4 q = float4((w >> (shift)) & 0xF, (w >> ((shift) + 8)) & 0xF, \
+                              (w >> ((shift) + 16)) & 0xF, (w >> ((shift) + 24)) & 0xF); \
+            sum_var += dot(a, dsc_val * q - dmn_val); \
+        } \
+    }
+
+    for (int sb = simd_lane; sb < totalSubBlocks; sb += 32) {
+        int block_idx = sb >> 3;           // which Q4_K block
+        int j = sb & 7;                    // sub-block index (0..7)
+
+        // Q4_K interleaved layout: groups of 64 share 32 qs bytes
+        int qs_base = (j >> 1) << 5;      // (j/2)*32
+        int shift = (j & 1) << 2;         // 0 for even, 4 for odd
+        int elem_start = block_idx * Q4K_BLOCK_SIZE + (j << 5);  // j * 32
+
+        if (elem_start + 32 > K) {
+            // Partial sub-block: scalar fallback for boundary
+            if (elem_start < K) {
+                // Row 0
+                {
+                    device const uchar* bp = b_row0 + block_idx * Q4K_BYTES_PER_BLOCK;
+                    float dsc, dmn;
+                    Q4K_NR4_EXTRACT_SCALE(bp, j, dsc, dmn);
+                    device const uchar* qs = bp + 16 + qs_base;
+                    for (int i = 0; i < 32 && elem_start + i < K; i++) {
+                        float q_val = float((qs[i] >> shift) & 0xF);
+                        sum0 += A[elem_start + i] * (dsc * q_val - dmn);
+                    }
+                }
+                if (validOutputs > 1) {
+                    device const uchar* bp = b_row1 + block_idx * Q4K_BYTES_PER_BLOCK;
+                    float dsc, dmn;
+                    Q4K_NR4_EXTRACT_SCALE(bp, j, dsc, dmn);
+                    device const uchar* qs = bp + 16 + qs_base;
+                    for (int i = 0; i < 32 && elem_start + i < K; i++) {
+                        float q_val = float((qs[i] >> shift) & 0xF);
+                        sum1 += A[elem_start + i] * (dsc * q_val - dmn);
+                    }
+                }
+                if (validOutputs > 2) {
+                    device const uchar* bp = b_row2 + block_idx * Q4K_BYTES_PER_BLOCK;
+                    float dsc, dmn;
+                    Q4K_NR4_EXTRACT_SCALE(bp, j, dsc, dmn);
+                    device const uchar* qs = bp + 16 + qs_base;
+                    for (int i = 0; i < 32 && elem_start + i < K; i++) {
+                        float q_val = float((qs[i] >> shift) & 0xF);
+                        sum2 += A[elem_start + i] * (dsc * q_val - dmn);
+                    }
+                }
+                if (validOutputs > 3) {
+                    device const uchar* bp = b_row3 + block_idx * Q4K_BYTES_PER_BLOCK;
+                    float dsc, dmn;
+                    Q4K_NR4_EXTRACT_SCALE(bp, j, dsc, dmn);
+                    device const uchar* qs = bp + 16 + qs_base;
+                    for (int i = 0; i < 32 && elem_start + i < K; i++) {
+                        float q_val = float((qs[i] >> shift) & 0xF);
+                        sum3 += A[elem_start + i] * (dsc * q_val - dmn);
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Full sub-block: load activation ONCE, reuse for 4 weight rows
+        device const float4* a_vec = (device const float4*)(A + elem_start);
+
+        // Row 0 (always valid)
+        {
+            device const uchar* bp = b_row0 + block_idx * Q4K_BYTES_PER_BLOCK;
+            float dsc, dmn;
+            Q4K_NR4_EXTRACT_SCALE(bp, j, dsc, dmn);
+            device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
+            Q4K_NR4_DOT8(a_vec, qs32, shift, dsc, dmn, sum0);
+        }
+
+        // Row 1
+        if (validOutputs > 1) {
+            device const uchar* bp = b_row1 + block_idx * Q4K_BYTES_PER_BLOCK;
+            float dsc, dmn;
+            Q4K_NR4_EXTRACT_SCALE(bp, j, dsc, dmn);
+            device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
+            Q4K_NR4_DOT8(a_vec, qs32, shift, dsc, dmn, sum1);
+        }
+
+        // Row 2
+        if (validOutputs > 2) {
+            device const uchar* bp = b_row2 + block_idx * Q4K_BYTES_PER_BLOCK;
+            float dsc, dmn;
+            Q4K_NR4_EXTRACT_SCALE(bp, j, dsc, dmn);
+            device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
+            Q4K_NR4_DOT8(a_vec, qs32, shift, dsc, dmn, sum2);
+        }
+
+        // Row 3
+        if (validOutputs > 3) {
+            device const uchar* bp = b_row3 + block_idx * Q4K_BYTES_PER_BLOCK;
+            float dsc, dmn;
+            Q4K_NR4_EXTRACT_SCALE(bp, j, dsc, dmn);
+            device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
+            Q4K_NR4_DOT8(a_vec, qs32, shift, dsc, dmn, sum3);
+        }
+    }
+
+    #undef Q4K_NR4_EXTRACT_SCALE
+    #undef Q4K_NR4_DOT8
+
+    // Simdgroup reductions
+    sum0 = simd_sum(sum0);
+    sum1 = simd_sum(sum1);
+    sum2 = simd_sum(sum2);
+    sum3 = simd_sum(sum3);
+
+    // Lane 0 writes outputs
+    if (simd_lane == 0) {
+        C[base_output] = sum0;
+        if (base_output + 1 < N) C[base_output + 1] = sum1;
+        if (base_output + 2 < N) C[base_output + 2] = sum2;
+        if (base_output + 3 < N) C[base_output + 3] = sum3;
     }
 }
 
@@ -8414,6 +8600,37 @@ void metal_matvec_q4k_nr2_f32(void* queuePtr, void* pipelinePtr,
 
     // 16 outputs per threadgroup (8 simdgroups * 2)
     int outputsPerTG = 16;
+    int threadgroupSize = 256;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
+
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_matvec_q4k_nr4_f32(void* queuePtr, void* pipelinePtr,
+                               void* A, uint64_t aOff,
+                               void* B, uint64_t bOff,
+                               void* C, uint64_t cOff,
+                               int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:aOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:bOff atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:cOff atIndex:2];
+    [encoder setBytes:&N length:sizeof(N) atIndex:3];
+    [encoder setBytes:&K length:sizeof(K) atIndex:4];
+
+    // 32 outputs per threadgroup (8 simdgroups * 4)
+    int outputsPerTG = 32;
     int threadgroupSize = 256;
     int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
 

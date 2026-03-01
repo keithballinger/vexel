@@ -146,6 +146,13 @@ void metal_matvec_q4k_nr2_f32(void* queue, void* pipeline,
                                void* C, uint64_t cOff,
                                int N, int K);
 
+// Q4_K NR4 matvec: 4 outputs per simdgroup, 32 per threadgroup
+void metal_matvec_q4k_nr4_f32(void* queue, void* pipeline,
+                               void* A, uint64_t aOff,
+                               void* B, uint64_t bOff,
+                               void* C, uint64_t cOff,
+                               int N, int K);
+
 // Q4_K batched matmul: C = A @ B^T where A is [M,K], B is [N,K] Q4_K, C is [M,N]
 void metal_matmul_q4k_batched_f32(void* queue, void* pipeline,
                                    void* A, uint64_t aOff,

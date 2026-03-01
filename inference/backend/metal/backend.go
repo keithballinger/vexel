@@ -109,6 +109,7 @@ type Backend struct {
 			matvecQ6KNR2Pipeline        unsafe.Pointer // Optimized Q6_K with nr0=2
 			matvecQ4KPipeline           unsafe.Pointer
 			matvecQ4KNR2Pipeline        unsafe.Pointer
+			matvecQ4KNR4Pipeline        unsafe.Pointer
 			matvecQ5KPipeline           unsafe.Pointer
 		
 			matvecQ5KNR2Pipeline        unsafe.Pointer
@@ -261,6 +262,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matvecQ6KNR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q6k_nr2_f32"))
 	b.matvecQ4KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_multi_output_f32"))
 	b.matvecQ4KNR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_nr2_f32"))
+	b.matvecQ4KNR4Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_nr4_f32"))
 	b.matvecQ5KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q5k_multi_output_f32"))
 	b.matvecQ5KNR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q5k_nr2_f32"))
 	b.matmulQ4KBatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4k_batched_f32"))
@@ -767,17 +769,25 @@ func (b *Backend) MatMulQ6_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 func (b *Backend) MatMulQ4_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 	b.profiler.RecordDispatch("MatMulQ4_K")
 	if m == 1 {
-		// Decode: use vectorized multi_output kernel (float4 loads, 8 out/TG).
-		// Benchmarked: multi_output with vectorized Q4_K dequant is faster than
-		// NR2 which uses scalar element processing with stride-32 inner loop.
-		if b.matvecQ4KPipeline == nil {
-			panic("MatMulQ4_K called but no matvecQ4KPipeline available")
+		// Decode: NR4 (4 outputs/SG, 32/TG) wins at large N (1.11-1.21×) due to
+		// activation reuse; multi_output (1 output/SG, 8/TG) is better for small/medium N.
+		// Benchmarked on M3 Max: NR4 wins at N>8192, neutral at N≤8192.
+		if n > 8192 && b.matvecQ4KNR4Pipeline != nil {
+			C.metal_matvec_q4k_nr4_f32(b.queue, b.matvecQ4KNR4Pipeline,
+				unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+				unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
+				unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+				C.int(n), C.int(k))
+		} else {
+			if b.matvecQ4KPipeline == nil {
+				panic("MatMulQ4_K called but no matvecQ4KPipeline available")
+			}
+			C.metal_matvec_q4k_multi_output_f32(b.queue, b.matvecQ4KPipeline,
+				unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+				unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
+				unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+				C.int(n), C.int(k))
 		}
-		C.metal_matvec_q4k_multi_output_f32(b.queue, b.matvecQ4KPipeline,
-			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
-			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
-			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
-			C.int(n), C.int(k))
 	} else if m >= 8 && b.matmulQ4KSimdgroupPipeline != nil {
 		// Prefill (M>=8): use simdgroup_matrix tiled kernel (hardware 8×8 matmul)
 		// 32×64 tiled kernel with 8 simdgroups, same structure as Q4_0 simdgroup.
@@ -797,6 +807,19 @@ func (b *Backend) MatMulQ4_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
 			C.int(m), C.int(n), C.int(k))
 	}
+}
+
+// MatMulQ4_K_NR4 dispatches the NR4 variant (4 outputs/SG, 32/TG) for benchmarking.
+func (b *Backend) MatMulQ4_K_NR4(a, bMat, out tensor.DevicePtr, n, k int) {
+	b.profiler.RecordDispatch("MatMulQ4_K_NR4")
+	if b.matvecQ4KNR4Pipeline == nil {
+		panic("MatMulQ4_K_NR4 called but no matvecQ4KNR4Pipeline available")
+	}
+	C.metal_matvec_q4k_nr4_f32(b.queue, b.matvecQ4KNR4Pipeline,
+		unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+		unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
+		unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+		C.int(n), C.int(k))
 }
 
 // MatMulQ4_K_FusedRMSNormQKV_F16 performs fused RMSNorm + Q/K/V projections with Q4_K weights.

@@ -6,7 +6,11 @@ import (
 	"encoding/binary"
 	"math"
 	"testing"
+	"time"
 )
+
+func now() time.Time        { return time.Now() }
+func since(t time.Time) time.Duration { return time.Since(t) }
 
 // Q4_K format constants
 const (
@@ -411,5 +415,188 @@ func TestQ4KMatVecMultiBlock(t *testing.T) {
 				count++
 			}
 		}
+	}
+}
+
+// TestQ4KNR4Correctness tests the NR4 kernel (4 outputs/SG) against CPU reference
+// across all LLaMA 2 7B layer dimensions.
+func TestQ4KNR4Correctness(t *testing.T) {
+	backend, err := NewBackend(0)
+	if err != nil {
+		t.Fatalf("Failed to create backend: %v", err)
+	}
+	defer backend.Close()
+
+	if backend.matvecQ4KNR4Pipeline == nil {
+		t.Skip("Q4_K NR4 pipeline not available")
+	}
+
+	tests := []struct {
+		name string
+		n, k int
+	}{
+		// Edge cases
+		{"tiny_1x256", 1, 256},
+		{"small_4x256", 4, 256},
+		{"edge_3x512", 3, 512},
+		{"edge_33x256", 33, 256}, // not divisible by 32
+		// LLaMA 2 7B dimensions
+		{"llama7b_Wq", 4096, 4096},
+		{"llama7b_Wk", 1024, 4096},  // GQA: 8 KV heads * 128 dim
+		{"llama7b_W1", 11008, 4096},
+		{"llama7b_W2", 4096, 11008},
+		{"llama7b_head", 32000, 4096},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			n, k := tc.n, tc.k
+
+			// Create activations
+			a := make([]float32, k)
+			for i := range a {
+				a[i] = float32(i%100) * 0.01
+			}
+
+			// Create Q4_K weights
+			numBlocksPerRow := (k + Q4KBlockSize - 1) / Q4KBlockSize
+			bytesPerRow := numBlocksPerRow * Q4KBytesPerBlock
+			bData := make([]byte, n*bytesPerRow)
+
+			for row := 0; row < n; row++ {
+				for blk := 0; blk < numBlocksPerRow; blk++ {
+					d := float32(0.5 + float64(blk)*0.1)
+					dmin := float32(0.05)
+					scales := [8]uint8{10, 20, 15, 25, 12, 18, 22, 16}
+					mins := [8]uint8{2, 3, 1, 4, 2, 3, 1, 2}
+					var values [256]uint8
+					for i := range values {
+						values[i] = uint8((i + row + blk) % 16)
+					}
+					block := createQ4_KBlock(d, dmin, scales, mins, values)
+					copy(bData[row*bytesPerRow+blk*Q4KBytesPerBlock:], block)
+				}
+			}
+
+			// CPU reference
+			cpuOut := cpuMatVecQ4_K(a, bData, 1, n, k)
+
+			// GPU NR4
+			aBuf := backend.Alloc(k * 4)
+			bBuf := backend.Alloc(len(bData))
+			outBuf := backend.Alloc(n * 4)
+			defer backend.Free(aBuf)
+			defer backend.Free(bBuf)
+			defer backend.Free(outBuf)
+
+			backend.ToDevice(aBuf, float32ToBytes(a))
+			backend.ToDevice(bBuf, bData)
+
+			backend.MatMulQ4_K_NR4(aBuf, bBuf, outBuf, n, k)
+			backend.Sync()
+
+			resultBytes := make([]byte, n*4)
+			backend.ToHost(resultBytes, outBuf)
+			gpuOut := bytesToFloat32(resultBytes)
+
+			maxDiff := float64(0)
+			maxDiffIdx := 0
+			for i := range cpuOut {
+				diff := math.Abs(float64(cpuOut[i] - gpuOut[i]))
+				if diff > maxDiff {
+					maxDiff = diff
+					maxDiffIdx = i
+				}
+			}
+
+			// Combined tolerance: absolute floor + relative for large values
+			tol := math.Max(0.5, 1e-5*math.Abs(float64(cpuOut[maxDiffIdx])))
+			t.Logf("N=%d K=%d: max_diff=%.6f at idx=%d (tol=%.4f)", n, k, maxDiff, maxDiffIdx, tol)
+			if maxDiff > tol {
+				t.Errorf("Max diff %.6f exceeds tolerance %.4f at idx=%d (cpu=%.4f, gpu=%.4f)",
+					maxDiff, tol, maxDiffIdx, cpuOut[maxDiffIdx], gpuOut[maxDiffIdx])
+			}
+		})
+	}
+}
+
+// TestQ4KNR4vsMO_Throughput benchmarks NR4 vs multi_output across LLaMA 2 7B dimensions.
+func TestQ4KNR4vsMO_Throughput(t *testing.T) {
+	backend, err := NewBackend(0)
+	if err != nil {
+		t.Fatalf("Failed to create backend: %v", err)
+	}
+	defer backend.Close()
+
+	if backend.matvecQ4KNR4Pipeline == nil {
+		t.Skip("Q4_K NR4 pipeline not available")
+	}
+
+	dims := []struct {
+		name string
+		n, k int
+	}{
+		{"Wq_4096x4096", 4096, 4096},
+		{"Wk_1024x4096", 1024, 4096},
+		{"W1_11008x4096", 11008, 4096},
+		{"W2_4096x11008", 4096, 11008},
+		{"head_32000x4096", 32000, 4096},
+	}
+
+	const warmup = 10
+	const iters = 100
+
+	for _, d := range dims {
+		t.Run(d.name, func(t *testing.T) {
+			n, k := d.n, d.k
+
+			a := make([]float32, k)
+			for i := range a {
+				a[i] = 0.01
+			}
+
+			numBlocksPerRow := (k + Q4KBlockSize - 1) / Q4KBlockSize
+			bytesPerRow := numBlocksPerRow * Q4KBytesPerBlock
+			bData := make([]byte, n*bytesPerRow)
+
+			aBuf := backend.Alloc(k * 4)
+			bBuf := backend.Alloc(len(bData))
+			outBuf := backend.Alloc(n * 4)
+			defer backend.Free(aBuf)
+			defer backend.Free(bBuf)
+			defer backend.Free(outBuf)
+
+			backend.ToDevice(aBuf, float32ToBytes(a))
+			backend.ToDevice(bBuf, bData)
+
+			// Benchmark multi_output
+			for i := 0; i < warmup; i++ {
+				backend.MatMulQ4_K(aBuf, bBuf, outBuf, 1, n, k)
+			}
+			backend.Sync()
+
+			t0 := now()
+			for i := 0; i < iters; i++ {
+				backend.MatMulQ4_K(aBuf, bBuf, outBuf, 1, n, k)
+			}
+			backend.Sync()
+			moUs := float64(since(t0).Microseconds()) / float64(iters)
+
+			// Benchmark NR4
+			for i := 0; i < warmup; i++ {
+				backend.MatMulQ4_K_NR4(aBuf, bBuf, outBuf, n, k)
+			}
+			backend.Sync()
+
+			t1 := now()
+			for i := 0; i < iters; i++ {
+				backend.MatMulQ4_K_NR4(aBuf, bBuf, outBuf, n, k)
+			}
+			backend.Sync()
+			nr4Us := float64(since(t1).Microseconds()) / float64(iters)
+
+			speedup := moUs / nr4Us
+			t.Logf("%-20s multi_output: %.1f µs  NR4: %.1f µs  speedup: %.2fx", d.name, moUs, nr4Us, speedup)
+		})
 	}
 }
