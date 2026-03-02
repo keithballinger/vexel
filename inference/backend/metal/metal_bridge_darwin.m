@@ -2245,12 +2245,18 @@ kernel void matvec_q4k_multi_output_f32(
             device const float4* a_vec = (device const float4*)(A + elem_start);
             device const uint* qs32 = (device const uint*)(blockPtr + 16 + qs_base);
 
+            // Factored inner loop: dot(a, dsc*q - dmn) = dsc*dot(a,q) - dmn*sum(a)
+            float raw_dot = 0.0f;
+            float act_sum = 0.0f;
             for (int i = 0; i < 8; i++) {
                 uint w = qs32[i];
                 float4 q = float4((w >> shift) & 0xF, (w >> (shift + 8)) & 0xF,
                                   (w >> (shift + 16)) & 0xF, (w >> (shift + 24)) & 0xF);
-                sum += dot(a_vec[i], dsc * q - dmn);
+                float4 a = a_vec[i];
+                raw_dot += dot(a, q);
+                act_sum += a.x + a.y + a.z + a.w;
             }
+            sum += dsc * raw_dot - dmn * act_sum;
         } else if (elem_start < K) {
             // Partial sub-block: scalar fallback for boundary
             device const uchar* qs = blockPtr + 16 + qs_base;
@@ -2409,15 +2415,15 @@ kernel void matvec_q4k_nr4_f32(
         dmn_var = dmin_val * float(mn); \
     }
 
-    // Macro: dot product of activation float4[8] with weight nibbles from qs32[8]
-    #define Q4K_NR4_DOT8(a_vec, qs32_ptr, shift, dsc_val, dmn_val, sum_var) \
+    // Macro: factored dot product — accumulates raw dot(a,q) without dsc/dmn scaling.
+    // Caller applies dsc*raw_dot - dmn*act_sum after the macro for correct result.
+    #define Q4K_NR4_DOT8(a_vec, qs32_ptr, shift, raw_dot_var) \
     { \
         for (int i = 0; i < 8; i++) { \
-            float4 a = (a_vec)[i]; \
             uint w = (qs32_ptr)[i]; \
             float4 q = float4((w >> (shift)) & 0xF, (w >> ((shift) + 8)) & 0xF, \
                               (w >> ((shift) + 16)) & 0xF, (w >> ((shift) + 24)) & 0xF); \
-            sum_var += dot(a, dsc_val * q - dmn_val); \
+            raw_dot_var += dot((a_vec)[i], q); \
         } \
     }
 
@@ -2431,7 +2437,7 @@ kernel void matvec_q4k_nr4_f32(
         int elem_start = block_idx * Q4K_BLOCK_SIZE + (j << 5);  // j * 32
 
         if (elem_start + 32 > K) {
-            // Partial sub-block: scalar fallback for boundary
+            // Partial sub-block: scalar fallback for boundary (unchanged — rare path)
             if (elem_start < K) {
                 // Row 0
                 {
@@ -2481,13 +2487,21 @@ kernel void matvec_q4k_nr4_f32(
         // Full sub-block: load activation ONCE, reuse for 4 weight rows
         device const float4* a_vec = (device const float4*)(A + elem_start);
 
+        // Precompute activation component sum — shared across all 4 rows
+        float act_sum = 0.0f;
+        for (int i = 0; i < 8; i++) {
+            act_sum += a_vec[i].x + a_vec[i].y + a_vec[i].z + a_vec[i].w;
+        }
+
         // Row 0 (always valid)
         {
             device const uchar* bp = b_row0 + block_idx * Q4K_BYTES_PER_BLOCK;
             float dsc, dmn;
             Q4K_NR4_EXTRACT_SCALE(bp, j, dsc, dmn);
             device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
-            Q4K_NR4_DOT8(a_vec, qs32, shift, dsc, dmn, sum0);
+            float raw_dot = 0.0f;
+            Q4K_NR4_DOT8(a_vec, qs32, shift, raw_dot);
+            sum0 += dsc * raw_dot - dmn * act_sum;
         }
 
         // Row 1
@@ -2496,7 +2510,9 @@ kernel void matvec_q4k_nr4_f32(
             float dsc, dmn;
             Q4K_NR4_EXTRACT_SCALE(bp, j, dsc, dmn);
             device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
-            Q4K_NR4_DOT8(a_vec, qs32, shift, dsc, dmn, sum1);
+            float raw_dot = 0.0f;
+            Q4K_NR4_DOT8(a_vec, qs32, shift, raw_dot);
+            sum1 += dsc * raw_dot - dmn * act_sum;
         }
 
         // Row 2
@@ -2505,7 +2521,9 @@ kernel void matvec_q4k_nr4_f32(
             float dsc, dmn;
             Q4K_NR4_EXTRACT_SCALE(bp, j, dsc, dmn);
             device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
-            Q4K_NR4_DOT8(a_vec, qs32, shift, dsc, dmn, sum2);
+            float raw_dot = 0.0f;
+            Q4K_NR4_DOT8(a_vec, qs32, shift, raw_dot);
+            sum2 += dsc * raw_dot - dmn * act_sum;
         }
 
         // Row 3
@@ -2514,7 +2532,9 @@ kernel void matvec_q4k_nr4_f32(
             float dsc, dmn;
             Q4K_NR4_EXTRACT_SCALE(bp, j, dsc, dmn);
             device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
-            Q4K_NR4_DOT8(a_vec, qs32, shift, dsc, dmn, sum3);
+            float raw_dot = 0.0f;
+            Q4K_NR4_DOT8(a_vec, qs32, shift, raw_dot);
+            sum3 += dsc * raw_dot - dmn * act_sum;
         }
     }
 
@@ -2644,7 +2664,14 @@ kernel void matvec_q4k_fused_rmsnorm_qkv_f16(
         act[6] = float4(hx_ptr[6]);
         act[7] = float4(hx_ptr[7]);
 
-        // Process each row with Q4_K dequant
+        // Precompute activation component sum — shared across all 4 rows (Q/K/V).
+        // Algebraic identity: dot(a, dsc*q - dmn) = dsc*dot(a,q) - dmn*sum(a)
+        float act_sum = 0.0f;
+        for (int i = 0; i < 8; i++) {
+            act_sum += act[i].x + act[i].y + act[i].z + act[i].w;
+        }
+
+        // Process each row with Q4_K dequant (factored dsc/dmn)
         #define PROCESS_ROW_Q4K_QKV(row_ptr, sum_var) \
         if (row_ptr) { \
             device const uchar* blockPtr = row_ptr + block_idx * Q4K_BYTES_PER_BLOCK; \
@@ -2665,12 +2692,14 @@ kernel void matvec_q4k_fused_rmsnorm_qkv_f16(
             int qs_base = (j >> 1) << 5; \
             int shift = (j & 1) << 2; \
             device const uint* qs32 = (device const uint*)(blockPtr + 16 + qs_base); \
+            float raw_dot = 0.0f; \
             for (int i = 0; i < 8; i++) { \
                 uint w = qs32[i]; \
                 float4 q = float4((w >> shift) & 0xF, (w >> (shift + 8)) & 0xF, \
                                   (w >> (shift + 16)) & 0xF, (w >> (shift + 24)) & 0xF); \
-                sum_var += dot(act[i], dsc * q - dmn); \
+                raw_dot += dot(act[i], q); \
             } \
+            sum_var += dsc * raw_dot - dmn * act_sum; \
         }
 
         PROCESS_ROW_Q4K_QKV(row0, sum0);
@@ -2809,7 +2838,14 @@ kernel void matvec_q4k_fused_rmsnorm_qkv_rope_scatter_f16(
         act[6] = float4(hx_ptr[6]);
         act[7] = float4(hx_ptr[7]);
 
-        // Process each row with Q4_K dequant
+        // Precompute activation component sum — shared across all 4 rows.
+        // Algebraic identity: dot(a, dsc*q - dmn) = dsc*dot(a,q) - dmn*sum(a)
+        float act_sum = 0.0f;
+        for (int i = 0; i < 8; i++) {
+            act_sum += act[i].x + act[i].y + act[i].z + act[i].w;
+        }
+
+        // Process each row with Q4_K dequant (factored dsc/dmn)
         #define PROCESS_ROW_Q4K_ROPE(row_ptr, sum_var) \
         if (row_ptr) { \
             device const uchar* blockPtr = row_ptr + block_idx * Q4K_BYTES_PER_BLOCK; \
@@ -2830,12 +2866,14 @@ kernel void matvec_q4k_fused_rmsnorm_qkv_rope_scatter_f16(
             int qs_base = (j >> 1) << 5; \
             int shift = (j & 1) << 2; \
             device const uint* qs32 = (device const uint*)(blockPtr + 16 + qs_base); \
+            float raw_dot = 0.0f; \
             for (int i = 0; i < 8; i++) { \
                 uint w = qs32[i]; \
                 float4 q = float4((w >> shift) & 0xF, (w >> (shift + 8)) & 0xF, \
                                   (w >> (shift + 16)) & 0xF, (w >> (shift + 24)) & 0xF); \
-                sum_var += dot(act[i], dsc * q - dmn); \
+                raw_dot += dot(act[i], q); \
             } \
+            sum_var += dsc * raw_dot - dmn * act_sum; \
         }
 
         PROCESS_ROW_Q4K_ROPE(row0, sum0);
@@ -2977,7 +3015,13 @@ kernel void matvec_q4k_fused_mlp_f32(
         act[0] = x_vec[0]; act[1] = x_vec[1]; act[2] = x_vec[2]; act[3] = x_vec[3];
         act[4] = x_vec[4]; act[5] = x_vec[5]; act[6] = x_vec[6]; act[7] = x_vec[7];
 
-        // Process Q4_K row macro
+        // Precompute activation component sum — shared across all 8 rows
+        float act_sum = 0.0f;
+        for (int i = 0; i < 8; i++) {
+            act_sum += act[i].x + act[i].y + act[i].z + act[i].w;
+        }
+
+        // Process Q4_K row macro (factored dsc/dmn)
         #define PROCESS_ROW_Q4K_MLP(row_ptr, sum_var) \
         if (row_ptr) { \
             device const uchar* blockPtr = row_ptr + block_idx * Q4K_BYTES_PER_BLOCK; \
@@ -2998,12 +3042,14 @@ kernel void matvec_q4k_fused_mlp_f32(
             int qs_base = (j >> 1) << 5; \
             int shift = (j & 1) << 2; \
             device const uint* qs32 = (device const uint*)(blockPtr + 16 + qs_base); \
+            float raw_dot = 0.0f; \
             for (int i = 0; i < 8; i++) { \
                 uint w = qs32[i]; \
                 float4 q = float4((w >> shift) & 0xF, (w >> (shift + 8)) & 0xF, \
                                   (w >> (shift + 16)) & 0xF, (w >> (shift + 24)) & 0xF); \
-                sum_var += dot(act[i], dsc * q - dmn); \
+                raw_dot += dot(act[i], q); \
             } \
+            sum_var += dsc * raw_dot - dmn * act_sum; \
         }
 
         // Process W1 (Gate)
@@ -3141,7 +3187,16 @@ kernel void matvec_q4k_fused_rmsnorm_mlp_f32(
         act[6] = float4(hx_ptr[6]);
         act[7] = float4(hx_ptr[7]);
 
-        // Process Q4_K row macro (shared between W1 and W3)
+        // Precompute activation component sum — shared across all 8 rows (4 Gate + 4 Up).
+        // Algebraic identity: dot(a, dsc*q - dmn) = dsc*dot(a,q) - dmn*sum(a)
+        // This factors out dsc multiply and dmn subtract from the 8-iteration inner loop,
+        // reducing ALU from ~11 FMAs/iter to ~7 FMAs/iter, applied 8× per sub-block position.
+        float act_sum = 0.0f;
+        for (int i = 0; i < 8; i++) {
+            act_sum += act[i].x + act[i].y + act[i].z + act[i].w;
+        }
+
+        // Process Q4_K row macro with factored dsc/dmn (shared between W1 and W3)
         #define PROCESS_ROW_Q4K_FNMLP(row_ptr, sum_var) \
         if (row_ptr) { \
             device const uchar* blockPtr = row_ptr + block_idx * Q4K_BYTES_PER_BLOCK; \
@@ -3162,12 +3217,14 @@ kernel void matvec_q4k_fused_rmsnorm_mlp_f32(
             int qs_base = (j >> 1) << 5; \
             int shift = (j & 1) << 2; \
             device const uint* qs32 = (device const uint*)(blockPtr + 16 + qs_base); \
+            float raw_dot = 0.0f; \
             for (int i = 0; i < 8; i++) { \
                 uint w = qs32[i]; \
                 float4 q = float4((w >> shift) & 0xF, (w >> (shift + 8)) & 0xF, \
                                   (w >> (shift + 16)) & 0xF, (w >> (shift + 24)) & 0xF); \
-                sum_var += dot(act[i], dsc * q - dmn); \
+                raw_dot += dot(act[i], q); \
             } \
+            sum_var += dsc * raw_dot - dmn * act_sum; \
         }
 
         // Process W1 (Gate)
@@ -3265,12 +3322,18 @@ kernel void matvec_q4k_f16in_f32(
             device const half4* a_vec = (device const half4*)(A + elem_start);
             device const uint* qs32 = (device const uint*)(blockPtr + 16 + qs_base);
 
+            // Factored inner loop: dot(a, dsc*q - dmn) = dsc*dot(a,q) - dmn*sum(a)
+            float raw_dot = 0.0f;
+            float act_sum = 0.0f;
             for (int i = 0; i < 8; i++) {
                 uint w = qs32[i];
                 float4 q = float4((w >> shift) & 0xF, (w >> (shift + 8)) & 0xF,
                                   (w >> (shift + 16)) & 0xF, (w >> (shift + 24)) & 0xF);
-                sum += dot(float4(a_vec[i]), dsc * q - dmn);
+                float4 a = float4(a_vec[i]);
+                raw_dot += dot(a, q);
+                act_sum += a.x + a.y + a.z + a.w;
             }
+            sum += dsc * raw_dot - dmn * act_sum;
         } else if (elem_start < K) {
             device const uchar* qs = blockPtr + 16 + qs_base;
             for (int i = 0; i < 32 && elem_start + i < K; i++) {
@@ -3338,12 +3401,18 @@ kernel void matvec_q4k_f16in_add_f32(
             device const half4* a_vec = (device const half4*)(A + elem_start);
             device const uint* qs32 = (device const uint*)(blockPtr + 16 + qs_base);
 
+            // Factored inner loop: dot(a, dsc*q - dmn) = dsc*dot(a,q) - dmn*sum(a)
+            float raw_dot = 0.0f;
+            float act_sum = 0.0f;
             for (int i = 0; i < 8; i++) {
                 uint w = qs32[i];
                 float4 q = float4((w >> shift) & 0xF, (w >> (shift + 8)) & 0xF,
                                   (w >> (shift + 16)) & 0xF, (w >> (shift + 24)) & 0xF);
-                sum += dot(float4(a_vec[i]), dsc * q - dmn);
+                float4 a = float4(a_vec[i]);
+                raw_dot += dot(a, q);
+                act_sum += a.x + a.y + a.z + a.w;
             }
+            sum += dsc * raw_dot - dmn * act_sum;
         } else if (elem_start < K) {
             device const uchar* qs = blockPtr + 16 + qs_base;
             for (int i = 0; i < 32 && elem_start + i < K; i++) {
@@ -3413,12 +3482,18 @@ kernel void matvec_q4k_add_f32(
             device const float4* a_vec = (device const float4*)(A + elem_start);
             device const uint* qs32 = (device const uint*)(blockPtr + 16 + qs_base);
 
+            // Factored inner loop: dot(a, dsc*q - dmn) = dsc*dot(a,q) - dmn*sum(a)
+            float raw_dot = 0.0f;
+            float act_sum = 0.0f;
             for (int i = 0; i < 8; i++) {
                 uint w = qs32[i];
                 float4 q = float4((w >> shift) & 0xF, (w >> (shift + 8)) & 0xF,
                                   (w >> (shift + 16)) & 0xF, (w >> (shift + 24)) & 0xF);
-                sum += dot(a_vec[i], dsc * q - dmn);
+                float4 a = a_vec[i];
+                raw_dot += dot(a, q);
+                act_sum += a.x + a.y + a.z + a.w;
             }
+            sum += dsc * raw_dot - dmn * act_sum;
         } else if (elem_start < K) {
             device const uchar* qs = blockPtr + 16 + qs_base;
             for (int i = 0; i < 32 && elem_start + i < K; i++) {
@@ -3483,14 +3558,14 @@ kernel void matvec_q4k_nr4_f16in_f32(
         dmn_var = dmin_val * float(mn); \
     }
 
-    #define Q4K_NR4_F16_DOT8(a_vec, qs32_ptr, shift, dsc_val, dmn_val, sum_var) \
+    // Factored dot8: accumulates raw dot(a,q) without dsc/dmn. Caller applies scaling.
+    #define Q4K_NR4_F16_DOT8(a_vec, qs32_ptr, shift, raw_dot_var) \
     { \
         for (int i = 0; i < 8; i++) { \
-            float4 a = float4((a_vec)[i]); \
             uint w = (qs32_ptr)[i]; \
             float4 q = float4((w >> (shift)) & 0xF, (w >> ((shift) + 8)) & 0xF, \
                               (w >> ((shift) + 16)) & 0xF, (w >> ((shift) + 24)) & 0xF); \
-            sum_var += dot(a, dsc_val * q - dmn_val); \
+            raw_dot_var += dot(float4((a_vec)[i]), q); \
         } \
     }
 
@@ -3552,13 +3627,22 @@ kernel void matvec_q4k_nr4_f16in_f32(
         // Full sub-block: load FP16 activation ONCE, convert to float4, reuse for 4 weight rows
         device const half4* a_vec = (device const half4*)(A + elem_start);
 
+        // Precompute activation component sum — shared across 4 rows
+        float act_sum = 0.0f;
+        for (int i = 0; i < 8; i++) {
+            float4 a = float4(a_vec[i]);
+            act_sum += a.x + a.y + a.z + a.w;
+        }
+
         // Row 0 (always valid)
         {
             device const uchar* bp = b_row0 + block_idx * Q4K_BYTES_PER_BLOCK;
             float dsc, dmn;
             Q4K_NR4_F16_EXTRACT_SCALE(bp, j, dsc, dmn);
             device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
-            Q4K_NR4_F16_DOT8(a_vec, qs32, shift, dsc, dmn, sum0);
+            float raw_dot = 0.0f;
+            Q4K_NR4_F16_DOT8(a_vec, qs32, shift, raw_dot);
+            sum0 += dsc * raw_dot - dmn * act_sum;
         }
 
         if (validOutputs > 1) {
@@ -3566,7 +3650,9 @@ kernel void matvec_q4k_nr4_f16in_f32(
             float dsc, dmn;
             Q4K_NR4_F16_EXTRACT_SCALE(bp, j, dsc, dmn);
             device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
-            Q4K_NR4_F16_DOT8(a_vec, qs32, shift, dsc, dmn, sum1);
+            float raw_dot = 0.0f;
+            Q4K_NR4_F16_DOT8(a_vec, qs32, shift, raw_dot);
+            sum1 += dsc * raw_dot - dmn * act_sum;
         }
 
         if (validOutputs > 2) {
@@ -3574,7 +3660,9 @@ kernel void matvec_q4k_nr4_f16in_f32(
             float dsc, dmn;
             Q4K_NR4_F16_EXTRACT_SCALE(bp, j, dsc, dmn);
             device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
-            Q4K_NR4_F16_DOT8(a_vec, qs32, shift, dsc, dmn, sum2);
+            float raw_dot = 0.0f;
+            Q4K_NR4_F16_DOT8(a_vec, qs32, shift, raw_dot);
+            sum2 += dsc * raw_dot - dmn * act_sum;
         }
 
         if (validOutputs > 3) {
@@ -3582,7 +3670,9 @@ kernel void matvec_q4k_nr4_f16in_f32(
             float dsc, dmn;
             Q4K_NR4_F16_EXTRACT_SCALE(bp, j, dsc, dmn);
             device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
-            Q4K_NR4_F16_DOT8(a_vec, qs32, shift, dsc, dmn, sum3);
+            float raw_dot = 0.0f;
+            Q4K_NR4_F16_DOT8(a_vec, qs32, shift, raw_dot);
+            sum3 += dsc * raw_dot - dmn * act_sum;
         }
     }
 
@@ -3650,14 +3740,14 @@ kernel void matvec_q4k_nr4_add_f32(
         dmn_var = dmin_val * float(mn); \
     }
 
-    #define Q4K_NR4_ADD_DOT8(a_vec, qs32_ptr, shift, dsc_val, dmn_val, sum_var) \
+    // Factored dot8: accumulates raw dot(a,q) without dsc/dmn. Caller applies scaling.
+    #define Q4K_NR4_ADD_DOT8(a_vec, qs32_ptr, shift, raw_dot_var) \
     { \
         for (int i = 0; i < 8; i++) { \
-            float4 a = (a_vec)[i]; \
             uint w = (qs32_ptr)[i]; \
             float4 q = float4((w >> (shift)) & 0xF, (w >> ((shift) + 8)) & 0xF, \
                               (w >> ((shift) + 16)) & 0xF, (w >> ((shift) + 24)) & 0xF); \
-            sum_var += dot(a, dsc_val * q - dmn_val); \
+            raw_dot_var += dot((a_vec)[i], q); \
         } \
     }
 
@@ -3718,12 +3808,20 @@ kernel void matvec_q4k_nr4_add_f32(
         // Full sub-block: load activation ONCE, reuse for 4 weight rows
         device const float4* a_vec = (device const float4*)(A + elem_start);
 
+        // Precompute activation component sum — shared across 4 rows
+        float act_sum = 0.0f;
+        for (int i = 0; i < 8; i++) {
+            act_sum += a_vec[i].x + a_vec[i].y + a_vec[i].z + a_vec[i].w;
+        }
+
         {
             device const uchar* bp = b_row0 + block_idx * Q4K_BYTES_PER_BLOCK;
             float dsc, dmn;
             Q4K_NR4_ADD_EXTRACT_SCALE(bp, j, dsc, dmn);
             device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
-            Q4K_NR4_ADD_DOT8(a_vec, qs32, shift, dsc, dmn, sum0);
+            float raw_dot = 0.0f;
+            Q4K_NR4_ADD_DOT8(a_vec, qs32, shift, raw_dot);
+            sum0 += dsc * raw_dot - dmn * act_sum;
         }
 
         if (validOutputs > 1) {
@@ -3731,7 +3829,9 @@ kernel void matvec_q4k_nr4_add_f32(
             float dsc, dmn;
             Q4K_NR4_ADD_EXTRACT_SCALE(bp, j, dsc, dmn);
             device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
-            Q4K_NR4_ADD_DOT8(a_vec, qs32, shift, dsc, dmn, sum1);
+            float raw_dot = 0.0f;
+            Q4K_NR4_ADD_DOT8(a_vec, qs32, shift, raw_dot);
+            sum1 += dsc * raw_dot - dmn * act_sum;
         }
 
         if (validOutputs > 2) {
@@ -3739,7 +3839,9 @@ kernel void matvec_q4k_nr4_add_f32(
             float dsc, dmn;
             Q4K_NR4_ADD_EXTRACT_SCALE(bp, j, dsc, dmn);
             device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
-            Q4K_NR4_ADD_DOT8(a_vec, qs32, shift, dsc, dmn, sum2);
+            float raw_dot = 0.0f;
+            Q4K_NR4_ADD_DOT8(a_vec, qs32, shift, raw_dot);
+            sum2 += dsc * raw_dot - dmn * act_sum;
         }
 
         if (validOutputs > 3) {
@@ -3747,7 +3849,9 @@ kernel void matvec_q4k_nr4_add_f32(
             float dsc, dmn;
             Q4K_NR4_ADD_EXTRACT_SCALE(bp, j, dsc, dmn);
             device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
-            Q4K_NR4_ADD_DOT8(a_vec, qs32, shift, dsc, dmn, sum3);
+            float raw_dot = 0.0f;
+            Q4K_NR4_ADD_DOT8(a_vec, qs32, shift, raw_dot);
+            sum3 += dsc * raw_dot - dmn * act_sum;
         }
     }
 
