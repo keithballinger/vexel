@@ -213,7 +213,7 @@ func TestThroughputDecode(t *testing.T) {
 func TestThroughputDecodeContextScaling(t *testing.T) {
 	// Measure decode throughput at various context lengths.
 	// Each subtest creates a fresh model, fills context, then measures.
-	contextLengths := []int{16, 64, 128, 256, 512}
+	contextLengths := []int{16, 128, 256, 512, 1024, 2048}
 
 	type decodeResult struct {
 		ctxLen    int
@@ -267,6 +267,71 @@ func TestThroughputDecodeContextScaling(t *testing.T) {
 	t.Log("\n=== Decode Throughput vs Context Length ===")
 	for _, r := range results {
 		t.Logf("  ctx=%3d: %6.1f tok/s  (%.2f ms/token)", r.ctxLen, r.tokPerSec, r.avgMs)
+	}
+}
+
+// TestDecodeContextScalingTarget is the TDD acceptance test for context scaling.
+// Asserts ≤5% decode throughput degradation from ctx=16 to ctx=2048.
+// This matches llama.cpp's ~2% degradation across the same range.
+func TestDecodeContextScalingTarget(t *testing.T) {
+	type decodeResult struct {
+		ctxLen    int
+		tokPerSec float64
+		avgMs     float64
+	}
+	var results []decodeResult
+
+	// Measure at baseline (ctx=16) and target (ctx=2048)
+	for _, ctxLen := range []int{16, 2048} {
+		t.Run(fmt.Sprintf("ctx_%d", ctxLen), func(t *testing.T) {
+			m, b, c := setupModel(t, false)
+			defer b.Close()
+			defer c.Free()
+
+			fillToks := generateTokenSequence(ctxLen)
+			logits := getLogits(t, m, b, fillToks, 0)
+			nextToken := argmax(logits)
+			pos := ctxLen
+
+			// Warmup
+			for w := 0; w < 5; w++ {
+				logits = getLogits(t, m, b, []int{nextToken}, pos)
+				nextToken = argmax(logits)
+				pos++
+			}
+
+			// Measure 30 tokens for stable average
+			const n = 30
+			start := time.Now()
+			for i := 0; i < n; i++ {
+				logits = getLogits(t, m, b, []int{nextToken}, pos)
+				nextToken = argmax(logits)
+				pos++
+			}
+			elapsed := time.Since(start)
+
+			tps := float64(n) / elapsed.Seconds()
+			avgMs := float64(elapsed.Microseconds()) / 1000 / float64(n)
+			t.Logf("Context=%d: %.1f tok/s (%.2f ms/token)", ctxLen, tps, avgMs)
+
+			results = append(results, decodeResult{ctxLen, tps, avgMs})
+		})
+	}
+
+	if len(results) == 2 {
+		baseline := results[0].tokPerSec
+		longCtx := results[1].tokPerSec
+		degradation := (baseline - longCtx) / baseline * 100
+
+		t.Logf("\n=== Context Scaling Target ===")
+		t.Logf("  ctx=16:   %.1f tok/s", baseline)
+		t.Logf("  ctx=2048: %.1f tok/s", longCtx)
+		t.Logf("  Degradation: %.1f%% (target: ≤5%%)", degradation)
+
+		if degradation > 5.0 {
+			t.Errorf("Context degradation %.1f%% exceeds 5%% target (ctx=16: %.1f, ctx=2048: %.1f)",
+				degradation, baseline, longCtx)
+		}
 	}
 }
 

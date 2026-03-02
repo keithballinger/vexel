@@ -693,6 +693,20 @@ void metal_sdpa_flash_decode_f16(void* queue, void* pipeline,
                                   int kvLen, int numQHeads, int numKVHeads, int headDim,
                                   float scale, int kvHeadStride);
 
+// Chunk-based Flash Attention SDPA F16 v3 (high ILP, C=32 chunk processing)
+void metal_sdpa_flash_decode_f16_v3(void* queue, void* pipeline,
+                                     void* Q, void* K, void* V, void* out,
+                                     int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                     float scale, int kvHeadStride);
+
+// NWG (N-Way Group) Flash Attention SDPA F16: multi-threadgroup per Q head with atomic merge.
+// partials: device buffer for partial results, counters: device buffer for atomic coordination.
+void metal_sdpa_flash_decode_f16_nwg(void* queue, void* pipeline,
+                                      void* Q, void* K, void* V, void* out,
+                                      void* partials, void* counters,
+                                      int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                      float scale, int kvHeadStride);
+
 // Tiled Flash Attention SDPA F16 (split-K approach for better GPU occupancy)
 void metal_sdpa_flash_decode_f16_tiled(void* queue,
                                         void* tilePipeline,

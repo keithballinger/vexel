@@ -32,3 +32,7 @@ This plan tracks all major tracks for the project. Each track has its own detail
 - [ ] **Track: Beat MLX: Close the decode gap against MLX (83.5 tok/s) via Flash Attention SDPA, NR4 matmul, and tiled prefill GEMM.**
 *Link: [./tracks/beat_mlx_20260227/](./tracks/beat_mlx_20260227/)*
 *Status: Plan created. MLX benchmarked at 83.5 tok/s decode (Mistral 7B 4-bit, M3 Max). Three optimization targets: Flash Attention SDPA (fix 24.5% context scaling degradation), Q4_0 NR4 matmul (close 22% short-context gap), tiled prefill GEMM (close 4-5x prefill gap).*
+
+- [~] **Track: Context Scaling Optimization: Close 36% decode gap at ctx=2048 via concurrent dispatch and SDPA improvements.**
+*Link: [./tracks/context_scaling_optimization_20260228/](./tracks/context_scaling_optimization_20260228/)*
+*Status: Phase 1 complete. NWG multi-TG SDPA kernel (2.86x faster at ctx=2048 isolated, single dispatch with atomic merge). SDPA overhead reduced from ~8ms to ~2.7ms at ctx=2048. E2E degradation: 34.8%→19.5% (ctx=16→2048). Remaining gap requires Phase 2 (cross-layer pipelining). Vexel: 71.9→56.6 tok/s (ctx=16→2048). llama.cpp: 72.9→71.5 tok/s (flat).*

@@ -130,6 +130,8 @@ type Backend struct {
 	sdpaDecodeF16Pipeline       unsafe.Pointer
 	sdpaDecodeF16VecPipeline    unsafe.Pointer // Vectorized version
 	sdpaFlashDecodeF16Pipeline      unsafe.Pointer // Flash Attention split-KV (O(headDim) shared mem)
+	sdpaFlashDecodeF16V3Pipeline    unsafe.Pointer // Chunk-based split-KV v3 (high ILP)
+	sdpaFlashDecodeF16NWGPipeline   unsafe.Pointer // NWG multi-TG with atomic merge
 	sdpaFlashDecodeF16TiledPipeline unsafe.Pointer // Tiled split-K for long context
 	sdpaFlashDecodeF16MergePipeline unsafe.Pointer // Merge partials from tiled kernel
 	sdpaDecodeF16HD64Pipeline   unsafe.Pointer // Specialized for headDim=64
@@ -167,6 +169,12 @@ type Backend struct {
 	deinterleave2WayPipeline   unsafe.Pointer // Deinterleave fused gate_up output into separate gate, up
 	reshapePagedKVPipeline     unsafe.Pointer
 	sdpaPagedDecodePipeline    unsafe.Pointer
+
+	// NWG SDPA scratch buffers (lazy-allocated, reused across calls)
+	nwgPartialsBuf  unsafe.Pointer // partials buffer for multi-TG merge
+	nwgCountersBuf  unsafe.Pointer // atomic counter buffer for TG coordination
+	nwgPartialsSize int            // current allocation size in bytes
+	nwgCountersSize int            // current allocation size in bytes
 }
 
 var (
@@ -292,6 +300,8 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.sdpaDecodeF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_f16"))
 	b.sdpaDecodeF16VecPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_f16_vec"))
 	b.sdpaFlashDecodeF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f16"))
+	b.sdpaFlashDecodeF16V3Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f16_v3"))
+	b.sdpaFlashDecodeF16NWGPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f16_nwg"))
 	b.sdpaFlashDecodeF16TiledPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f16_tiled"))
 	b.sdpaFlashDecodeF16MergePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f16_merge"))
 	b.sdpaDecodeF16HD64Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_f16_hd64"))
@@ -330,6 +340,13 @@ func NewBackend(deviceID int) (*Backend, error) {
 
 // Close releases all Metal resources.
 func (b *Backend) Close() {
+	// Release NWG scratch buffers
+	if b.nwgPartialsBuf != nil {
+		C.metal_release(b.nwgPartialsBuf)
+	}
+	if b.nwgCountersBuf != nil {
+		C.metal_release(b.nwgCountersBuf)
+	}
 	if b.library != nil {
 		C.metal_release(b.library)
 	}
@@ -1667,10 +1684,57 @@ func (b *Backend) MatMulQ4_0_F16(a, bMat, out tensor.DevicePtr, n, k int) {
 // kvHeadStride: stride between KV heads in elements (maxSeqLen * headDim).
 func (b *Backend) SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
 	b.profiler.RecordDispatch("SDPA")
-	// Use Flash Attention split-KV kernel when available. The split-KV approach with
-	// online softmax has O(headDim) shared memory instead of O(kvLen), providing flat
-	// context scaling. Enabled at all context lengths since the correctness tests
-	// pass down to kvLen=1 and the overhead vs vec kernel is negligible at short contexts.
+
+	// NWG (multi-threadgroup) kernel for long contexts: 2.86x faster at ctx=2048.
+	// Uses multiple TGs per Q head with atomic merge — kicks in at kvLen > 256.
+	if b.sdpaFlashDecodeF16NWGPipeline != nil && headDim%32 == 0 && kvLen > 256 {
+		numTGs := (kvLen + 255) / 256
+		if numTGs < 1 {
+			numTGs = 1
+		}
+		// Ensure scratch buffers are large enough (lazy reallocation)
+		partialsNeeded := numQHeads * numTGs * (2 + headDim) * 4
+		countersNeeded := numQHeads * 4
+		if b.nwgPartialsBuf == nil || b.nwgPartialsSize < partialsNeeded {
+			if b.nwgPartialsBuf != nil {
+				C.metal_release(b.nwgPartialsBuf)
+			}
+			b.nwgPartialsBuf = C.metal_alloc_buffer(b.device, C.size_t(partialsNeeded))
+			b.nwgPartialsSize = partialsNeeded
+		}
+		if b.nwgCountersBuf == nil || b.nwgCountersSize < countersNeeded {
+			if b.nwgCountersBuf != nil {
+				C.metal_release(b.nwgCountersBuf)
+			}
+			b.nwgCountersBuf = C.metal_alloc_buffer(b.device, C.size_t(countersNeeded))
+			b.nwgCountersSize = countersNeeded
+		}
+
+		// Zero counters + barrier before NWG dispatch (required for atomic merge protocol)
+		C.metal_zero_f32(b.queue, b.zeroPipeline, b.nwgCountersBuf, C.int(numQHeads))
+		C.metal_memory_barrier()
+
+		C.metal_sdpa_flash_decode_f16_nwg(b.queue, b.sdpaFlashDecodeF16NWGPipeline,
+			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+			unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+			b.nwgPartialsBuf, b.nwgCountersBuf,
+			C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+			C.float(scale), C.int(kvHeadStride))
+		return
+	}
+
+	// Prefer chunk-based v3 kernel (1.15-1.9x faster than v1 across all context lengths).
+	// Uses separated Q·K/V phases within C=32-position chunks for higher ILP.
+	if b.sdpaFlashDecodeF16V3Pipeline != nil && headDim%32 == 0 {
+		C.metal_sdpa_flash_decode_f16_v3(b.queue, b.sdpaFlashDecodeF16V3Pipeline,
+			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+			unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+			C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+			C.float(scale), C.int(kvHeadStride))
+		return
+	}
+
+	// Fallback: v1 Flash Attention split-KV kernel (online softmax, O(headDim) shared mem).
 	if b.sdpaFlashDecodeF16Pipeline != nil && headDim%32 == 0 {
 		C.metal_sdpa_flash_decode_f16(b.queue, b.sdpaFlashDecodeF16Pipeline,
 			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
@@ -1693,6 +1757,33 @@ func (b *Backend) SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKV
 	C.metal_sdpa_decode_f16(b.queue, b.sdpaDecodeF16Pipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale), C.int(kvHeadStride))
+}
+
+// SDPAF16V3 performs chunk-based SDPA with FP16 KV cache. Uses separated Q·K/V
+// phases within C=32-position chunks for higher instruction-level parallelism.
+// Same buffer layout as SDPAF16 — drop-in replacement for A/B testing.
+func (b *Backend) SDPAF16V3(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
+	b.profiler.RecordDispatch("SDPA")
+	C.metal_sdpa_flash_decode_f16_v3(b.queue, b.sdpaFlashDecodeF16V3Pipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale), C.int(kvHeadStride))
+}
+
+// SDPAF16NWG performs multi-threadgroup SDPA with FP16 KV cache.
+// Uses N threadgroups per Q head (N = ceil(kvLen/256)) with atomic merge.
+// The caller must provide:
+//   - partials buffer: numQHeads * numTGs * (2 + headDim) * 4 bytes
+//   - counters buffer: numQHeads * 4 bytes (zeroed before each call)
+func (b *Backend) SDPAF16NWG(q, k, v, out, partials, counters tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
+	b.profiler.RecordDispatch("SDPA")
+	C.metal_sdpa_flash_decode_f16_nwg(b.queue, b.sdpaFlashDecodeF16NWGPipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+		unsafe.Pointer(partials.Addr()), unsafe.Pointer(counters.Addr()),
 		C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
 		C.float(scale), C.int(kvHeadStride))
 }

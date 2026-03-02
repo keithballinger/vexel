@@ -5824,6 +5824,474 @@ kernel void sdpa_flash_decode_f16(
 }
 
 // =============================================================================
+// Chunk-based Flash Attention SDPA decode for FP16 KV cache (v3)
+//
+// Key improvements over v1 (sdpa_flash_decode_f16):
+//   1. Chunk-based processing: Q·K and V phases separated within C-position chunks,
+//      enabling instruction-level parallelism (ILP) — 32 independent loads in flight.
+//   2. Vectorized half4 loads with dot() intrinsic for Q·K computation.
+//   3. Scores stored in registers (C per simdgroup) for fast softmax.
+//
+// Design follows llama.cpp's kernel_flash_attn_ext_vec pattern:
+//   - 1 threadgroup per Q head, 8 simdgroups per TG
+//   - KV positions split across simdgroups in strides (not contiguous chunks)
+//   - Each simdgroup processes positions: SG_id, SG_id+8, SG_id+16, ...
+//   - Within each SG, positions processed in chunks of C=32
+//   - Phase 1: compute Q·K for C positions (vectorized, high ILP)
+//   - Phase 2: online softmax update for the chunk
+//   - Phase 3: accumulate weighted V for C positions
+//
+// For headDim=128: each thread loads float4 (4 half elements → 4 float), 32 threads
+// cover the full 128-dim vector. simd_sum reduces to full dot product.
+// =============================================================================
+constant int FLASH_V3_THREADS = 256;
+constant int FLASH_V3_NUM_SG = 8;
+constant int FLASH_V3_CHUNK = 32;   // positions per chunk
+
+kernel void sdpa_flash_decode_f16_v3(
+    device const half* Q [[buffer(0)]],         // [numQHeads, headDim] in FP16
+    device const half* K [[buffer(1)]],         // [numKVHeads, maxSeqLen, headDim] in FP16
+    device const half* V [[buffer(2)]],         // [numKVHeads, maxSeqLen, headDim] in FP16
+    device half* out [[buffer(3)]],             // [numQHeads, headDim] in FP16
+    constant int& kvLen [[buffer(4)]],
+    constant int& numQHeads [[buffer(5)]],
+    constant int& numKVHeads [[buffer(6)]],
+    constant int& headDim [[buffer(7)]],
+    constant float& scale [[buffer(8)]],
+    constant int& kvHeadStride [[buffer(9)]],
+    threadgroup float* shared [[threadgroup(0)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int qHead = gid;
+    if (qHead >= numQHeads) return;
+
+    // GQA: map Q head to KV head
+    int headsPerKV = numQHeads / numKVHeads;
+    int kvHead = qHead / headsPerKV;
+    int kvBase = kvHead * kvHeadStride;
+
+    int elemsPerThread = headDim / 32;
+    int threadBase = simd_lane * elemsPerThread;
+
+    // Load Q into registers as float4 (assumes headDim % 128 == 0 for 4 elements/thread)
+    // For headDim=128: elemsPerThread=4, one float4 per thread
+    float4 q_f4;
+    if (elemsPerThread == 4) {
+        half4 q_h4 = *(device const half4*)(Q + qHead * headDim + threadBase);
+        q_f4 = float4(q_h4);
+    }
+    // For larger headDim, fall back to scalar
+    float q_reg[8];
+    if (elemsPerThread != 4) {
+        for (int e = 0; e < elemsPerThread; e++) {
+            q_reg[e] = float(Q[qHead * headDim + threadBase + e]);
+        }
+    }
+
+    // Per-simdgroup online softmax state
+    float m_i = -INFINITY;
+    float l_i = 0.0f;
+    float o_i[8];
+    for (int e = 0; e < 8; e++) o_i[e] = 0.0f;
+
+    // Simdgroups process KV positions in strides for better cache behavior:
+    // SG 0: pos 0,8,16,...  SG 1: pos 1,9,17,...  etc.
+    // Within each stride step, process a chunk of C consecutive positions.
+    // Actually, simpler: each SG handles a contiguous range (same as v1 but chunk-based).
+    int chunkSize = (kvLen + FLASH_V3_NUM_SG - 1) / FLASH_V3_NUM_SG;
+    int startPos = simd_group * chunkSize;
+    int endPos = min(startPos + chunkSize, kvLen);
+
+    // Scores buffer in registers for the current chunk
+    float scores[FLASH_V3_CHUNK];
+
+    // Process positions in chunks of C=32
+    for (int chunkStart = startPos; chunkStart < endPos; chunkStart += FLASH_V3_CHUNK) {
+        int chunkEnd = min(chunkStart + FLASH_V3_CHUNK, endPos);
+        int chunkLen = chunkEnd - chunkStart;
+
+        // ---- Phase 1: Compute Q·K for all positions in this chunk ----
+        for (int c = 0; c < chunkLen; c++) {
+            int pos = chunkStart + c;
+            int kBase = kvBase + pos * headDim;
+            float dot_val;
+            if (elemsPerThread == 4) {
+                half4 k_h4 = *(device const half4*)(K + kBase + threadBase);
+                dot_val = dot(q_f4, float4(k_h4));
+            } else {
+                dot_val = 0.0f;
+                for (int e = 0; e < elemsPerThread; e++) {
+                    dot_val += q_reg[e] * float(K[kBase + threadBase + e]);
+                }
+            }
+            scores[c] = simd_sum(dot_val) * scale;
+        }
+
+        // ---- Phase 2: Online softmax for this chunk ----
+        // Find max across the chunk
+        float chunk_max = -INFINITY;
+        for (int c = 0; c < chunkLen; c++) {
+            chunk_max = max(chunk_max, scores[c]);
+        }
+
+        float m_new = max(m_i, chunk_max);
+        float alpha = exp(m_i - m_new);
+
+        // Compute exp(score - m_new) and sum
+        float chunk_sum = 0.0f;
+        for (int c = 0; c < chunkLen; c++) {
+            scores[c] = exp(scores[c] - m_new);
+            chunk_sum += scores[c];
+        }
+
+        l_i = l_i * alpha + chunk_sum;
+
+        // Rescale old accumulator
+        for (int e = 0; e < elemsPerThread; e++) {
+            o_i[e] *= alpha;
+        }
+
+        // ---- Phase 3: Weighted V accumulation ----
+        for (int c = 0; c < chunkLen; c++) {
+            int pos = chunkStart + c;
+            int vBase = kvBase + pos * headDim;
+            float w = scores[c];
+            if (elemsPerThread == 4) {
+                half4 v_h4 = *(device const half4*)(V + vBase + threadBase);
+                float4 vf4 = float4(v_h4);
+                o_i[0] += w * vf4[0];
+                o_i[1] += w * vf4[1];
+                o_i[2] += w * vf4[2];
+                o_i[3] += w * vf4[3];
+            } else {
+                for (int e = 0; e < elemsPerThread; e++) {
+                    o_i[e] += w * float(V[vBase + threadBase + e]);
+                }
+            }
+        }
+
+        m_i = m_new;
+    }
+
+    // ---- Cross-simdgroup merge (same as v1) ----
+    threadgroup float* sg_maxs = shared;
+    threadgroup float* sg_sums = shared + FLASH_V3_NUM_SG;
+    threadgroup float* sg_accs = shared + 2 * FLASH_V3_NUM_SG;
+
+    if (simd_lane == 0) {
+        sg_maxs[simd_group] = m_i;
+        sg_sums[simd_group] = l_i;
+    }
+    for (int e = 0; e < elemsPerThread; e++) {
+        sg_accs[simd_group * headDim + threadBase + e] = o_i[e];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group == 0) {
+        float global_max = sg_maxs[0];
+        for (int s = 1; s < FLASH_V3_NUM_SG; s++) {
+            global_max = max(global_max, sg_maxs[s]);
+        }
+
+        float total_sum = 0.0f;
+        float result[8];
+        for (int e = 0; e < 8; e++) result[e] = 0.0f;
+
+        for (int s = 0; s < FLASH_V3_NUM_SG; s++) {
+            float w = (sg_sums[s] > 0.0f) ? exp(sg_maxs[s] - global_max) : 0.0f;
+            total_sum += sg_sums[s] * w;
+            for (int e = 0; e < elemsPerThread; e++) {
+                result[e] += sg_accs[s * headDim + threadBase + e] * w;
+            }
+        }
+
+        float inv_l = (total_sum > 0.0f) ? (1.0f / total_sum) : 0.0f;
+        int outBase = qHead * headDim;
+        for (int e = 0; e < elemsPerThread; e++) {
+            out[outBase + threadBase + e] = half(result[e] * inv_l);
+        }
+    }
+}
+
+// =============================================================================
+// Multi-Threadgroup (NWG) Flash Attention SDPA decode for FP16 KV cache
+//
+// SINGLE kernel with N threadgroups per Q head (N = ceil(kvLen / NWG_KV_PER_TG)).
+// Each TG processes NWG_KV_PER_TG KV positions using v3's chunk algorithm.
+// Coordination via atomic counter — last TG to finish merges all partials.
+//
+// Key difference from tiled (which was SLOWER due to merge dispatch overhead):
+//   - Single dispatch: no separate merge kernel
+//   - Atomic coordination: last TG merges in-kernel
+//   - Same thread config as v3: 256 threads, 8 simdgroups
+//
+// Grid: (numQHeads * numTGs, 1, 1)
+// Partials buffer: [numQHeads * numTGs * (2 + headDim)] floats
+// Counter buffer: [numQHeads] uint32 atomics (zeroed before dispatch)
+//
+// Memory layout per TG partial:
+//   [max_i, sum_i, acc[0], acc[1], ..., acc[headDim-1]]
+// =============================================================================
+constant int NWG_THREADS = 256;
+constant int NWG_NUM_SG = 8;
+constant int NWG_CHUNK = 32;       // positions per chunk (same as v3)
+constant int NWG_KV_PER_TG = 256;  // KV positions per threadgroup
+
+kernel void sdpa_flash_decode_f16_nwg(
+    device const half* Q [[buffer(0)]],         // [numQHeads, headDim] in FP16
+    device const half* K [[buffer(1)]],         // [numKVHeads, maxSeqLen, headDim] in FP16
+    device const half* V [[buffer(2)]],         // [numKVHeads, maxSeqLen, headDim] in FP16
+    device half* out [[buffer(3)]],             // [numQHeads, headDim] in FP16
+    device float* partials [[buffer(4)]],       // [numQHeads * numTGs, 2 + headDim] temp
+    device atomic_uint* counters [[buffer(5)]], // [numQHeads] atomic counters
+    constant int& kvLen [[buffer(6)]],
+    constant int& numQHeads [[buffer(7)]],
+    constant int& numKVHeads [[buffer(8)]],
+    constant int& headDim [[buffer(9)]],
+    constant float& scale [[buffer(10)]],
+    constant int& kvHeadStride [[buffer(11)]],
+    constant int& numTGs [[buffer(12)]],        // threadgroups per Q head
+    threadgroup float* shared [[threadgroup(0)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    // Map global TG index to (Q head, TG within head)
+    int qHead = gid / numTGs;
+    int tgIdx = gid % numTGs;
+    if (qHead >= numQHeads) return;
+
+    // GQA mapping
+    int headsPerKV = numQHeads / numKVHeads;
+    int kvHead = qHead / headsPerKV;
+    int kvBase = kvHead * kvHeadStride;
+
+    int elemsPerThread = headDim / 32;
+    int threadBase = simd_lane * elemsPerThread;
+
+    // This TG handles positions [tgStart, tgEnd)
+    int tgStart = tgIdx * NWG_KV_PER_TG;
+    int tgEnd = min(tgStart + NWG_KV_PER_TG, kvLen);
+    if (tgStart >= kvLen) {
+        // This TG has no work. Still need to participate in atomic counter.
+        if (tid == 0) {
+            // Write empty partial
+            int partialBase = gid * (2 + headDim);
+            partials[partialBase + 0] = -INFINITY; // max
+            partials[partialBase + 1] = 0.0f;      // sum
+            for (int e = 0; e < headDim; e++) {
+                partials[partialBase + 2 + e] = 0.0f;
+            }
+            // Signal completion
+            atomic_fetch_add_explicit(&counters[qHead], 1, memory_order_relaxed);
+        }
+        // Wait for merge TG if we're the last
+        // Actually, empty TGs should NOT merge. Just return after signaling.
+        return;
+    }
+
+    // Load Q into registers (same as v3)
+    float4 q_f4;
+    if (elemsPerThread == 4) {
+        half4 q_h4 = *(device const half4*)(Q + qHead * headDim + threadBase);
+        q_f4 = float4(q_h4);
+    }
+    float q_reg[8];
+    if (elemsPerThread != 4) {
+        for (int e = 0; e < elemsPerThread; e++) {
+            q_reg[e] = float(Q[qHead * headDim + threadBase + e]);
+        }
+    }
+
+    // Per-simdgroup online softmax state
+    float m_i = -INFINITY;
+    float l_i = 0.0f;
+    float o_i[8];
+    for (int e = 0; e < 8; e++) o_i[e] = 0.0f;
+
+    // Split TG's KV range across 8 simdgroups
+    int sgKVLen = tgEnd - tgStart;
+    int sgChunkSize = (sgKVLen + NWG_NUM_SG - 1) / NWG_NUM_SG;
+    int sgStart = tgStart + simd_group * sgChunkSize;
+    int sgEnd = min(sgStart + sgChunkSize, tgEnd);
+
+    float scores[NWG_CHUNK];
+
+    // Process positions in chunks of 32 (same as v3)
+    for (int chunkStart = sgStart; chunkStart < sgEnd; chunkStart += NWG_CHUNK) {
+        int chunkEnd = min(chunkStart + NWG_CHUNK, sgEnd);
+        int chunkLen = chunkEnd - chunkStart;
+
+        // Phase 1: Q·K
+        for (int c = 0; c < chunkLen; c++) {
+            int pos = chunkStart + c;
+            int kBase = kvBase + pos * headDim;
+            float dot_val;
+            if (elemsPerThread == 4) {
+                half4 k_h4 = *(device const half4*)(K + kBase + threadBase);
+                dot_val = dot(q_f4, float4(k_h4));
+            } else {
+                dot_val = 0.0f;
+                for (int e = 0; e < elemsPerThread; e++) {
+                    dot_val += q_reg[e] * float(K[kBase + threadBase + e]);
+                }
+            }
+            scores[c] = simd_sum(dot_val) * scale;
+        }
+
+        // Phase 2: online softmax
+        float chunk_max = -INFINITY;
+        for (int c = 0; c < chunkLen; c++) {
+            chunk_max = max(chunk_max, scores[c]);
+        }
+        float m_new = max(m_i, chunk_max);
+        float alpha = exp(m_i - m_new);
+        float chunk_sum = 0.0f;
+        for (int c = 0; c < chunkLen; c++) {
+            scores[c] = exp(scores[c] - m_new);
+            chunk_sum += scores[c];
+        }
+        l_i = l_i * alpha + chunk_sum;
+        for (int e = 0; e < elemsPerThread; e++) {
+            o_i[e] *= alpha;
+        }
+
+        // Phase 3: V accumulation
+        for (int c = 0; c < chunkLen; c++) {
+            int pos = chunkStart + c;
+            int vBase = kvBase + pos * headDim;
+            float w = scores[c];
+            if (elemsPerThread == 4) {
+                half4 v_h4 = *(device const half4*)(V + vBase + threadBase);
+                float4 vf4 = float4(v_h4);
+                o_i[0] += w * vf4[0];
+                o_i[1] += w * vf4[1];
+                o_i[2] += w * vf4[2];
+                o_i[3] += w * vf4[3];
+            } else {
+                for (int e = 0; e < elemsPerThread; e++) {
+                    o_i[e] += w * float(V[vBase + threadBase + e]);
+                }
+            }
+        }
+        m_i = m_new;
+    }
+
+    // ---- Cross-simdgroup merge within this TG (same as v3) ----
+    threadgroup float* sg_maxs = shared;
+    threadgroup float* sg_sums = shared + NWG_NUM_SG;
+    threadgroup float* sg_accs = shared + 2 * NWG_NUM_SG;
+
+    if (simd_lane == 0) {
+        sg_maxs[simd_group] = m_i;
+        sg_sums[simd_group] = l_i;
+    }
+    for (int e = 0; e < elemsPerThread; e++) {
+        sg_accs[simd_group * headDim + threadBase + e] = o_i[e];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Only simdgroup 0 does the intra-TG merge
+    if (simd_group == 0) {
+        float tg_max = sg_maxs[0];
+        for (int s = 1; s < NWG_NUM_SG; s++) {
+            tg_max = max(tg_max, sg_maxs[s]);
+        }
+
+        float tg_sum = 0.0f;
+        float tg_result[8];
+        for (int e = 0; e < 8; e++) tg_result[e] = 0.0f;
+
+        for (int s = 0; s < NWG_NUM_SG; s++) {
+            float w = (sg_sums[s] > 0.0f) ? exp(sg_maxs[s] - tg_max) : 0.0f;
+            tg_sum += sg_sums[s] * w;
+            for (int e = 0; e < elemsPerThread; e++) {
+                tg_result[e] += sg_accs[s * headDim + threadBase + e] * w;
+            }
+        }
+
+        // If single TG (numTGs == 1), write output directly
+        if (numTGs == 1) {
+            float inv_l = (tg_sum > 0.0f) ? (1.0f / tg_sum) : 0.0f;
+            int outBase = qHead * headDim;
+            for (int e = 0; e < elemsPerThread; e++) {
+                out[outBase + threadBase + e] = half(tg_result[e] * inv_l);
+            }
+            return;
+        }
+
+        // Multi-TG: write partial to device memory
+        int partialBase = gid * (2 + headDim);
+        if (simd_lane == 0) {
+            partials[partialBase + 0] = tg_max;
+            partials[partialBase + 1] = tg_sum;
+        }
+        for (int e = 0; e < elemsPerThread; e++) {
+            partials[partialBase + 2 + threadBase + e] = tg_result[e];
+        }
+
+        // Memory fence: ensure partial writes are visible before counter increment
+        threadgroup_barrier(mem_flags::mem_device);
+
+        // Atomic increment: last TG to arrive does the cross-TG merge
+        if (simd_lane == 0) {
+            uint completed = atomic_fetch_add_explicit(&counters[qHead], 1, memory_order_relaxed);
+
+            // Store in shared so all threads in SG0 can see it
+            sg_maxs[0] = as_type<float>(completed);
+        }
+
+        // Broadcast completed count to all threads in simdgroup 0
+        uint completed = as_type<uint>(sg_maxs[0]);
+
+        if (completed == uint(numTGs - 1)) {
+            // We are the last TG — merge all partials
+            // First, device memory fence to see all other TGs' writes
+            // (atomic_fetch_add with relaxed ordering doesn't guarantee visibility)
+            threadgroup_barrier(mem_flags::mem_device);
+
+            float global_max = -INFINITY;
+            int baseIdx = qHead * numTGs;
+
+            // Find global max across all TG partials
+            // Each thread in the simdgroup reads different partials for parallelism
+            for (int t = 0; t < numTGs; t++) {
+                int pBase = (baseIdx + t) * (2 + headDim);
+                float t_max = partials[pBase + 0];
+                global_max = max(global_max, t_max);
+            }
+
+            // Merge with online softmax correction
+            float total_sum = 0.0f;
+            float final_result[8];
+            for (int e = 0; e < 8; e++) final_result[e] = 0.0f;
+
+            for (int t = 0; t < numTGs; t++) {
+                int pBase = (baseIdx + t) * (2 + headDim);
+                float t_max = partials[pBase + 0];
+                float t_sum = partials[pBase + 1];
+                float w = (t_sum > 0.0f) ? exp(t_max - global_max) : 0.0f;
+                total_sum += t_sum * w;
+                for (int e = 0; e < elemsPerThread; e++) {
+                    final_result[e] += partials[pBase + 2 + threadBase + e] * w;
+                }
+            }
+
+            // Normalize and write output
+            float inv_l = (total_sum > 0.0f) ? (1.0f / total_sum) : 0.0f;
+            int outBase = qHead * headDim;
+            for (int e = 0; e < elemsPerThread; e++) {
+                out[outBase + threadBase + e] = half(final_result[e] * inv_l);
+            }
+        }
+    }
+}
+
+// =============================================================================
 // Tiled Flash Attention SDPA decode for FP16 KV cache (Split-K approach)
 //
 // Two-kernel design for better GPU occupancy at long context lengths:
@@ -10481,6 +10949,97 @@ void metal_sdpa_flash_decode_f16(void* queuePtr, void* pipelinePtr,
 
     // One threadgroup per Q head, 256 threads (8 simdgroups)
     MTLSize threadgroups = MTLSizeMake(numQHeads, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Chunk-based Flash Attention SDPA decode for FP16 KV cache (v3)
+// Same signature as v1 but uses chunk-based processing (C=32) with separated Q·K/V phases.
+// Higher ILP from 32 independent loads per chunk. Same shared memory layout as v1.
+void metal_sdpa_flash_decode_f16_v3(void* queuePtr, void* pipelinePtr,
+                                     void* Q, void* K, void* V, void* out,
+                                     int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                     float scale, int kvHeadStride) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBytes:&kvLen length:sizeof(kvLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+    [encoder setBytes:&kvHeadStride length:sizeof(kvHeadStride) atIndex:9];
+
+    // Same shared memory layout as v1: NUM_SG max + NUM_SG sum + NUM_SG * headDim acc
+    int numSG = 8;
+    int sharedMemSize = (2 * numSG + numSG * headDim) * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    // One threadgroup per Q head, 256 threads (8 simdgroups)
+    MTLSize threadgroups = MTLSizeMake(numQHeads, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Multi-threadgroup (NWG) Flash Attention SDPA decode for FP16 KV cache.
+// Single dispatch with N TGs per Q head. Last TG merges via atomic counter.
+void metal_sdpa_flash_decode_f16_nwg(void* queuePtr, void* pipelinePtr,
+                                      void* Q, void* K, void* V, void* out,
+                                      void* partials, void* counters,
+                                      int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                      float scale, int kvHeadStride) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    int kvPerTG = 256;  // NWG_KV_PER_TG
+    int numTGsPerHead = (kvLen + kvPerTG - 1) / kvPerTG;
+    if (numTGsPerHead < 1) numTGsPerHead = 1;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    // Zero the atomic counters before dispatch
+    id<MTLBuffer> counterBuf = (__bridge id<MTLBuffer>)counters;
+    // Use blit encoder for zeroing — but we're in a compute encoder.
+    // Instead, we'll zero from Go before each call, or use a fill.
+    // For now, assume counters are zeroed by caller.
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)partials offset:0 atIndex:4];
+    [encoder setBuffer:counterBuf offset:0 atIndex:5];
+    [encoder setBytes:&kvLen length:sizeof(kvLen) atIndex:6];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:7];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:8];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:9];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:10];
+    [encoder setBytes:&kvHeadStride length:sizeof(kvHeadStride) atIndex:11];
+    [encoder setBytes:&numTGsPerHead length:sizeof(numTGsPerHead) atIndex:12];
+
+    // Shared memory: same as v3 (2*8 + 8*headDim floats)
+    int numSG = 8;
+    int sharedMemSize = (2 * numSG + numSG * headDim) * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    // Grid: numQHeads * numTGsPerHead threadgroups
+    MTLSize threadgroups = MTLSizeMake(numQHeads * numTGsPerHead, 1, 1);
     MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
