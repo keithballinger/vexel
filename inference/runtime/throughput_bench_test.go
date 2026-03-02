@@ -820,6 +820,174 @@ func TestDecodeProfileBaseline(t *testing.T) {
 	}
 }
 
+// TestDecodeProfileContextComparison profiles per-operation GPU timing at both
+// ctx=16 and ctx=2048 to identify exactly which operations get slower at high context.
+// This helps separate SDPA overhead from cache-induced matvec slowdowns.
+func TestDecodeProfileContextComparison(t *testing.T) {
+	type opTiming struct {
+		name  string
+		avgUs float64
+		count int
+	}
+
+	profileAtContext := func(ctxLen int) ([]opTiming, float64) {
+		m, b, c := setupModel(t, false)
+		defer b.Close()
+		defer c.Free()
+
+		// Fill context
+		fillToks := generateTokenSequence(ctxLen)
+		logits := getLogits(t, m, b, fillToks, 0)
+		nextToken := argmax(logits)
+		pos := ctxLen
+
+		// Warmup (no profiling)
+		for w := 0; w < 5; w++ {
+			logits = getLogits(t, m, b, []int{nextToken}, pos)
+			nextToken = argmax(logits)
+			pos++
+		}
+
+		// Unprofiled throughput measurement
+		const nUnprofiled = 20
+		startUnprofiled := time.Now()
+		for i := 0; i < nUnprofiled; i++ {
+			logits = getLogits(t, m, b, []int{nextToken}, pos)
+			nextToken = argmax(logits)
+			pos++
+		}
+		elapsedUnprofiled := time.Since(startUnprofiled)
+		tps := float64(nUnprofiled) / elapsedUnprofiled.Seconds()
+
+		// Profiled measurement
+		runtime.EnableProfiling()
+		runtime.ResetProfile()
+
+		const n = 10
+		for i := 0; i < n; i++ {
+			logits = getLogits(t, m, b, []int{nextToken}, pos)
+			nextToken = argmax(logits)
+			pos++
+		}
+
+		data := runtime.GetProfileData()
+		runtime.DisableProfiling()
+
+		var result []opTiming
+		for _, e := range data {
+			result = append(result, opTiming{
+				name:  e.Name,
+				avgUs: e.AvgUs,
+				count: e.Count,
+			})
+		}
+		return result, tps
+	}
+
+	// Profile at both context lengths
+	t.Log("Profiling ctx=16...")
+	ops16, tps16 := profileAtContext(16)
+	t.Log("Profiling ctx=2048...")
+	ops2048, tps2048 := profileAtContext(2048)
+
+	degradation := (tps16 - tps2048) / tps16 * 100
+
+	t.Logf("\n=== Per-Op Timing: ctx=16 vs ctx=2048 ===")
+	t.Logf("Unprofiled: ctx=16 %.1f tok/s, ctx=2048 %.1f tok/s (%.1f%% degradation)", tps16, tps2048, degradation)
+	t.Logf("")
+	t.Logf("%-25s %10s %10s %10s %8s", "Operation", "ctx=16 µs", "ctx=2048 µs", "Delta µs", "Ratio")
+	t.Logf("%-25s %10s %10s %10s %8s", "---------", "---------", "-----------", "--------", "-----")
+
+	// Build map for ctx=2048 ops
+	ops2048Map := make(map[string]float64)
+	for _, op := range ops2048 {
+		ops2048Map[op.name] = op.avgUs
+	}
+
+	var totalDelta float64
+	for _, op16 := range ops16 {
+		avgUs2048 := ops2048Map[op16.name]
+		delta := avgUs2048 - op16.avgUs
+		ratio := avgUs2048 / op16.avgUs
+		if op16.avgUs == 0 {
+			ratio = 0
+		}
+		totalDelta += delta * float64(op16.count) / 32 // delta per layer, scaled by ops/layer
+		t.Logf("%-25s %10.1f %10.1f %10.1f %7.2fx", op16.name, op16.avgUs, avgUs2048, delta, ratio)
+	}
+
+	// Check for ops in ctx=2048 not in ctx=16
+	ops16Map := make(map[string]float64)
+	for _, op := range ops16 {
+		ops16Map[op.name] = op.avgUs
+	}
+	for _, op2048 := range ops2048 {
+		if _, found := ops16Map[op2048.name]; !found {
+			t.Logf("%-25s %10s %10.1f %10.1f %8s", op2048.name, "N/A", op2048.avgUs, op2048.avgUs, "NEW")
+		}
+	}
+}
+
+// TestBarrierRemovalCorrectness verifies that removing memory barriers produces
+// identical token sequences to the barrier-enabled path. Tests at both short and
+// long context to catch any race conditions in Apple Silicon's memory ordering.
+func TestBarrierRemovalCorrectness(t *testing.T) {
+	const numTokens = 20
+
+	for _, ctxLen := range []int{16, 512, 2048} {
+		t.Run(fmt.Sprintf("ctx_%d", ctxLen), func(t *testing.T) {
+			// Generate tokens WITH barriers (baseline)
+			os.Setenv("VEXEL_NO_BARRIERS", "")
+			m1, b1, c1 := setupModel(t, false)
+			fillToks := generateTokenSequence(ctxLen)
+			logits := getLogits(t, m1, b1, fillToks, 0)
+			nextToken := argmax(logits)
+			pos := ctxLen
+
+			withBarriers := make([]int, numTokens)
+			for i := 0; i < numTokens; i++ {
+				withBarriers[i] = nextToken
+				logits = getLogits(t, m1, b1, []int{nextToken}, pos)
+				nextToken = argmax(logits)
+				pos++
+			}
+			b1.Close()
+			c1.Free()
+
+			// Generate tokens WITHOUT barriers
+			os.Setenv("VEXEL_NO_BARRIERS", "1")
+			m2, b2, c2 := setupModel(t, false)
+			logits = getLogits(t, m2, b2, fillToks, 0)
+			nextToken = argmax(logits)
+			pos = ctxLen
+
+			withoutBarriers := make([]int, numTokens)
+			for i := 0; i < numTokens; i++ {
+				withoutBarriers[i] = nextToken
+				logits = getLogits(t, m2, b2, []int{nextToken}, pos)
+				nextToken = argmax(logits)
+				pos++
+			}
+			b2.Close()
+			c2.Free()
+			os.Unsetenv("VEXEL_NO_BARRIERS")
+
+			// Compare
+			mismatches := 0
+			for i := 0; i < numTokens; i++ {
+				if withBarriers[i] != withoutBarriers[i] {
+					t.Errorf("Token mismatch at position %d: with_barriers=%d, without_barriers=%d",
+						i, withBarriers[i], withoutBarriers[i])
+					mismatches++
+				}
+			}
+			if mismatches == 0 {
+				t.Logf("ctx=%d: %d tokens match (first 10: %v)", ctxLen, numTokens, withBarriers[:10])
+			}
+		})
+	}
+}
+
 // sortDurations sorts a slice of time.Duration in ascending order.
 func sortDurations(d []time.Duration) {
 	for i := 1; i < len(d); i++ {

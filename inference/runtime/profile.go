@@ -77,6 +77,33 @@ func TimeOp(name string) func() {
 	}
 }
 
+// ProfileEntry represents timing data for a single operation.
+type ProfileEntry struct {
+	Name    string
+	Total   time.Duration
+	Count   int
+	AvgUs   float64
+}
+
+// GetProfileData returns a copy of the current profiling data.
+func GetProfileData() []ProfileEntry {
+	profiler.mu.Lock()
+	defer profiler.mu.Unlock()
+	var entries []ProfileEntry
+	for name, t := range profiler.times {
+		entries = append(entries, ProfileEntry{
+			Name:  name,
+			Total: t,
+			Count: profiler.counts[name],
+			AvgUs: float64(t.Microseconds()) / float64(profiler.counts[name]),
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Total > entries[j].Total
+	})
+	return entries
+}
+
 // PrintProfile prints a summary of operation timings.
 func PrintProfile() {
 	profiler.mu.Lock()
