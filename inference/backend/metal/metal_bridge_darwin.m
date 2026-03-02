@@ -2588,6 +2588,12 @@ kernel void matvec_q4k_fused_rmsnorm_qkv_f16(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float rms = scratch[0];
 
+    // Phase 1b: Pre-normalize activations in shared memory
+    for (int i = tid; i < K; i += 256) {
+        shared_half[i] = half(float(shared_half[i]) * rms * normWeight[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
     // Phase 2: Route to Q, K, or V projection
     int qTGs = (qDim + 31) / 32;
     int kvTGs = (kvDim + 31) / 32;
@@ -2626,18 +2632,17 @@ kernel void matvec_q4k_fused_rmsnorm_qkv_f16(
         int elem_start = block_idx * Q4K_BLOCK_SIZE + (j << 5);
         if (elem_start + 32 > K) continue;
 
-        // Load normalized activations: x_norm = shared_half[i] * rms * normWeight[i]
-        device const float4* w_ptr = (device const float4*)(normWeight + elem_start);
+        // Load pre-normalized activations from shared memory (zero device reads)
         threadgroup const half4* hx_ptr = (threadgroup const half4*)(shared_half + elem_start);
         float4 act[8];
-        act[0] = float4(hx_ptr[0]) * rms * w_ptr[0];
-        act[1] = float4(hx_ptr[1]) * rms * w_ptr[1];
-        act[2] = float4(hx_ptr[2]) * rms * w_ptr[2];
-        act[3] = float4(hx_ptr[3]) * rms * w_ptr[3];
-        act[4] = float4(hx_ptr[4]) * rms * w_ptr[4];
-        act[5] = float4(hx_ptr[5]) * rms * w_ptr[5];
-        act[6] = float4(hx_ptr[6]) * rms * w_ptr[6];
-        act[7] = float4(hx_ptr[7]) * rms * w_ptr[7];
+        act[0] = float4(hx_ptr[0]);
+        act[1] = float4(hx_ptr[1]);
+        act[2] = float4(hx_ptr[2]);
+        act[3] = float4(hx_ptr[3]);
+        act[4] = float4(hx_ptr[4]);
+        act[5] = float4(hx_ptr[5]);
+        act[6] = float4(hx_ptr[6]);
+        act[7] = float4(hx_ptr[7]);
 
         // Process each row with Q4_K dequant
         #define PROCESS_ROW_Q4K_QKV(row_ptr, sum_var) \
@@ -2740,6 +2745,12 @@ kernel void matvec_q4k_fused_rmsnorm_qkv_rope_scatter_f16(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float rms = scratch[0];
 
+    // Phase 1b: Pre-normalize activations in shared memory
+    for (int i = tid; i < K; i += 256) {
+        shared_half[i] = half(float(shared_half[i]) * rms * normWeight[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
     // Phase 2: Route threadgroup to Q, K, or V projection
     int qTGs = (qDim + 31) / 32;
     int kvTGs = (kvDim + 31) / 32;
@@ -2786,18 +2797,17 @@ kernel void matvec_q4k_fused_rmsnorm_qkv_rope_scatter_f16(
         int elem_start = block_idx * Q4K_BLOCK_SIZE + (j << 5);
         if (elem_start + 32 > K) continue;
 
-        // Load normalized activations: x_norm = shared_half[i] * rms * normWeight[i]
-        device const float4* w_ptr = (device const float4*)(normWeight + elem_start);
+        // Load pre-normalized activations from shared memory (zero device reads)
         threadgroup const half4* hx_ptr = (threadgroup const half4*)(shared_half + elem_start);
         float4 act[8];
-        act[0] = float4(hx_ptr[0]) * rms * w_ptr[0];
-        act[1] = float4(hx_ptr[1]) * rms * w_ptr[1];
-        act[2] = float4(hx_ptr[2]) * rms * w_ptr[2];
-        act[3] = float4(hx_ptr[3]) * rms * w_ptr[3];
-        act[4] = float4(hx_ptr[4]) * rms * w_ptr[4];
-        act[5] = float4(hx_ptr[5]) * rms * w_ptr[5];
-        act[6] = float4(hx_ptr[6]) * rms * w_ptr[6];
-        act[7] = float4(hx_ptr[7]) * rms * w_ptr[7];
+        act[0] = float4(hx_ptr[0]);
+        act[1] = float4(hx_ptr[1]);
+        act[2] = float4(hx_ptr[2]);
+        act[3] = float4(hx_ptr[3]);
+        act[4] = float4(hx_ptr[4]);
+        act[5] = float4(hx_ptr[5]);
+        act[6] = float4(hx_ptr[6]);
+        act[7] = float4(hx_ptr[7]);
 
         // Process each row with Q4_K dequant
         #define PROCESS_ROW_Q4K_ROPE(row_ptr, sum_var) \
@@ -3081,7 +3091,16 @@ kernel void matvec_q4k_fused_rmsnorm_mlp_f32(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float rms = scratch[0];
 
-    // Phase 2: Dual Q4_K MatVec (W1 Gate + W3 Up) with RMSNorm scaling
+    // Phase 2: Pre-normalize activations in shared memory
+    // Overwrites shared_half[i] = half(x[i] * rms * normWeight[i])
+    // This eliminates normWeight device reads from the inner loop entirely —
+    // each activation is pre-computed once instead of re-loaded 8× per sub-block.
+    for (int i = tid; i < K; i += 256) {
+        shared_half[i] = half(float(shared_half[i]) * rms * normWeight[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 3: Dual Q4_K MatVec (W1 Gate + W3 Up) with pre-normalized activations
     int base_output = gid * 32 + simd_group * 4;
 
     float sumGate0 = 0.0f, sumGate1 = 0.0f, sumGate2 = 0.0f, sumGate3 = 0.0f;
@@ -3110,18 +3129,17 @@ kernel void matvec_q4k_fused_rmsnorm_mlp_f32(
         int elem_start = block_idx * Q4K_BLOCK_SIZE + (j << 5);
         if (elem_start + 32 > K) continue;
 
-        // Load normalized activations: x_norm = shared_half[i] * rms * normWeight[i]
-        device const float4* w_ptr = (device const float4*)(normWeight + elem_start);
+        // Load pre-normalized activations from shared memory (zero device reads)
         threadgroup const half4* hx_ptr = (threadgroup const half4*)(shared_half + elem_start);
         float4 act[8];
-        act[0] = float4(hx_ptr[0]) * rms * w_ptr[0];
-        act[1] = float4(hx_ptr[1]) * rms * w_ptr[1];
-        act[2] = float4(hx_ptr[2]) * rms * w_ptr[2];
-        act[3] = float4(hx_ptr[3]) * rms * w_ptr[3];
-        act[4] = float4(hx_ptr[4]) * rms * w_ptr[4];
-        act[5] = float4(hx_ptr[5]) * rms * w_ptr[5];
-        act[6] = float4(hx_ptr[6]) * rms * w_ptr[6];
-        act[7] = float4(hx_ptr[7]) * rms * w_ptr[7];
+        act[0] = float4(hx_ptr[0]);
+        act[1] = float4(hx_ptr[1]);
+        act[2] = float4(hx_ptr[2]);
+        act[3] = float4(hx_ptr[3]);
+        act[4] = float4(hx_ptr[4]);
+        act[5] = float4(hx_ptr[5]);
+        act[6] = float4(hx_ptr[6]);
+        act[7] = float4(hx_ptr[7]);
 
         // Process Q4_K row macro (shared between W1 and W3)
         #define PROCESS_ROW_Q4K_FNMLP(row_ptr, sum_var) \
@@ -4683,7 +4701,13 @@ kernel void matvec_q4_0_fused_rmsnorm_f32(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float rms = scratch[0];
 
-    // Phase 2: MatVec using normalized x
+    // Phase 1b: Pre-normalize activations in shared memory (F32, no precision loss)
+    for (int i = tid; i < K; i += 256) {
+        shared_x[i] = shared_x[i] * rms * normWeight[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 2: MatVec using pre-normalized x
     int base_output = gid * 32 + simd_group * 4;
 
     float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
@@ -4698,21 +4722,11 @@ kernel void matvec_q4_0_fused_rmsnorm_f32(
         int base_k = block * 32;
         if (base_k >= K) break;
 
-        device const float4* w_ptr = (device const float4*)(normWeight + base_k);
-        float4 w0 = w_ptr[0], w1 = w_ptr[1], w2 = w_ptr[2], w3 = w_ptr[3];
-        float4 w4 = w_ptr[4], w5 = w_ptr[5], w6 = w_ptr[6], w7 = w_ptr[7];
-
+        // Load pre-normalized activations from shared memory (zero device reads)
         threadgroup const float4* x_ptr = (threadgroup const float4*)(shared_x + base_k);
-        float4 x0 = x_ptr[0], x1 = x_ptr[1], x2 = x_ptr[2], x3 = x_ptr[3];
-        float4 x4 = x_ptr[4], x5 = x_ptr[5], x6 = x_ptr[6], x7 = x_ptr[7];
+        float4 a0 = x_ptr[0], a1 = x_ptr[1], a2 = x_ptr[2], a3 = x_ptr[3];
+        float4 a4 = x_ptr[4], a5 = x_ptr[5], a6 = x_ptr[6], a7 = x_ptr[7];
 
-        float4 a0 = x0 * rms * w0, a1 = x1 * rms * w1, a2 = x2 * rms * w2, a3 = x3 * rms * w3;
-        float4 a4 = x4 * rms * w4, a5 = x5 * rms * w5, a6 = x6 * rms * w6, a7 = x7 * rms * w7;
-
-        // Re-pack into 8 float4s for dot product (0,4,1,5,2,6,3,7 order used in optimized kernel)
-        // Actually, optimized kernel loads 0,1,2,3 then 4,5,6,7. Let's match usage.
-        // The macro uses a0..a3 (low) and a4..a7 (high).
-        
         #define PROCESS_ROW(row_ptr, sum_var) \
         if (row_ptr) { \
             device const uchar* blockPtr = row_ptr + block * 18; \
@@ -4799,6 +4813,12 @@ kernel void matvec_q4_0_fused_rmsnorm_f16_out(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float rms = scratch[0];
 
+    // Phase 1b: Pre-normalize activations in shared memory
+    for (int i = tid; i < K; i += 256) {
+        shared_half[i] = half(float(shared_half[i]) * rms * normWeight[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
     // Phase 2: MatVec
     int base_output = gid * 32 + simd_group * 4;
 
@@ -4814,17 +4834,12 @@ kernel void matvec_q4_0_fused_rmsnorm_f16_out(
         int base_k = block * 32;
         if (base_k >= K) break;
 
-        device const float4* w_ptr = (device const float4*)(normWeight + base_k);
-        float4 w0 = w_ptr[0], w1 = w_ptr[1], w2 = w_ptr[2], w3 = w_ptr[3];
-        float4 w4 = w_ptr[4], w5 = w_ptr[5], w6 = w_ptr[6], w7 = w_ptr[7];
-
-        // Read activations from FP16 shared memory, convert to float4
+        // Load pre-normalized activations from shared memory (zero device reads)
         threadgroup const half4* hx_ptr = (threadgroup const half4*)(shared_half + base_k);
-        float4 x0 = float4(hx_ptr[0]), x1 = float4(hx_ptr[1]), x2 = float4(hx_ptr[2]), x3 = float4(hx_ptr[3]);
-        float4 x4 = float4(hx_ptr[4]), x5 = float4(hx_ptr[5]), x6 = float4(hx_ptr[6]), x7 = float4(hx_ptr[7]);
-
-        float4 a0 = x0 * rms * w0, a1 = x1 * rms * w1, a2 = x2 * rms * w2, a3 = x3 * rms * w3;
-        float4 a4 = x4 * rms * w4, a5 = x5 * rms * w5, a6 = x6 * rms * w6, a7 = x7 * rms * w7;
+        float4 a0 = float4(hx_ptr[0]), a1 = float4(hx_ptr[1]);
+        float4 a2 = float4(hx_ptr[2]), a3 = float4(hx_ptr[3]);
+        float4 a4 = float4(hx_ptr[4]), a5 = float4(hx_ptr[5]);
+        float4 a6 = float4(hx_ptr[6]), a7 = float4(hx_ptr[7]);
 
         #define PROCESS_ROW_F16(row_ptr, sum_var) \
         if (row_ptr) { \
@@ -4915,6 +4930,12 @@ kernel void matvec_q4_0_fused_rmsnorm_qkv_f16(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float rms = scratch[0];
 
+    // Phase 1b: Pre-normalize activations in shared memory
+    for (int i = tid; i < K; i += 256) {
+        shared_half[i] = half(float(shared_half[i]) * rms * normWeight[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
     // Phase 2: Route threadgroup to Q, K, or V projection
     int qTGs = (qDim + 31) / 32;
     int kvTGs = (kvDim + 31) / 32;
@@ -4955,17 +4976,12 @@ kernel void matvec_q4_0_fused_rmsnorm_qkv_f16(
         int base_k = block * 32;
         if (base_k >= K) break;
 
-        device const float4* w_ptr = (device const float4*)(normWeight + base_k);
-        float4 w0 = w_ptr[0], w1 = w_ptr[1], w2 = w_ptr[2], w3 = w_ptr[3];
-        float4 w4 = w_ptr[4], w5 = w_ptr[5], w6 = w_ptr[6], w7 = w_ptr[7];
-
-        // Read activations from FP16 shared memory, convert to float4
+        // Load pre-normalized activations from shared memory (zero device reads)
         threadgroup const half4* hx_ptr = (threadgroup const half4*)(shared_half + base_k);
-        float4 x0 = float4(hx_ptr[0]), x1 = float4(hx_ptr[1]), x2 = float4(hx_ptr[2]), x3 = float4(hx_ptr[3]);
-        float4 x4 = float4(hx_ptr[4]), x5 = float4(hx_ptr[5]), x6 = float4(hx_ptr[6]), x7 = float4(hx_ptr[7]);
-
-        float4 a0 = x0 * rms * w0, a1 = x1 * rms * w1, a2 = x2 * rms * w2, a3 = x3 * rms * w3;
-        float4 a4 = x4 * rms * w4, a5 = x5 * rms * w5, a6 = x6 * rms * w6, a7 = x7 * rms * w7;
+        float4 a0 = float4(hx_ptr[0]), a1 = float4(hx_ptr[1]);
+        float4 a2 = float4(hx_ptr[2]), a3 = float4(hx_ptr[3]);
+        float4 a4 = float4(hx_ptr[4]), a5 = float4(hx_ptr[5]);
+        float4 a6 = float4(hx_ptr[6]), a7 = float4(hx_ptr[7]);
 
         #define PROCESS_ROW_QKV(row_ptr, sum_var) \
         if (row_ptr) { \
@@ -5068,6 +5084,14 @@ kernel void matvec_q4_0_fused_rmsnorm_qkv_rope_scatter_f16(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float rms = scratch[0];
 
+    // Phase 1b: Pre-normalize activations in shared memory
+    // Overwrites shared_half[i] = half(x[i] * rms * normWeight[i])
+    // Eliminates normWeight device reads from the inner loop entirely.
+    for (int i = tid; i < K; i += 256) {
+        shared_half[i] = half(float(shared_half[i]) * rms * normWeight[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
     // Phase 2: Route threadgroup to Q, K, or V projection
     int qTGs = (qDim + 31) / 32;
     int kvTGs = (kvDim + 31) / 32;
@@ -5094,7 +5118,7 @@ kernel void matvec_q4_0_fused_rmsnorm_qkv_rope_scatter_f16(
         N = kvDim;
     }
 
-    // Phase 3: MatVec (identical inner loop to FusedQKV)
+    // Phase 3: MatVec (pre-normalized activations from shared memory)
     int base_output = localGid * 32 + simd_group * 4;
 
     float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
@@ -5109,16 +5133,12 @@ kernel void matvec_q4_0_fused_rmsnorm_qkv_rope_scatter_f16(
         int base_k = block * 32;
         if (base_k >= K) break;
 
-        device const float4* w_ptr = (device const float4*)(normWeight + base_k);
-        float4 w0 = w_ptr[0], w1 = w_ptr[1], w2 = w_ptr[2], w3 = w_ptr[3];
-        float4 w4 = w_ptr[4], w5 = w_ptr[5], w6 = w_ptr[6], w7 = w_ptr[7];
-
+        // Load pre-normalized activations from shared memory (zero device reads)
         threadgroup const half4* hx_ptr = (threadgroup const half4*)(shared_half + base_k);
-        float4 x0 = float4(hx_ptr[0]), x1 = float4(hx_ptr[1]), x2 = float4(hx_ptr[2]), x3 = float4(hx_ptr[3]);
-        float4 x4 = float4(hx_ptr[4]), x5 = float4(hx_ptr[5]), x6 = float4(hx_ptr[6]), x7 = float4(hx_ptr[7]);
-
-        float4 a0 = x0 * rms * w0, a1 = x1 * rms * w1, a2 = x2 * rms * w2, a3 = x3 * rms * w3;
-        float4 a4 = x4 * rms * w4, a5 = x5 * rms * w5, a6 = x6 * rms * w6, a7 = x7 * rms * w7;
+        float4 a0 = float4(hx_ptr[0]), a1 = float4(hx_ptr[1]);
+        float4 a2 = float4(hx_ptr[2]), a3 = float4(hx_ptr[3]);
+        float4 a4 = float4(hx_ptr[4]), a5 = float4(hx_ptr[5]);
+        float4 a6 = float4(hx_ptr[6]), a7 = float4(hx_ptr[7]);
 
         #define PROCESS_ROW_FQRS(row_ptr, sum_var) \
         if (row_ptr) { \
@@ -5536,7 +5556,15 @@ kernel void matvec_q4_0_fused_rmsnorm_mlp_f32(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float rms = scratch[0];
 
-    // Phase 2: Dual W1/W3 Matvec with RMSNorm-scaled activations + SiLU activation
+    // Phase 1b: Pre-normalize activations in shared memory
+    // Eliminates normWeight device reads from the inner loop — each activation
+    // is pre-computed once instead of re-loaded per block iteration.
+    for (int i = tid; i < K; i += 256) {
+        shared_half[i] = half(float(shared_half[i]) * rms * normWeight[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 2: Dual W1/W3 Matvec with pre-normalized activations + SiLU activation
     int base_output = gid * 32 + simd_group * 4;
 
     float sumGate0 = 0.0f, sumGate1 = 0.0f, sumGate2 = 0.0f, sumGate3 = 0.0f;
@@ -5558,15 +5586,12 @@ kernel void matvec_q4_0_fused_rmsnorm_mlp_f32(
         int base_k = block * 32;
         if (base_k >= K) break;
 
-        device const float4* w_ptr = (device const float4*)(normWeight + base_k);
-        float4 w0 = w_ptr[0], w1 = w_ptr[1], w2 = w_ptr[2], w3 = w_ptr[3];
-        float4 w4 = w_ptr[4], w5 = w_ptr[5], w6 = w_ptr[6], w7 = w_ptr[7];
-
+        // Load pre-normalized activations from shared memory (zero device reads)
         threadgroup const half4* hx_ptr = (threadgroup const half4*)(shared_half + base_k);
-        float4 a0 = float4(hx_ptr[0]) * rms * w0, a1 = float4(hx_ptr[1]) * rms * w1;
-        float4 a2 = float4(hx_ptr[2]) * rms * w2, a3 = float4(hx_ptr[3]) * rms * w3;
-        float4 a4 = float4(hx_ptr[4]) * rms * w4, a5 = float4(hx_ptr[5]) * rms * w5;
-        float4 a6 = float4(hx_ptr[6]) * rms * w6, a7 = float4(hx_ptr[7]) * rms * w7;
+        float4 a0 = float4(hx_ptr[0]), a1 = float4(hx_ptr[1]);
+        float4 a2 = float4(hx_ptr[2]), a3 = float4(hx_ptr[3]);
+        float4 a4 = float4(hx_ptr[4]), a5 = float4(hx_ptr[5]);
+        float4 a6 = float4(hx_ptr[6]), a7 = float4(hx_ptr[7]);
 
         #define PROCESS_ROW_RNMLP(row_ptr, sum_var) \
         if (row_ptr) { \

@@ -97,11 +97,12 @@ func TestQ4KFusedRMSNormQKV_F16(t *testing.T) {
 		absTol float64 // absolute floor (FP16 intermediate noise)
 		relTol float64 // relative tolerance (FP16 output + accumulation)
 	}{
-		// FP16 intermediate + FP16 output: abs floor ~sqrt(K/256) * 1.0, rel ~0.1%
-		{"small_256", 128, 64, 256, 1.0, 0.001},
-		{"medium_512", 256, 128, 512, 1.5, 0.001},
+		// Pre-normalized FP16 activations: double half round-trip (x→half→half(x*rms*w))
+		// adds ~0.05% extra quantization noise. abs floor ~2.0 for small K.
+		{"small_256", 128, 64, 256, 2.0, 0.001},
+		{"medium_512", 256, 128, 512, 2.0, 0.001},
 		{"llama7b_4096", 4096, 1024, 4096, 3.0, 0.001},
-		{"odd_dims", 100, 50, 256, 1.0, 0.001},
+		{"odd_dims", 100, 50, 256, 2.0, 0.001},
 	}
 
 	for _, tc := range tests {
@@ -528,7 +529,9 @@ func TestQ4KFusedRMSNormMLP(t *testing.T) {
 			w1Data := generateQ4KWeights(tc.N, tc.K, 100)
 			w3Data := generateQ4KWeights(tc.N, tc.K, 200)
 
-			// CPU reference: xNorm = RMSNorm(x), gate = xNorm @ W1^T, up = xNorm @ W3^T, out = SiLU(gate) * up
+			// CPU reference (FP32): xNorm = RMSNorm(x), gate = xNorm @ W1^T, up = xNorm @ W3^T, out = SiLU(gate) * up
+			// Note: GPU uses FP16 dequant + dot in fused kernel for 2× ALU throughput.
+			// This adds ~0.1-1.5% relative error vs FP32 CPU reference, proportional to sqrt(K).
 			xNorm := cpuRMSNorm(x, normWeight, eps)
 			gate := cpuMatVecQ4_K(xNorm, w1Data, 1, tc.N, tc.K)
 			up := cpuMatVecQ4_K(xNorm, w3Data, 1, tc.N, tc.K)
