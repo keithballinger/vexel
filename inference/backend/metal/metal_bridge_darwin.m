@@ -806,6 +806,77 @@ kernel void matvec_q4_0_v2_add_f32(
     }
 }
 
+// Variant of matvec_q4_0_v2_add_f32 that also adds a deferred residual.
+// Used when AddRMSNorm is fused into FusedAddRMSNormMLP: the residual add
+// (x += woOutput) is deferred from AddRMSNorm to this kernel.
+// Final write: C[i] = C[i] + residual[i] + (A @ B^T)[i]
+kernel void matvec_q4_0_v2_add2_f32(
+    device const float* A [[buffer(0)]],
+    device const uchar* B [[buffer(1)]],
+    device float* C [[buffer(2)]],
+    device const float* residual [[buffer(3)]],
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int r0 = (gid * MV2_NSG + simd_group) * MV2_NR0;
+    if (r0 >= N) return;
+
+    int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
+    short ix = simd_lane / 2;
+    short il = (simd_lane % 2) * 8;
+
+    device const uchar* rows[MV2_NR0];
+    for (int row = 0; row < MV2_NR0; row++) {
+        rows[row] = (r0 + row < N) ? B + (r0 + row) * numBlocks * Q4_BYTES_PER_BLOCK : nullptr;
+    }
+
+    float sumf[MV2_NR0] = {0.f, 0.f, 0.f, 0.f};
+
+    for (int ib0 = ix; ib0 < numBlocks; ib0 += MV2_NQ) {
+        int base_k = ib0 * Q4_BLOCK_SIZE + il;
+        device const float* yb = A + base_k;
+        float yl[16];
+        float sumy0 = 0.f, sumy1 = 0.f;
+
+        for (short i = 0; i < 8; i += 2) {
+            sumy0  += yb[i + 0] + yb[i + 1];
+            yl[i+0] = yb[i + 0];
+            yl[i+1] = yb[i + 1] / 256.f;
+            sumy1  += yb[i + 16] + yb[i + 17];
+            yl[i+8] = yb[i + 16] / 16.f;
+            yl[i+9] = yb[i + 17] / 4096.f;
+        }
+        float sumy = sumy0 + sumy1;
+
+        for (short row = 0; row < MV2_NR0; row++) {
+            if (!rows[row]) continue;
+            device const uchar* blockPtr = rows[row] + ib0 * Q4_BYTES_PER_BLOCK;
+            float d = float(as_type<half>(*((device const ushort*)blockPtr)));
+            device const ushort* qs = (device const ushort*)(blockPtr + 2 + il);
+
+            float acc0 = 0.f, acc1 = 0.f, acc2 = 0.f, acc3 = 0.f;
+            for (short i = 0; i < 8; i += 2) {
+                acc0 += yl[i + 0] * (qs[i / 2] & 0x000F);
+                acc1 += yl[i + 1] * (qs[i / 2] & 0x0F00);
+                acc2 += yl[i + 8] * (qs[i / 2] & 0x00F0);
+                acc3 += yl[i + 9] * (qs[i / 2] & 0xF000);
+            }
+            sumf[row] += d * (sumy * -8.f + acc0 + acc1 + acc2 + acc3);
+        }
+    }
+
+    // Add to output including deferred residual (attention output)
+    for (short row = 0; row < MV2_NR0; row++) {
+        float tot = simd_sum(sumf[row]);
+        if (simd_lane == 0 && r0 + row < N) {
+            C[r0 + row] += residual[r0 + row] + tot;
+        }
+    }
+}
+
 // Variant of matvec_q4_0_v2_f32 that reads FP16 activations.
 // Eliminates a separate ConvertF16ToF32 dispatch when SDPA outputs FP16.
 // Same algorithm: 64 threads, NR0=4, fused nibble-masking.
@@ -883,6 +954,86 @@ kernel void matvec_q4_0_v2_f16in_f32(
         float tot = simd_sum(sumf[row]);
         if (simd_lane == 0 && r0 + row < N) {
             C[r0 + row] = tot;
+        }
+    }
+}
+
+// Variant of matvec_q4_0_v2_f16in_f32 that ACCUMULATES into output: C[r] += dot(A, B[r]).
+// Used for Wo+Add: writes x += Wo @ attn_output, fusing the attention residual add into Wo.
+// This eliminates the separate AddRMSNorm dispatch and avoids a big→small→big pipeline drain.
+kernel void matvec_q4_0_v2_f16in_add_f32(
+    device const half* A [[buffer(0)]],
+    device const uchar* B [[buffer(1)]],
+    device float* C [[buffer(2)]],
+    constant int& N [[buffer(3)]],
+    constant int& K [[buffer(4)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int r0 = (gid * MV2_NSG + simd_group) * MV2_NR0;
+    if (r0 >= N) return;
+
+    int numBlocks = (K + Q4_BLOCK_SIZE - 1) / Q4_BLOCK_SIZE;
+
+    short ix = simd_lane / 2;
+    short il = (simd_lane % 2) * 8;
+
+    device const uchar* rows[MV2_NR0];
+    for (int row = 0; row < MV2_NR0; row++) {
+        rows[row] = (r0 + row < N) ? B + (r0 + row) * numBlocks * Q4_BYTES_PER_BLOCK : nullptr;
+    }
+
+    float sumf[MV2_NR0] = {0.f, 0.f, 0.f, 0.f};
+
+    for (int ib0 = ix; ib0 < numBlocks; ib0 += MV2_NQ) {
+        int base_k = ib0 * Q4_BLOCK_SIZE + il;
+
+        device const half* yb = A + base_k;
+        float yl[16];
+        float sumy0 = 0.f, sumy1 = 0.f;
+
+        for (short i = 0; i < 8; i += 2) {
+            float y0 = float(yb[i + 0]);
+            float y1 = float(yb[i + 1]);
+            float y16 = float(yb[i + 16]);
+            float y17 = float(yb[i + 17]);
+
+            sumy0  += y0 + y1;
+            yl[i+0] = y0;
+            yl[i+1] = y1 / 256.f;
+
+            sumy1  += y16 + y17;
+            yl[i+8] = y16 / 16.f;
+            yl[i+9] = y17 / 4096.f;
+        }
+
+        float sumy = sumy0 + sumy1;
+
+        for (short row = 0; row < MV2_NR0; row++) {
+            if (!rows[row]) continue;
+
+            device const uchar* blockPtr = rows[row] + ib0 * Q4_BYTES_PER_BLOCK;
+            float d = float(as_type<half>(*((device const ushort*)blockPtr)));
+
+            device const ushort* qs = (device const ushort*)(blockPtr + 2 + il);
+
+            float acc0 = 0.f, acc1 = 0.f, acc2 = 0.f, acc3 = 0.f;
+            for (short i = 0; i < 8; i += 2) {
+                acc0 += yl[i + 0] * (qs[i / 2] & 0x000F);
+                acc1 += yl[i + 1] * (qs[i / 2] & 0x0F00);
+                acc2 += yl[i + 8] * (qs[i / 2] & 0x00F0);
+                acc3 += yl[i + 9] * (qs[i / 2] & 0xF000);
+            }
+
+            sumf[row] += d * (sumy * -8.f + acc0 + acc1 + acc2 + acc3);
+        }
+    }
+
+    for (short row = 0; row < MV2_NR0; row++) {
+        float tot = simd_sum(sumf[row]);
+        if (simd_lane == 0 && r0 + row < N) {
+            C[r0 + row] += tot;  // ACCUMULATE, not overwrite
         }
     }
 }
@@ -2066,9 +2217,8 @@ kernel void matvec_q4k_multi_output_f32(
 
         device const uchar* blockPtr = b_row + block_idx * Q4K_BYTES_PER_BLOCK;
 
-        // Hardware fp16→fp32 conversion (single cycle vs software pow())
         float d = float(as_type<half>(*((device const ushort*)blockPtr)));
-        float dmin = float(as_type<half>(*((device const ushort*)(blockPtr + 2))));
+        float dmin_val = float(as_type<half>(*((device const ushort*)(blockPtr + 2))));
 
         // Extract only this sub-block's scale and min from packed 6-bit header
         device const uchar* sd = blockPtr + 4;
@@ -2083,7 +2233,7 @@ kernel void matvec_q4k_multi_output_f32(
         }
 
         float dsc = d * float(sc);
-        float dmn = dmin * float(mn);
+        float dmn = dmin_val * float(mn);
 
         // Q4_K interleaved layout: groups of 64 elements share 32 qs bytes.
         // Even sub-blocks (j%2==0) use low nibble, odd use high nibble.
@@ -2092,17 +2242,14 @@ kernel void matvec_q4k_multi_output_f32(
         int elem_start = block_idx * Q4K_BLOCK_SIZE + (j << 5);  // j * 32
 
         if (elem_start + 32 <= K) {
-            // Full sub-block: 32 elements = 8 × float4, matching Q4_0 density
             device const float4* a_vec = (device const float4*)(A + elem_start);
             device const uint* qs32 = (device const uint*)(blockPtr + 16 + qs_base);
 
-            // 8 dot products: each uint holds 4 qs bytes, extract 4 nibbles
             for (int i = 0; i < 8; i++) {
-                float4 a = a_vec[i];
                 uint w = qs32[i];
                 float4 q = float4((w >> shift) & 0xF, (w >> (shift + 8)) & 0xF,
                                   (w >> (shift + 16)) & 0xF, (w >> (shift + 24)) & 0xF);
-                sum += dot(a, dsc * q - dmn);
+                sum += dot(a_vec[i], dsc * q - dmn);
             }
         } else if (elem_start < K) {
             // Partial sub-block: scalar fallback for boundary
@@ -2663,7 +2810,7 @@ kernel void matvec_q4k_fused_mlp_f32(
 
 // Q4_K matvec with FP16 input, FP32 output.
 // Eliminates separate ConvertF16ToF32 dispatch when SDPA outputs FP16.
-// Uses same sub-block strided algorithm as matvec_q4k_multi_output_f32.
+// Uses FP16 dequant for 2× ALU throughput on Apple GPU, FP32 accumulation for precision.
 kernel void matvec_q4k_f16in_f32(
     device const half* A [[buffer(0)]],            // [1, K] activations (FP16)
     device const uchar* B [[buffer(1)]],           // [N, K] in Q4_K format
@@ -2711,16 +2858,14 @@ kernel void matvec_q4k_f16in_f32(
         int elem_start = block_idx * Q4K_BLOCK_SIZE + (j << 5);
 
         if (elem_start + 32 <= K) {
-            // Load FP16 activations and convert to float4
             device const half4* a_vec = (device const half4*)(A + elem_start);
             device const uint* qs32 = (device const uint*)(blockPtr + 16 + qs_base);
 
             for (int i = 0; i < 8; i++) {
-                float4 a = float4(a_vec[i]);
                 uint w = qs32[i];
                 float4 q = float4((w >> shift) & 0xF, (w >> (shift + 8)) & 0xF,
                                   (w >> (shift + 16)) & 0xF, (w >> (shift + 24)) & 0xF);
-                sum += dot(a, dsc * q - dmn);
+                sum += dot(float4(a_vec[i]), dsc * q - dmn);
             }
         } else if (elem_start < K) {
             device const uchar* qs = blockPtr + 16 + qs_base;
@@ -2739,7 +2884,7 @@ kernel void matvec_q4k_f16in_f32(
 
 // Q4_K matvec that ADDS to output: C[i] += dot(A, B_row_i).
 // Fuses W2 matmul + residual addition into a single dispatch.
-// Same algorithm as matvec_q4k_multi_output_f32 but writes with +=.
+// Uses FP16 dequant for 2× ALU throughput on Apple GPU, FP32 accumulation.
 kernel void matvec_q4k_add_f32(
     device const float* A [[buffer(0)]],
     device const uchar* B [[buffer(1)]],
@@ -2791,11 +2936,10 @@ kernel void matvec_q4k_add_f32(
             device const uint* qs32 = (device const uint*)(blockPtr + 16 + qs_base);
 
             for (int i = 0; i < 8; i++) {
-                float4 a = a_vec[i];
                 uint w = qs32[i];
                 float4 q = float4((w >> shift) & 0xF, (w >> (shift + 8)) & 0xF,
                                   (w >> (shift + 16)) & 0xF, (w >> (shift + 24)) & 0xF);
-                sum += dot(a, dsc * q - dmn);
+                sum += dot(a_vec[i], dsc * q - dmn);
             }
         } else if (elem_start < K) {
             device const uchar* qs = blockPtr + 16 + qs_base;
@@ -2810,6 +2954,339 @@ kernel void matvec_q4k_add_f32(
     // ADD to output instead of overwrite (fuses matmul + residual add)
     if (simd_lane == 0) {
         C[output_idx] += sum;
+    }
+}
+
+// =============================================================================
+// Q4_K NR4 F16-input variant: same as matvec_q4k_nr4_f32 but reads FP16 activations.
+// Used for Wo projection after FP16 SDPA output. 4 outputs per simdgroup.
+// =============================================================================
+kernel void matvec_q4k_nr4_f16in_f32(
+    device const half* A [[buffer(0)]],            // [1, K] activations (FP16)
+    device const uchar* B [[buffer(1)]],           // [N, K] in Q4_K format
+    device float* C [[buffer(2)]],                 // [1, N] output (FP32)
+    constant int& N [[buffer(3)]],
+    constant int& K [[buffer(4)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int base_output = gid * Q4K_NR4_OUTPUTS_PER_TG + simd_group * Q4K_NR4_OUTPUTS_PER_SG;
+    if (base_output >= N) return;
+
+    int validOutputs = min(Q4K_NR4_OUTPUTS_PER_SG, N - base_output);
+
+    float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
+
+    int numBlocks = (K + Q4K_BLOCK_SIZE - 1) / Q4K_BLOCK_SIZE;
+
+    device const uchar* b_row0 = B + (base_output + 0) * numBlocks * Q4K_BYTES_PER_BLOCK;
+    device const uchar* b_row1 = B + (base_output + 1) * numBlocks * Q4K_BYTES_PER_BLOCK;
+    device const uchar* b_row2 = B + (base_output + 2) * numBlocks * Q4K_BYTES_PER_BLOCK;
+    device const uchar* b_row3 = B + (base_output + 3) * numBlocks * Q4K_BYTES_PER_BLOCK;
+
+    int totalSubBlocks = numBlocks << 3;
+
+    #define Q4K_NR4_F16_EXTRACT_SCALE(blockPtr, j, dsc_var, dmn_var) \
+    { \
+        float d_val = float(as_type<half>(*((device const ushort*)(blockPtr)))); \
+        float dmin_val = float(as_type<half>(*((device const ushort*)((blockPtr) + 2)))); \
+        device const uchar* sd = (blockPtr) + 4; \
+        int j_lo = (j) & 3; \
+        uchar sc, mn; \
+        if ((j) < 4) { \
+            sc = sd[j_lo] & 0x3F; \
+            mn = sd[j_lo + 4] & 0x3F; \
+        } else { \
+            sc = (sd[8 + j_lo] & 0x0F) | ((sd[j_lo] >> 6) << 4); \
+            mn = (sd[8 + j_lo] >> 4) | ((sd[j_lo + 4] >> 6) << 4); \
+        } \
+        dsc_var = d_val * float(sc); \
+        dmn_var = dmin_val * float(mn); \
+    }
+
+    #define Q4K_NR4_F16_DOT8(a_vec, qs32_ptr, shift, dsc_val, dmn_val, sum_var) \
+    { \
+        for (int i = 0; i < 8; i++) { \
+            float4 a = float4((a_vec)[i]); \
+            uint w = (qs32_ptr)[i]; \
+            float4 q = float4((w >> (shift)) & 0xF, (w >> ((shift) + 8)) & 0xF, \
+                              (w >> ((shift) + 16)) & 0xF, (w >> ((shift) + 24)) & 0xF); \
+            sum_var += dot(a, dsc_val * q - dmn_val); \
+        } \
+    }
+
+    for (int sb = simd_lane; sb < totalSubBlocks; sb += 32) {
+        int block_idx = sb >> 3;
+        int j = sb & 7;
+
+        int qs_base = (j >> 1) << 5;
+        int shift = (j & 1) << 2;
+        int elem_start = block_idx * Q4K_BLOCK_SIZE + (j << 5);
+
+        if (elem_start + 32 > K) {
+            if (elem_start < K) {
+                // Partial sub-block: scalar fallback
+                {
+                    device const uchar* bp = b_row0 + block_idx * Q4K_BYTES_PER_BLOCK;
+                    float dsc, dmn;
+                    Q4K_NR4_F16_EXTRACT_SCALE(bp, j, dsc, dmn);
+                    device const uchar* qs = bp + 16 + qs_base;
+                    for (int i = 0; i < 32 && elem_start + i < K; i++) {
+                        float q_val = float((qs[i] >> shift) & 0xF);
+                        sum0 += float(A[elem_start + i]) * (dsc * q_val - dmn);
+                    }
+                }
+                if (validOutputs > 1) {
+                    device const uchar* bp = b_row1 + block_idx * Q4K_BYTES_PER_BLOCK;
+                    float dsc, dmn;
+                    Q4K_NR4_F16_EXTRACT_SCALE(bp, j, dsc, dmn);
+                    device const uchar* qs = bp + 16 + qs_base;
+                    for (int i = 0; i < 32 && elem_start + i < K; i++) {
+                        float q_val = float((qs[i] >> shift) & 0xF);
+                        sum1 += float(A[elem_start + i]) * (dsc * q_val - dmn);
+                    }
+                }
+                if (validOutputs > 2) {
+                    device const uchar* bp = b_row2 + block_idx * Q4K_BYTES_PER_BLOCK;
+                    float dsc, dmn;
+                    Q4K_NR4_F16_EXTRACT_SCALE(bp, j, dsc, dmn);
+                    device const uchar* qs = bp + 16 + qs_base;
+                    for (int i = 0; i < 32 && elem_start + i < K; i++) {
+                        float q_val = float((qs[i] >> shift) & 0xF);
+                        sum2 += float(A[elem_start + i]) * (dsc * q_val - dmn);
+                    }
+                }
+                if (validOutputs > 3) {
+                    device const uchar* bp = b_row3 + block_idx * Q4K_BYTES_PER_BLOCK;
+                    float dsc, dmn;
+                    Q4K_NR4_F16_EXTRACT_SCALE(bp, j, dsc, dmn);
+                    device const uchar* qs = bp + 16 + qs_base;
+                    for (int i = 0; i < 32 && elem_start + i < K; i++) {
+                        float q_val = float((qs[i] >> shift) & 0xF);
+                        sum3 += float(A[elem_start + i]) * (dsc * q_val - dmn);
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Full sub-block: load FP16 activation ONCE, convert to float4, reuse for 4 weight rows
+        device const half4* a_vec = (device const half4*)(A + elem_start);
+
+        // Row 0 (always valid)
+        {
+            device const uchar* bp = b_row0 + block_idx * Q4K_BYTES_PER_BLOCK;
+            float dsc, dmn;
+            Q4K_NR4_F16_EXTRACT_SCALE(bp, j, dsc, dmn);
+            device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
+            Q4K_NR4_F16_DOT8(a_vec, qs32, shift, dsc, dmn, sum0);
+        }
+
+        if (validOutputs > 1) {
+            device const uchar* bp = b_row1 + block_idx * Q4K_BYTES_PER_BLOCK;
+            float dsc, dmn;
+            Q4K_NR4_F16_EXTRACT_SCALE(bp, j, dsc, dmn);
+            device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
+            Q4K_NR4_F16_DOT8(a_vec, qs32, shift, dsc, dmn, sum1);
+        }
+
+        if (validOutputs > 2) {
+            device const uchar* bp = b_row2 + block_idx * Q4K_BYTES_PER_BLOCK;
+            float dsc, dmn;
+            Q4K_NR4_F16_EXTRACT_SCALE(bp, j, dsc, dmn);
+            device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
+            Q4K_NR4_F16_DOT8(a_vec, qs32, shift, dsc, dmn, sum2);
+        }
+
+        if (validOutputs > 3) {
+            device const uchar* bp = b_row3 + block_idx * Q4K_BYTES_PER_BLOCK;
+            float dsc, dmn;
+            Q4K_NR4_F16_EXTRACT_SCALE(bp, j, dsc, dmn);
+            device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
+            Q4K_NR4_F16_DOT8(a_vec, qs32, shift, dsc, dmn, sum3);
+        }
+    }
+
+    #undef Q4K_NR4_F16_EXTRACT_SCALE
+    #undef Q4K_NR4_F16_DOT8
+
+    sum0 = simd_sum(sum0);
+    sum1 = simd_sum(sum1);
+    sum2 = simd_sum(sum2);
+    sum3 = simd_sum(sum3);
+
+    if (simd_lane == 0) {
+        C[base_output] = sum0;
+        if (base_output + 1 < N) C[base_output + 1] = sum1;
+        if (base_output + 2 < N) C[base_output + 2] = sum2;
+        if (base_output + 3 < N) C[base_output + 3] = sum3;
+    }
+}
+
+// =============================================================================
+// Q4_K NR4 Add variant: same as matvec_q4k_nr4_f32 but ADDS to output (C += A @ B^T).
+// Used for fused W2 matmul + residual addition. 4 outputs per simdgroup.
+// =============================================================================
+kernel void matvec_q4k_nr4_add_f32(
+    device const float* A [[buffer(0)]],           // [1, K] activations
+    device const uchar* B [[buffer(1)]],           // [N, K] in Q4_K format
+    device float* C [[buffer(2)]],                 // [1, N] output (ADDS to existing)
+    constant int& N [[buffer(3)]],
+    constant int& K [[buffer(4)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int base_output = gid * Q4K_NR4_OUTPUTS_PER_TG + simd_group * Q4K_NR4_OUTPUTS_PER_SG;
+    if (base_output >= N) return;
+
+    int validOutputs = min(Q4K_NR4_OUTPUTS_PER_SG, N - base_output);
+
+    float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
+
+    int numBlocks = (K + Q4K_BLOCK_SIZE - 1) / Q4K_BLOCK_SIZE;
+
+    device const uchar* b_row0 = B + (base_output + 0) * numBlocks * Q4K_BYTES_PER_BLOCK;
+    device const uchar* b_row1 = B + (base_output + 1) * numBlocks * Q4K_BYTES_PER_BLOCK;
+    device const uchar* b_row2 = B + (base_output + 2) * numBlocks * Q4K_BYTES_PER_BLOCK;
+    device const uchar* b_row3 = B + (base_output + 3) * numBlocks * Q4K_BYTES_PER_BLOCK;
+
+    int totalSubBlocks = numBlocks << 3;
+
+    #define Q4K_NR4_ADD_EXTRACT_SCALE(blockPtr, j, dsc_var, dmn_var) \
+    { \
+        float d_val = float(as_type<half>(*((device const ushort*)(blockPtr)))); \
+        float dmin_val = float(as_type<half>(*((device const ushort*)((blockPtr) + 2)))); \
+        device const uchar* sd = (blockPtr) + 4; \
+        int j_lo = (j) & 3; \
+        uchar sc, mn; \
+        if ((j) < 4) { \
+            sc = sd[j_lo] & 0x3F; \
+            mn = sd[j_lo + 4] & 0x3F; \
+        } else { \
+            sc = (sd[8 + j_lo] & 0x0F) | ((sd[j_lo] >> 6) << 4); \
+            mn = (sd[8 + j_lo] >> 4) | ((sd[j_lo + 4] >> 6) << 4); \
+        } \
+        dsc_var = d_val * float(sc); \
+        dmn_var = dmin_val * float(mn); \
+    }
+
+    #define Q4K_NR4_ADD_DOT8(a_vec, qs32_ptr, shift, dsc_val, dmn_val, sum_var) \
+    { \
+        for (int i = 0; i < 8; i++) { \
+            float4 a = (a_vec)[i]; \
+            uint w = (qs32_ptr)[i]; \
+            float4 q = float4((w >> (shift)) & 0xF, (w >> ((shift) + 8)) & 0xF, \
+                              (w >> ((shift) + 16)) & 0xF, (w >> ((shift) + 24)) & 0xF); \
+            sum_var += dot(a, dsc_val * q - dmn_val); \
+        } \
+    }
+
+    for (int sb = simd_lane; sb < totalSubBlocks; sb += 32) {
+        int block_idx = sb >> 3;
+        int j = sb & 7;
+
+        int qs_base = (j >> 1) << 5;
+        int shift = (j & 1) << 2;
+        int elem_start = block_idx * Q4K_BLOCK_SIZE + (j << 5);
+
+        if (elem_start + 32 > K) {
+            if (elem_start < K) {
+                {
+                    device const uchar* bp = b_row0 + block_idx * Q4K_BYTES_PER_BLOCK;
+                    float dsc, dmn;
+                    Q4K_NR4_ADD_EXTRACT_SCALE(bp, j, dsc, dmn);
+                    device const uchar* qs = bp + 16 + qs_base;
+                    for (int i = 0; i < 32 && elem_start + i < K; i++) {
+                        float q_val = float((qs[i] >> shift) & 0xF);
+                        sum0 += A[elem_start + i] * (dsc * q_val - dmn);
+                    }
+                }
+                if (validOutputs > 1) {
+                    device const uchar* bp = b_row1 + block_idx * Q4K_BYTES_PER_BLOCK;
+                    float dsc, dmn;
+                    Q4K_NR4_ADD_EXTRACT_SCALE(bp, j, dsc, dmn);
+                    device const uchar* qs = bp + 16 + qs_base;
+                    for (int i = 0; i < 32 && elem_start + i < K; i++) {
+                        float q_val = float((qs[i] >> shift) & 0xF);
+                        sum1 += A[elem_start + i] * (dsc * q_val - dmn);
+                    }
+                }
+                if (validOutputs > 2) {
+                    device const uchar* bp = b_row2 + block_idx * Q4K_BYTES_PER_BLOCK;
+                    float dsc, dmn;
+                    Q4K_NR4_ADD_EXTRACT_SCALE(bp, j, dsc, dmn);
+                    device const uchar* qs = bp + 16 + qs_base;
+                    for (int i = 0; i < 32 && elem_start + i < K; i++) {
+                        float q_val = float((qs[i] >> shift) & 0xF);
+                        sum2 += A[elem_start + i] * (dsc * q_val - dmn);
+                    }
+                }
+                if (validOutputs > 3) {
+                    device const uchar* bp = b_row3 + block_idx * Q4K_BYTES_PER_BLOCK;
+                    float dsc, dmn;
+                    Q4K_NR4_ADD_EXTRACT_SCALE(bp, j, dsc, dmn);
+                    device const uchar* qs = bp + 16 + qs_base;
+                    for (int i = 0; i < 32 && elem_start + i < K; i++) {
+                        float q_val = float((qs[i] >> shift) & 0xF);
+                        sum3 += A[elem_start + i] * (dsc * q_val - dmn);
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Full sub-block: load activation ONCE, reuse for 4 weight rows
+        device const float4* a_vec = (device const float4*)(A + elem_start);
+
+        {
+            device const uchar* bp = b_row0 + block_idx * Q4K_BYTES_PER_BLOCK;
+            float dsc, dmn;
+            Q4K_NR4_ADD_EXTRACT_SCALE(bp, j, dsc, dmn);
+            device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
+            Q4K_NR4_ADD_DOT8(a_vec, qs32, shift, dsc, dmn, sum0);
+        }
+
+        if (validOutputs > 1) {
+            device const uchar* bp = b_row1 + block_idx * Q4K_BYTES_PER_BLOCK;
+            float dsc, dmn;
+            Q4K_NR4_ADD_EXTRACT_SCALE(bp, j, dsc, dmn);
+            device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
+            Q4K_NR4_ADD_DOT8(a_vec, qs32, shift, dsc, dmn, sum1);
+        }
+
+        if (validOutputs > 2) {
+            device const uchar* bp = b_row2 + block_idx * Q4K_BYTES_PER_BLOCK;
+            float dsc, dmn;
+            Q4K_NR4_ADD_EXTRACT_SCALE(bp, j, dsc, dmn);
+            device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
+            Q4K_NR4_ADD_DOT8(a_vec, qs32, shift, dsc, dmn, sum2);
+        }
+
+        if (validOutputs > 3) {
+            device const uchar* bp = b_row3 + block_idx * Q4K_BYTES_PER_BLOCK;
+            float dsc, dmn;
+            Q4K_NR4_ADD_EXTRACT_SCALE(bp, j, dsc, dmn);
+            device const uint* qs32 = (device const uint*)(bp + 16 + qs_base);
+            Q4K_NR4_ADD_DOT8(a_vec, qs32, shift, dsc, dmn, sum3);
+        }
+    }
+
+    #undef Q4K_NR4_ADD_EXTRACT_SCALE
+    #undef Q4K_NR4_ADD_DOT8
+
+    sum0 = simd_sum(sum0);
+    sum1 = simd_sum(sum1);
+    sum2 = simd_sum(sum2);
+    sum3 = simd_sum(sum3);
+
+    // ADD to output (fuses matmul + residual addition)
+    if (simd_lane == 0) {
+        C[base_output] += sum0;
+        if (base_output + 1 < N) C[base_output + 1] += sum1;
+        if (base_output + 2 < N) C[base_output + 2] += sum2;
+        if (base_output + 3 < N) C[base_output + 3] += sum3;
     }
 }
 
@@ -4069,6 +4546,229 @@ kernel void matvec_q4_0_fused_rmsnorm_qkv_f16(
     }
 }
 
+// Fused RMSNorm + QKV + RoPE + KV Scatter Kernel (FP16 output, decode only)
+// Combines 3 dispatches into 1: FusedQKV + RoPE + ScatterKV.
+// Eliminates the 32-thread RoPE+ScatterKV dispatch that creates pipeline bubbles
+// between the big QKV matvec and medium SDPA dispatch.
+//
+// Q threadgroups: matvec → RoPE in-register → write to outQ
+// K threadgroups: matvec → RoPE in-register → scatter directly to kCache
+// V threadgroups: matvec → scatter directly to vCache (no RoPE)
+//
+// Grid: ceil(qDim/32) + ceil(kvDim/32) + ceil(kvDim/32) threadgroups.
+// Each SG produces 4 consecutive outputs. Since base_output = localGid*32 + sg*4,
+// position within head is always a multiple of 4, so (sum0,sum1) and (sum2,sum3)
+// form valid RoPE pairs at (posInHead, posInHead+1) and (posInHead+2, posInHead+3).
+kernel void matvec_q4_0_fused_rmsnorm_qkv_rope_scatter_f16(
+    device const float* x [[buffer(0)]],           // [K] input activations
+    device const float* normWeight [[buffer(1)]],  // [K] RMSNorm weights
+    device const uchar* Wq [[buffer(2)]],          // [qDim, K] Q4_0
+    device const uchar* Wk [[buffer(3)]],          // [kvDim, K] Q4_0
+    device const uchar* Wv [[buffer(4)]],          // [kvDim, K] Q4_0
+    device half* outQ [[buffer(5)]],               // [qDim] FP16 Q output (RoPE applied)
+    device half* kCache [[buffer(6)]],             // K cache: [numKVHeads, maxSeqLen, headDim]
+    device half* vCache [[buffer(7)]],             // V cache: [numKVHeads, maxSeqLen, headDim]
+    constant int& qDim [[buffer(8)]],
+    constant int& kvDim [[buffer(9)]],
+    constant int& K [[buffer(10)]],
+    constant float& eps [[buffer(11)]],
+    constant int& headDim [[buffer(12)]],
+    constant int& ropeDim [[buffer(13)]],
+    constant int& startPos [[buffer(14)]],
+    constant float& theta [[buffer(15)]],
+    constant int& maxSeqLen [[buffer(16)]],
+    constant int& seqPos [[buffer(17)]],
+    threadgroup half* shared_half [[threadgroup(0)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    // Phase 1: Cooperative Load & RMSNorm (identical to FusedQKV kernel)
+    float localSumSq = 0.0f;
+    for (int i = tid; i < K; i += 256) {
+        float val = x[i];
+        shared_half[i] = half(val);
+        localSumSq += val * val;
+    }
+    localSumSq = simd_sum(localSumSq);
+    threadgroup float* scratch = (threadgroup float*)(shared_half + K);
+    if (simd_lane == 0) {
+        scratch[simd_group] = localSumSq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float totalSumSq = 0.0f;
+    if (simd_group == 0) {
+        float val = (simd_lane < 8) ? scratch[simd_lane] : 0.0f;
+        totalSumSq = simd_sum(val);
+    }
+    if (tid == 0) {
+        scratch[0] = rsqrt(totalSumSq / float(K) + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float rms = scratch[0];
+
+    // Phase 2: Route threadgroup to Q, K, or V projection
+    int qTGs = (qDim + 31) / 32;
+    int kvTGs = (kvDim + 31) / 32;
+
+    int isQ = ((int)gid < qTGs) ? 1 : 0;
+    int isK = (!isQ && (int)gid < qTGs + kvTGs) ? 1 : 0;
+    // isV = !isQ && !isK
+
+    int localGid;
+    device const uchar* W;
+    int N;
+
+    if (isQ) {
+        localGid = gid;
+        W = Wq;
+        N = qDim;
+    } else if (isK) {
+        localGid = gid - qTGs;
+        W = Wk;
+        N = kvDim;
+    } else {
+        localGid = gid - qTGs - kvTGs;
+        W = Wv;
+        N = kvDim;
+    }
+
+    // Phase 3: MatVec (identical inner loop to FusedQKV)
+    int base_output = localGid * 32 + simd_group * 4;
+
+    float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
+    int numBlocks = (K + 32 - 1) / 32;
+
+    device const uchar* row0 = (base_output + 0 < N) ? W + (base_output + 0) * numBlocks * 18 : nullptr;
+    device const uchar* row1 = (base_output + 1 < N) ? W + (base_output + 1) * numBlocks * 18 : nullptr;
+    device const uchar* row2 = (base_output + 2 < N) ? W + (base_output + 2) * numBlocks * 18 : nullptr;
+    device const uchar* row3 = (base_output + 3 < N) ? W + (base_output + 3) * numBlocks * 18 : nullptr;
+
+    for (int block = simd_lane; block < numBlocks; block += 32) {
+        int base_k = block * 32;
+        if (base_k >= K) break;
+
+        device const float4* w_ptr = (device const float4*)(normWeight + base_k);
+        float4 w0 = w_ptr[0], w1 = w_ptr[1], w2 = w_ptr[2], w3 = w_ptr[3];
+        float4 w4 = w_ptr[4], w5 = w_ptr[5], w6 = w_ptr[6], w7 = w_ptr[7];
+
+        threadgroup const half4* hx_ptr = (threadgroup const half4*)(shared_half + base_k);
+        float4 x0 = float4(hx_ptr[0]), x1 = float4(hx_ptr[1]), x2 = float4(hx_ptr[2]), x3 = float4(hx_ptr[3]);
+        float4 x4 = float4(hx_ptr[4]), x5 = float4(hx_ptr[5]), x6 = float4(hx_ptr[6]), x7 = float4(hx_ptr[7]);
+
+        float4 a0 = x0 * rms * w0, a1 = x1 * rms * w1, a2 = x2 * rms * w2, a3 = x3 * rms * w3;
+        float4 a4 = x4 * rms * w4, a5 = x5 * rms * w5, a6 = x6 * rms * w6, a7 = x7 * rms * w7;
+
+        #define PROCESS_ROW_FQRS(row_ptr, sum_var) \
+        if (row_ptr) { \
+            device const uchar* blockPtr = row_ptr + block * 18; \
+            float scale = as_type<half>(*((device const ushort*)blockPtr)); \
+            device const uchar* qs = blockPtr + 2; \
+            float4 q_lo_0 = float4(qs[0] & 0xF, qs[1] & 0xF, qs[2] & 0xF, qs[3] & 0xF) - 8.0f; \
+            float4 q_hi_0 = float4(qs[0] >> 4, qs[1] >> 4, qs[2] >> 4, qs[3] >> 4) - 8.0f; \
+            float4 q_lo_1 = float4(qs[4] & 0xF, qs[5] & 0xF, qs[6] & 0xF, qs[7] & 0xF) - 8.0f; \
+            float4 q_hi_1 = float4(qs[4] >> 4, qs[5] >> 4, qs[6] >> 4, qs[7] >> 4) - 8.0f; \
+            float4 q_lo_2 = float4(qs[8] & 0xF, qs[9] & 0xF, qs[10] & 0xF, qs[11] & 0xF) - 8.0f; \
+            float4 q_hi_2 = float4(qs[8] >> 4, qs[9] >> 4, qs[10] >> 4, qs[11] >> 4) - 8.0f; \
+            float4 q_lo_3 = float4(qs[12] & 0xF, qs[13] & 0xF, qs[14] & 0xF, qs[15] & 0xF) - 8.0f; \
+            float4 q_hi_3 = float4(qs[12] >> 4, qs[13] >> 4, qs[14] >> 4, qs[15] >> 4) - 8.0f; \
+            sum_var += scale * (dot(a0, q_lo_0) + dot(a4, q_hi_0) + \
+                                dot(a1, q_lo_1) + dot(a5, q_hi_1) + \
+                                dot(a2, q_lo_2) + dot(a6, q_hi_2) + \
+                                dot(a3, q_lo_3) + dot(a7, q_hi_3)); \
+        }
+
+        PROCESS_ROW_FQRS(row0, sum0);
+        PROCESS_ROW_FQRS(row1, sum1);
+        PROCESS_ROW_FQRS(row2, sum2);
+        PROCESS_ROW_FQRS(row3, sum3);
+        #undef PROCESS_ROW_FQRS
+    }
+
+    sum0 = simd_sum(sum0);
+    sum1 = simd_sum(sum1);
+    sum2 = simd_sum(sum2);
+    sum3 = simd_sum(sum3);
+
+    // Phase 4: Post-process — apply RoPE + write/scatter outputs
+    if (simd_lane == 0) {
+        int posInHead = base_output % headDim;
+
+        if (isQ) {
+            // Q: apply RoPE in-register, write to outQ
+            // Pair 1: (posInHead, posInHead+1) → j = posInHead/2
+            if (base_output + 1 < N && posInHead + 1 < ropeDim) {
+                int j = posInHead / 2;
+                float freq = 1.0f / pow(theta, float(2 * j) / float(ropeDim));
+                float angle = float(startPos) * freq;
+                float cos_val = cos(angle);
+                float sin_val = sin(angle);
+                outQ[base_output + 0] = half(sum0 * cos_val - sum1 * sin_val);
+                outQ[base_output + 1] = half(sum0 * sin_val + sum1 * cos_val);
+            } else {
+                if (base_output + 0 < N) outQ[base_output + 0] = half(sum0);
+                if (base_output + 1 < N) outQ[base_output + 1] = half(sum1);
+            }
+            // Pair 2: (posInHead+2, posInHead+3) → j = posInHead/2 + 1
+            if (base_output + 3 < N && posInHead + 3 < ropeDim) {
+                int j = posInHead / 2 + 1;
+                float freq = 1.0f / pow(theta, float(2 * j) / float(ropeDim));
+                float angle = float(startPos) * freq;
+                float cos_val = cos(angle);
+                float sin_val = sin(angle);
+                outQ[base_output + 2] = half(sum2 * cos_val - sum3 * sin_val);
+                outQ[base_output + 3] = half(sum2 * sin_val + sum3 * cos_val);
+            } else {
+                if (base_output + 2 < N) outQ[base_output + 2] = half(sum2);
+                if (base_output + 3 < N) outQ[base_output + 3] = half(sum3);
+            }
+
+        } else if (isK) {
+            // K: apply RoPE in-register, scatter directly to K cache
+            int head = base_output / headDim;
+            int dstBase = head * maxSeqLen * headDim + seqPos * headDim + posInHead;
+
+            // Pair 1
+            if (base_output + 1 < N && posInHead + 1 < ropeDim) {
+                int j = posInHead / 2;
+                float freq = 1.0f / pow(theta, float(2 * j) / float(ropeDim));
+                float angle = float(startPos) * freq;
+                float cos_val = cos(angle);
+                float sin_val = sin(angle);
+                kCache[dstBase + 0] = half(sum0 * cos_val - sum1 * sin_val);
+                kCache[dstBase + 1] = half(sum0 * sin_val + sum1 * cos_val);
+            } else {
+                if (base_output + 0 < N) kCache[dstBase + 0] = half(sum0);
+                if (base_output + 1 < N) kCache[dstBase + 1] = half(sum1);
+            }
+            // Pair 2
+            if (base_output + 3 < N && posInHead + 3 < ropeDim) {
+                int j = posInHead / 2 + 1;
+                float freq = 1.0f / pow(theta, float(2 * j) / float(ropeDim));
+                float angle = float(startPos) * freq;
+                float cos_val = cos(angle);
+                float sin_val = sin(angle);
+                kCache[dstBase + 2] = half(sum2 * cos_val - sum3 * sin_val);
+                kCache[dstBase + 3] = half(sum2 * sin_val + sum3 * cos_val);
+            } else {
+                if (base_output + 2 < N) kCache[dstBase + 2] = half(sum2);
+                if (base_output + 3 < N) kCache[dstBase + 3] = half(sum3);
+            }
+
+        } else {
+            // V: no RoPE, scatter directly to V cache
+            int head = base_output / headDim;
+            int dstBase = head * maxSeqLen * headDim + seqPos * headDim + posInHead;
+
+            if (base_output + 0 < N) vCache[dstBase + 0] = half(sum0);
+            if (base_output + 1 < N) vCache[dstBase + 1] = half(sum1);
+            if (base_output + 2 < N) vCache[dstBase + 2] = half(sum2);
+            if (base_output + 3 < N) vCache[dstBase + 3] = half(sum3);
+        }
+    }
+}
+
 // Fused MLP Kernel: Gate(x) * Up(x) -> SiLU(x @ W1) * (x @ W3)
 // Weights are Q4_0. Only for decode (seqLen=1).
 // This runs TWO matvecs in parallel (interleaved) and fuses the SiLU/Mul.
@@ -4163,6 +4863,288 @@ kernel void matvec_q4_0_fused_mlp_f32(
 
     // Apply SiLU and Multiply: out = (x * sigmoid(x)) * y
     // SiLU(g) * u
+    if (simd_lane == 0) {
+        if (base_output + 0 < N) {
+            float sigmoid = 1.0f / (1.0f + exp(-sumGate0));
+            out[base_output + 0] = (sumGate0 * sigmoid) * sumUp0;
+        }
+        if (base_output + 1 < N) {
+            float sigmoid = 1.0f / (1.0f + exp(-sumGate1));
+            out[base_output + 1] = (sumGate1 * sigmoid) * sumUp1;
+        }
+        if (base_output + 2 < N) {
+            float sigmoid = 1.0f / (1.0f + exp(-sumGate2));
+            out[base_output + 2] = (sumGate2 * sigmoid) * sumUp2;
+        }
+        if (base_output + 3 < N) {
+            float sigmoid = 1.0f / (1.0f + exp(-sumGate3));
+            out[base_output + 3] = (sumGate3 * sigmoid) * sumUp3;
+        }
+    }
+}
+
+// =============================================================================
+// FUSED ADD + RMSNORM + MLP KERNEL
+// =============================================================================
+// Merges AddRMSNorm preamble into FusedMLP to eliminate 1 dispatch per layer.
+// Each threadgroup: loads x + woOutput → RMSNorm → dual W1/W3 matvec → SiLU*Mul.
+// Does NOT modify x in-place (residual deferred to W2+Add2+Residual kernel).
+//
+// Input: x[K] (residual state), woOutput[K] (attention output), normWeight[K] (FFN RMSNorm)
+// Output: out[N] = SiLU(W1 @ RMSNorm(x + woOutput)) * (W3 @ RMSNorm(x + woOutput))
+//
+// Grid: ceil(N/32) TGs × 256 threads (8 SGs × 4 outputs/SG)
+// Shared memory: K * sizeof(half) + 8 * sizeof(float)
+
+kernel void matvec_q4_0_fused_addrmsnorm_mlp_f32(
+    device const float* x [[buffer(0)]],             // [K] residual state
+    device const float* woOutput [[buffer(1)]],      // [K] attention output (Wo projection)
+    device const float* normWeight [[buffer(2)]],    // [K] FFN RMSNorm weight
+    device const uchar* W1 [[buffer(3)]],            // [N, K] Q4_0 Gate
+    device const uchar* W3 [[buffer(4)]],            // [N, K] Q4_0 Up
+    device float* out [[buffer(5)]],                 // [N] output
+    constant int& N [[buffer(6)]],                   // Intermediate size
+    constant int& K [[buffer(7)]],                   // Hidden size
+    constant float& eps [[buffer(8)]],               // RMSNorm epsilon
+    threadgroup half* shared_half [[threadgroup(0)]], // K * sizeof(half) + 8 * sizeof(float)
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    // Phase 1: Cooperative Load, Add, & RMSNorm (identical for all TGs)
+    // Compute x_new = x + woOutput, store as FP16 in shared memory, compute RMS.
+    float localSumSq = 0.0f;
+    for (int i = tid; i < K; i += 256) {
+        float val = x[i] + woOutput[i];
+        shared_half[i] = half(val);
+        localSumSq += val * val;
+    }
+    localSumSq = simd_sum(localSumSq);
+    threadgroup float* scratch = (threadgroup float*)(shared_half + K);
+    if (simd_lane == 0) {
+        scratch[simd_group] = localSumSq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float totalSumSq = 0.0f;
+    if (simd_group == 0) {
+        float val = (simd_lane < 8) ? scratch[simd_lane] : 0.0f;
+        totalSumSq = simd_sum(val);
+    }
+    if (tid == 0) {
+        scratch[0] = rsqrt(totalSumSq / float(K) + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float rms = scratch[0];
+
+    // Phase 2: Dual W1/W3 Matvec with RMSNorm-scaled activations + SiLU activation
+    int base_output = gid * 32 + simd_group * 4;
+
+    float sumGate0 = 0.0f, sumGate1 = 0.0f, sumGate2 = 0.0f, sumGate3 = 0.0f;
+    float sumUp0 = 0.0f, sumUp1 = 0.0f, sumUp2 = 0.0f, sumUp3 = 0.0f;
+
+    int numBlocks = (K + 32 - 1) / 32;
+
+    // W1 (Gate) rows
+    device const uchar* w1_row0 = (base_output + 0 < N) ? W1 + (base_output + 0) * numBlocks * 18 : nullptr;
+    device const uchar* w1_row1 = (base_output + 1 < N) ? W1 + (base_output + 1) * numBlocks * 18 : nullptr;
+    device const uchar* w1_row2 = (base_output + 2 < N) ? W1 + (base_output + 2) * numBlocks * 18 : nullptr;
+    device const uchar* w1_row3 = (base_output + 3 < N) ? W1 + (base_output + 3) * numBlocks * 18 : nullptr;
+
+    // W3 (Up) rows
+    device const uchar* w3_row0 = (base_output + 0 < N) ? W3 + (base_output + 0) * numBlocks * 18 : nullptr;
+    device const uchar* w3_row1 = (base_output + 1 < N) ? W3 + (base_output + 1) * numBlocks * 18 : nullptr;
+    device const uchar* w3_row2 = (base_output + 2 < N) ? W3 + (base_output + 2) * numBlocks * 18 : nullptr;
+    device const uchar* w3_row3 = (base_output + 3 < N) ? W3 + (base_output + 3) * numBlocks * 18 : nullptr;
+
+    for (int block = simd_lane; block < numBlocks; block += 32) {
+        int base_k = block * 32;
+        if (base_k >= K) break;
+
+        // Read normWeight for this block
+        device const float4* w_ptr = (device const float4*)(normWeight + base_k);
+        float4 w0 = w_ptr[0], w1 = w_ptr[1], w2 = w_ptr[2], w3 = w_ptr[3];
+        float4 w4 = w_ptr[4], w5 = w_ptr[5], w6 = w_ptr[6], w7 = w_ptr[7];
+
+        // Read activations from FP16 shared memory, apply RMSNorm: a = x_new * rms * weight
+        threadgroup const half4* hx_ptr = (threadgroup const half4*)(shared_half + base_k);
+        float4 a0 = float4(hx_ptr[0]) * rms * w0, a1 = float4(hx_ptr[1]) * rms * w1;
+        float4 a2 = float4(hx_ptr[2]) * rms * w2, a3 = float4(hx_ptr[3]) * rms * w3;
+        float4 a4 = float4(hx_ptr[4]) * rms * w4, a5 = float4(hx_ptr[5]) * rms * w5;
+        float4 a6 = float4(hx_ptr[6]) * rms * w6, a7 = float4(hx_ptr[7]) * rms * w7;
+
+        // Dequant + dot product for both W1 and W3
+        #define PROCESS_ROW_ANMLP(row_ptr, sum_var) \
+        if (row_ptr) { \
+            device const uchar* blockPtr = row_ptr + block * 18; \
+            float scale = as_type<half>(*((device const ushort*)blockPtr)); \
+            device const uchar* qs = blockPtr + 2; \
+            float4 q_lo_0 = float4(qs[0] & 0xF, qs[1] & 0xF, qs[2] & 0xF, qs[3] & 0xF) - 8.0f; \
+            float4 q_hi_0 = float4(qs[0] >> 4, qs[1] >> 4, qs[2] >> 4, qs[3] >> 4) - 8.0f; \
+            float4 q_lo_1 = float4(qs[4] & 0xF, qs[5] & 0xF, qs[6] & 0xF, qs[7] & 0xF) - 8.0f; \
+            float4 q_hi_1 = float4(qs[4] >> 4, qs[5] >> 4, qs[6] >> 4, qs[7] >> 4) - 8.0f; \
+            float4 q_lo_2 = float4(qs[8] & 0xF, qs[9] & 0xF, qs[10] & 0xF, qs[11] & 0xF) - 8.0f; \
+            float4 q_hi_2 = float4(qs[8] >> 4, qs[9] >> 4, qs[10] >> 4, qs[11] >> 4) - 8.0f; \
+            float4 q_lo_3 = float4(qs[12] & 0xF, qs[13] & 0xF, qs[14] & 0xF, qs[15] & 0xF) - 8.0f; \
+            float4 q_hi_3 = float4(qs[12] >> 4, qs[13] >> 4, qs[14] >> 4, qs[15] >> 4) - 8.0f; \
+            sum_var += scale * (dot(a0, q_lo_0) + dot(a4, q_hi_0) + \
+                                dot(a1, q_lo_1) + dot(a5, q_hi_1) + \
+                                dot(a2, q_lo_2) + dot(a6, q_hi_2) + \
+                                dot(a3, q_lo_3) + dot(a7, q_hi_3)); \
+        }
+
+        PROCESS_ROW_ANMLP(w1_row0, sumGate0);
+        PROCESS_ROW_ANMLP(w1_row1, sumGate1);
+        PROCESS_ROW_ANMLP(w1_row2, sumGate2);
+        PROCESS_ROW_ANMLP(w1_row3, sumGate3);
+
+        PROCESS_ROW_ANMLP(w3_row0, sumUp0);
+        PROCESS_ROW_ANMLP(w3_row1, sumUp1);
+        PROCESS_ROW_ANMLP(w3_row2, sumUp2);
+        PROCESS_ROW_ANMLP(w3_row3, sumUp3);
+
+        #undef PROCESS_ROW_ANMLP
+    }
+
+    // Reduce
+    sumGate0 = simd_sum(sumGate0); sumUp0 = simd_sum(sumUp0);
+    sumGate1 = simd_sum(sumGate1); sumUp1 = simd_sum(sumUp1);
+    sumGate2 = simd_sum(sumGate2); sumUp2 = simd_sum(sumUp2);
+    sumGate3 = simd_sum(sumGate3); sumUp3 = simd_sum(sumUp3);
+
+    // Apply SiLU(gate) * up
+    if (simd_lane == 0) {
+        if (base_output + 0 < N) {
+            float sigmoid = 1.0f / (1.0f + exp(-sumGate0));
+            out[base_output + 0] = (sumGate0 * sigmoid) * sumUp0;
+        }
+        if (base_output + 1 < N) {
+            float sigmoid = 1.0f / (1.0f + exp(-sumGate1));
+            out[base_output + 1] = (sumGate1 * sigmoid) * sumUp1;
+        }
+        if (base_output + 2 < N) {
+            float sigmoid = 1.0f / (1.0f + exp(-sumGate2));
+            out[base_output + 2] = (sumGate2 * sigmoid) * sumUp2;
+        }
+        if (base_output + 3 < N) {
+            float sigmoid = 1.0f / (1.0f + exp(-sumGate3));
+            out[base_output + 3] = (sumGate3 * sigmoid) * sumUp3;
+        }
+    }
+}
+
+// Fused RMSNorm + MLP (no Add). Reads x directly (residual already applied by Wo+Add).
+// Computes RMSNorm(x) in preamble, then dual W1/W3 matvec with SiLU.
+// Same structure as FusedAddRMSNormMLP but with one fewer device memory read per TG.
+// Used with Wo+Add kernel to eliminate the AddRMSNorm dispatch and avoid pipeline bubbles.
+kernel void matvec_q4_0_fused_rmsnorm_mlp_f32(
+    device const float* x [[buffer(0)]],             // [K] residual state (already includes attn output)
+    device const float* normWeight [[buffer(1)]],    // [K] FFN RMSNorm weight
+    device const uchar* W1 [[buffer(2)]],            // [N, K] Q4_0 Gate
+    device const uchar* W3 [[buffer(3)]],            // [N, K] Q4_0 Up
+    device float* out [[buffer(4)]],                 // [N] output
+    constant int& N [[buffer(5)]],                   // Intermediate size
+    constant int& K [[buffer(6)]],                   // Hidden size
+    constant float& eps [[buffer(7)]],               // RMSNorm epsilon
+    threadgroup half* shared_half [[threadgroup(0)]], // K * sizeof(half) + 8 * sizeof(float)
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    // Phase 1: Cooperative Load & RMSNorm (reads ONLY x — no woOutput read needed)
+    float localSumSq = 0.0f;
+    for (int i = tid; i < K; i += 256) {
+        float val = x[i];
+        shared_half[i] = half(val);
+        localSumSq += val * val;
+    }
+    localSumSq = simd_sum(localSumSq);
+    threadgroup float* scratch = (threadgroup float*)(shared_half + K);
+    if (simd_lane == 0) {
+        scratch[simd_group] = localSumSq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float totalSumSq = 0.0f;
+    if (simd_group == 0) {
+        float val = (simd_lane < 8) ? scratch[simd_lane] : 0.0f;
+        totalSumSq = simd_sum(val);
+    }
+    if (tid == 0) {
+        scratch[0] = rsqrt(totalSumSq / float(K) + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float rms = scratch[0];
+
+    // Phase 2: Dual W1/W3 Matvec with RMSNorm-scaled activations + SiLU activation
+    int base_output = gid * 32 + simd_group * 4;
+
+    float sumGate0 = 0.0f, sumGate1 = 0.0f, sumGate2 = 0.0f, sumGate3 = 0.0f;
+    float sumUp0 = 0.0f, sumUp1 = 0.0f, sumUp2 = 0.0f, sumUp3 = 0.0f;
+
+    int numBlocks = (K + 32 - 1) / 32;
+
+    device const uchar* w1_row0 = (base_output + 0 < N) ? W1 + (base_output + 0) * numBlocks * 18 : nullptr;
+    device const uchar* w1_row1 = (base_output + 1 < N) ? W1 + (base_output + 1) * numBlocks * 18 : nullptr;
+    device const uchar* w1_row2 = (base_output + 2 < N) ? W1 + (base_output + 2) * numBlocks * 18 : nullptr;
+    device const uchar* w1_row3 = (base_output + 3 < N) ? W1 + (base_output + 3) * numBlocks * 18 : nullptr;
+
+    device const uchar* w3_row0 = (base_output + 0 < N) ? W3 + (base_output + 0) * numBlocks * 18 : nullptr;
+    device const uchar* w3_row1 = (base_output + 1 < N) ? W3 + (base_output + 1) * numBlocks * 18 : nullptr;
+    device const uchar* w3_row2 = (base_output + 2 < N) ? W3 + (base_output + 2) * numBlocks * 18 : nullptr;
+    device const uchar* w3_row3 = (base_output + 3 < N) ? W3 + (base_output + 3) * numBlocks * 18 : nullptr;
+
+    for (int block = simd_lane; block < numBlocks; block += 32) {
+        int base_k = block * 32;
+        if (base_k >= K) break;
+
+        device const float4* w_ptr = (device const float4*)(normWeight + base_k);
+        float4 w0 = w_ptr[0], w1 = w_ptr[1], w2 = w_ptr[2], w3 = w_ptr[3];
+        float4 w4 = w_ptr[4], w5 = w_ptr[5], w6 = w_ptr[6], w7 = w_ptr[7];
+
+        threadgroup const half4* hx_ptr = (threadgroup const half4*)(shared_half + base_k);
+        float4 a0 = float4(hx_ptr[0]) * rms * w0, a1 = float4(hx_ptr[1]) * rms * w1;
+        float4 a2 = float4(hx_ptr[2]) * rms * w2, a3 = float4(hx_ptr[3]) * rms * w3;
+        float4 a4 = float4(hx_ptr[4]) * rms * w4, a5 = float4(hx_ptr[5]) * rms * w5;
+        float4 a6 = float4(hx_ptr[6]) * rms * w6, a7 = float4(hx_ptr[7]) * rms * w7;
+
+        #define PROCESS_ROW_RNMLP(row_ptr, sum_var) \
+        if (row_ptr) { \
+            device const uchar* blockPtr = row_ptr + block * 18; \
+            float scale = as_type<half>(*((device const ushort*)blockPtr)); \
+            device const uchar* qs = blockPtr + 2; \
+            float4 q_lo_0 = float4(qs[0] & 0xF, qs[1] & 0xF, qs[2] & 0xF, qs[3] & 0xF) - 8.0f; \
+            float4 q_hi_0 = float4(qs[0] >> 4, qs[1] >> 4, qs[2] >> 4, qs[3] >> 4) - 8.0f; \
+            float4 q_lo_1 = float4(qs[4] & 0xF, qs[5] & 0xF, qs[6] & 0xF, qs[7] & 0xF) - 8.0f; \
+            float4 q_hi_1 = float4(qs[4] >> 4, qs[5] >> 4, qs[6] >> 4, qs[7] >> 4) - 8.0f; \
+            float4 q_lo_2 = float4(qs[8] & 0xF, qs[9] & 0xF, qs[10] & 0xF, qs[11] & 0xF) - 8.0f; \
+            float4 q_hi_2 = float4(qs[8] >> 4, qs[9] >> 4, qs[10] >> 4, qs[11] >> 4) - 8.0f; \
+            float4 q_lo_3 = float4(qs[12] & 0xF, qs[13] & 0xF, qs[14] & 0xF, qs[15] & 0xF) - 8.0f; \
+            float4 q_hi_3 = float4(qs[12] >> 4, qs[13] >> 4, qs[14] >> 4, qs[15] >> 4) - 8.0f; \
+            sum_var += scale * (dot(a0, q_lo_0) + dot(a4, q_hi_0) + \
+                                dot(a1, q_lo_1) + dot(a5, q_hi_1) + \
+                                dot(a2, q_lo_2) + dot(a6, q_hi_2) + \
+                                dot(a3, q_lo_3) + dot(a7, q_hi_3)); \
+        }
+
+        PROCESS_ROW_RNMLP(w1_row0, sumGate0);
+        PROCESS_ROW_RNMLP(w1_row1, sumGate1);
+        PROCESS_ROW_RNMLP(w1_row2, sumGate2);
+        PROCESS_ROW_RNMLP(w1_row3, sumGate3);
+
+        PROCESS_ROW_RNMLP(w3_row0, sumUp0);
+        PROCESS_ROW_RNMLP(w3_row1, sumUp1);
+        PROCESS_ROW_RNMLP(w3_row2, sumUp2);
+        PROCESS_ROW_RNMLP(w3_row3, sumUp3);
+
+        #undef PROCESS_ROW_RNMLP
+    }
+
+    sumGate0 = simd_sum(sumGate0); sumUp0 = simd_sum(sumUp0);
+    sumGate1 = simd_sum(sumGate1); sumUp1 = simd_sum(sumUp1);
+    sumGate2 = simd_sum(sumGate2); sumUp2 = simd_sum(sumUp2);
+    sumGate3 = simd_sum(sumGate3); sumUp3 = simd_sum(sumUp3);
+
     if (simd_lane == 0) {
         if (base_output + 0 < N) {
             float sigmoid = 1.0f / (1.0f + exp(-sumGate0));
@@ -5859,6 +6841,7 @@ kernel void sdpa_flash_decode_f16_v3(
     constant int& headDim [[buffer(7)]],
     constant float& scale [[buffer(8)]],
     constant int& kvHeadStride [[buffer(9)]],
+    constant int& activeSGs [[buffer(10)]],     // actual launched simdgroups (avoids reading uninitialized shared mem)
     threadgroup float* shared [[threadgroup(0)]],
     uint gid [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]],
@@ -5897,11 +6880,8 @@ kernel void sdpa_flash_decode_f16_v3(
     float o_i[8];
     for (int e = 0; e < 8; e++) o_i[e] = 0.0f;
 
-    // Simdgroups process KV positions in strides for better cache behavior:
-    // SG 0: pos 0,8,16,...  SG 1: pos 1,9,17,...  etc.
-    // Within each stride step, process a chunk of C consecutive positions.
-    // Actually, simpler: each SG handles a contiguous range (same as v1 but chunk-based).
-    int chunkSize = (kvLen + FLASH_V3_NUM_SG - 1) / FLASH_V3_NUM_SG;
+    // Each SG handles a contiguous range. activeSGs tells us how many SGs were launched.
+    int chunkSize = (kvLen + activeSGs - 1) / activeSGs;
     int startPos = simd_group * chunkSize;
     int endPos = min(startPos + chunkSize, kvLen);
 
@@ -5977,9 +6957,10 @@ kernel void sdpa_flash_decode_f16_v3(
     }
 
     // ---- Cross-simdgroup merge (same as v1) ----
+    // ---- Cross-simdgroup merge (only over activeSGs launched SGs) ----
     threadgroup float* sg_maxs = shared;
-    threadgroup float* sg_sums = shared + FLASH_V3_NUM_SG;
-    threadgroup float* sg_accs = shared + 2 * FLASH_V3_NUM_SG;
+    threadgroup float* sg_sums = shared + activeSGs;
+    threadgroup float* sg_accs = shared + 2 * activeSGs;
 
     if (simd_lane == 0) {
         sg_maxs[simd_group] = m_i;
@@ -5992,7 +6973,7 @@ kernel void sdpa_flash_decode_f16_v3(
 
     if (simd_group == 0) {
         float global_max = sg_maxs[0];
-        for (int s = 1; s < FLASH_V3_NUM_SG; s++) {
+        for (int s = 1; s < activeSGs; s++) {
             global_max = max(global_max, sg_maxs[s]);
         }
 
@@ -6000,7 +6981,7 @@ kernel void sdpa_flash_decode_f16_v3(
         float result[8];
         for (int e = 0; e < 8; e++) result[e] = 0.0f;
 
-        for (int s = 0; s < FLASH_V3_NUM_SG; s++) {
+        for (int s = 0; s < activeSGs; s++) {
             float w = (sg_sums[s] > 0.0f) ? exp(sg_maxs[s] - global_max) : 0.0f;
             total_sum += sg_sums[s] * w;
             for (int e = 0; e < elemsPerThread; e++) {
@@ -10709,6 +11690,36 @@ void metal_matvec_q4_0_v2_f16in_f32(void* queuePtr, void* pipelinePtr,
     finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
+// MatVec Q4_0 v2 with F16 input and add-to-output.
+void metal_matvec_q4_0_v2_f16in_add_f32(void* queuePtr, void* pipelinePtr,
+                                         void* A, void* B, void* C,
+                                         int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:0 atIndex:2];
+    [encoder setBytes:&N length:sizeof(N) atIndex:3];
+    [encoder setBytes:&K length:sizeof(K) atIndex:4];
+
+    // Same dispatch geometry as v2: 64 threads per TG, NR0=4 rows per TG
+    int nsg = 2;
+    int nr0 = 4;
+    int rows_per_tg = nsg * nr0;
+    int numThreadgroups = (N + rows_per_tg - 1) / rows_per_tg;
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(64, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
 // MatVec Q4_0 v2 with add-to-output (fuses W2 + residual add).
 void metal_matvec_q4_0_v2_add_f32(void* queuePtr, void* pipelinePtr,
                                    void* A, void* B, void* C,
@@ -10726,6 +11737,70 @@ void metal_matvec_q4_0_v2_add_f32(void* queuePtr, void* pipelinePtr,
     [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:0 atIndex:2];
     [encoder setBytes:&N length:sizeof(N) atIndex:3];
     [encoder setBytes:&K length:sizeof(K) atIndex:4];
+
+    int nsg = 2;
+    int nr0 = 4;
+    int rows_per_tg = nsg * nr0;
+    int numThreadgroups = (N + rows_per_tg - 1) / rows_per_tg;
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(64, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// W2+Add2+Residual: C[i] = C[i] + residual[i] + (A @ B^T)[i]
+// Adds both the W2 matvec result AND a deferred attention residual to x.
+void metal_matvec_q4_0_v2_add2_f32(void* queuePtr, void* pipelinePtr,
+                                    void* A, void* B, void* C, void* residual,
+                                    int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)residual offset:0 atIndex:3];
+    [encoder setBytes:&N length:sizeof(N) atIndex:4];
+    [encoder setBytes:&K length:sizeof(K) atIndex:5];
+
+    int nsg = 2;
+    int nr0 = 4;
+    int rows_per_tg = nsg * nr0;
+    int numThreadgroups = (N + rows_per_tg - 1) / rows_per_tg;
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(64, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Offset variant for scratch-allocated buffers
+void metal_matvec_q4_0_v2_add2_f32_offset(void* queuePtr, void* pipelinePtr,
+                                            void* A, uint64_t aOff,
+                                            void* B,
+                                            void* C, uint64_t cOff,
+                                            void* residual, uint64_t residualOff,
+                                            int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:aOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:cOff atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)residual offset:residualOff atIndex:3];
+    [encoder setBytes:&N length:sizeof(N) atIndex:4];
+    [encoder setBytes:&K length:sizeof(K) atIndex:5];
 
     int nsg = 2;
     int nr0 = 4;
@@ -10988,14 +12063,15 @@ void metal_sdpa_flash_decode_f16_v3(void* queuePtr, void* pipelinePtr,
     [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
     [encoder setBytes:&kvHeadStride length:sizeof(kvHeadStride) atIndex:9];
 
-    // Same shared memory layout as v1: NUM_SG max + NUM_SG sum + NUM_SG * headDim acc
-    int numSG = 8;
+    // 64 threads = 2 simdgroups. Merge loop uses activeSGs to avoid reading garbage.
+    int numSG = 2;
+    [encoder setBytes:&numSG length:sizeof(numSG) atIndex:10];
+
     int sharedMemSize = (2 * numSG + numSG * headDim) * sizeof(float);
     [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
 
-    // One threadgroup per Q head, 256 threads (8 simdgroups)
     MTLSize threadgroups = MTLSizeMake(numQHeads, 1, 1);
-    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(64, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
     finish_encode(encoder, cmdBuffer, shouldCommit);
@@ -11643,6 +12719,59 @@ void metal_matvec_q4_0_fused_rmsnorm_qkv_f16(void* queuePtr, void* pipelinePtr,
     finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
+// Fused RMSNorm + Q4_0 QKV + RoPE + KV Scatter (FP16 output, decode only)
+// Combines FusedQKV + RoPE + ScatterKV into a single dispatch.
+// Q: matvec → RoPE → outQ. K: matvec → RoPE → kCache. V: matvec → vCache.
+void metal_matvec_q4_0_fused_rmsnorm_qkv_rope_scatter_f16(void* queuePtr, void* pipelinePtr,
+                                                            void* x, void* normWeight,
+                                                            void* Wq, void* Wk, void* Wv,
+                                                            void* outQ, void* kCache, void* vCache,
+                                                            int qDim, int kvDim, int K, float eps,
+                                                            int headDim, int ropeDim, int startPos,
+                                                            float theta, int maxSeqLen, int seqPos) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)x offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)normWeight offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Wq offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Wk offset:0 atIndex:3];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Wv offset:0 atIndex:4];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)outQ offset:0 atIndex:5];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)kCache offset:0 atIndex:6];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)vCache offset:0 atIndex:7];
+    [encoder setBytes:&qDim length:sizeof(qDim) atIndex:8];
+    [encoder setBytes:&kvDim length:sizeof(kvDim) atIndex:9];
+    [encoder setBytes:&K length:sizeof(K) atIndex:10];
+    [encoder setBytes:&eps length:sizeof(eps) atIndex:11];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:12];
+    [encoder setBytes:&ropeDim length:sizeof(ropeDim) atIndex:13];
+    [encoder setBytes:&startPos length:sizeof(startPos) atIndex:14];
+    [encoder setBytes:&theta length:sizeof(theta) atIndex:15];
+    [encoder setBytes:&maxSeqLen length:sizeof(maxSeqLen) atIndex:16];
+    [encoder setBytes:&seqPos length:sizeof(seqPos) atIndex:17];
+
+    int sharedMemSize = K * sizeof(__fp16) + 8 * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    int outputsPerTG = 32;
+    int threadgroupSize = 256;
+    int qTGs = (qDim + outputsPerTG - 1) / outputsPerTG;
+    int kvTGs = (kvDim + outputsPerTG - 1) / outputsPerTG;
+    int numThreadgroups = qTGs + kvTGs + kvTGs;
+
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
 // RoPE for GQA with FP16 tensors
 // ropeDim: dimensions to rotate (can be < headDim for partial RoPE like Phi-2)
 // ropeNeox: 0 = LLaMA-style (interleaved pairs), 1 = NEOX-style (split pairs)
@@ -11841,6 +12970,152 @@ void metal_matvec_q4_0_fused_mlp_f32(void* queuePtr, void* pipelinePtr,
     finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
+// Fused AddRMSNorm + MLP: eliminates 1 dispatch/layer
+// Non-offset variant (all buffers at offset 0)
+void metal_matvec_q4_0_fused_addrmsnorm_mlp_f32(void* queuePtr, void* pipelinePtr,
+                                                  void* x, void* woOutput, void* normWeight,
+                                                  void* W1, void* W3, void* out,
+                                                  int N, int K, float eps) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)x offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)woOutput offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)normWeight offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)W1 offset:0 atIndex:3];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)W3 offset:0 atIndex:4];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:5];
+    [encoder setBytes:&N length:sizeof(N) atIndex:6];
+    [encoder setBytes:&K length:sizeof(K) atIndex:7];
+    [encoder setBytes:&eps length:sizeof(eps) atIndex:8];
+
+    // FP16 shared memory: K halfs for activations + 8 floats for scratch
+    int sharedMemSize = K * sizeof(__fp16) + 8 * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    int outputsPerTG = 32;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Offset variant for scratch-allocated buffers
+void metal_matvec_q4_0_fused_addrmsnorm_mlp_f32_offset(void* queuePtr, void* pipelinePtr,
+                                                         void* x, uint64_t xOff,
+                                                         void* woOutput, uint64_t woOff,
+                                                         void* normWeight,
+                                                         void* W1, void* W3,
+                                                         void* out, uint64_t outOff,
+                                                         int N, int K, float eps) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)x offset:xOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)woOutput offset:woOff atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)normWeight offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)W1 offset:0 atIndex:3];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)W3 offset:0 atIndex:4];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:outOff atIndex:5];
+    [encoder setBytes:&N length:sizeof(N) atIndex:6];
+    [encoder setBytes:&K length:sizeof(K) atIndex:7];
+    [encoder setBytes:&eps length:sizeof(eps) atIndex:8];
+
+    int sharedMemSize = K * sizeof(__fp16) + 8 * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    int outputsPerTG = 32;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Fused RMSNorm + MLP gate (no residual add — used when residual is already in x).
+void metal_matvec_q4_0_fused_rmsnorm_mlp_f32(void* queuePtr, void* pipelinePtr,
+                                               void* x, void* normWeight,
+                                               void* W1, void* W3, void* out,
+                                               int N, int K, float eps) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)x offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)normWeight offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)W1 offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)W3 offset:0 atIndex:3];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:4];
+    [encoder setBytes:&N length:sizeof(N) atIndex:5];
+    [encoder setBytes:&K length:sizeof(K) atIndex:6];
+    [encoder setBytes:&eps length:sizeof(eps) atIndex:7];
+
+    // FP16 shared memory: K halfs for activations + 8 floats for scratch
+    int sharedMemSize = K * sizeof(__fp16) + 8 * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    int outputsPerTG = 32;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Offset variant for scratch-allocated buffers
+void metal_matvec_q4_0_fused_rmsnorm_mlp_f32_offset(void* queuePtr, void* pipelinePtr,
+                                                      void* x, uint64_t xOff,
+                                                      void* normWeight,
+                                                      void* W1, void* W3,
+                                                      void* out, uint64_t outOff,
+                                                      int N, int K, float eps) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)x offset:xOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)normWeight offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)W1 offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)W3 offset:0 atIndex:3];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:outOff atIndex:4];
+    [encoder setBytes:&N length:sizeof(N) atIndex:5];
+    [encoder setBytes:&K length:sizeof(K) atIndex:6];
+    [encoder setBytes:&eps length:sizeof(eps) atIndex:7];
+
+    int sharedMemSize = K * sizeof(__fp16) + 8 * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    int outputsPerTG = 32;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
 // =============================================================================
 // Q4_K FUSED C DISPATCH FUNCTIONS
 // =============================================================================
@@ -11966,5 +13241,61 @@ void metal_matvec_q4k_add_f32(void* queuePtr, void* pipelinePtr,
     MTLSize threadsPerGroup_add = MTLSizeMake(256, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups_add threadsPerThreadgroup:threadsPerGroup_add];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Q4_K NR4 F16-input dispatch: 32 outputs per threadgroup (4 per simdgroup)
+void metal_matvec_q4k_nr4_f16in_f32(void* queuePtr, void* pipelinePtr,
+                                      void* A, void* B, void* C,
+                                      int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:0 atIndex:2];
+    [encoder setBytes:&N length:sizeof(N) atIndex:3];
+    [encoder setBytes:&K length:sizeof(K) atIndex:4];
+
+    // NR4: 32 outputs per threadgroup (4 per simdgroup × 8 simdgroups)
+    int outputsPerTG = 32;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Q4_K NR4 Add dispatch: 32 outputs per threadgroup, ADDS to output
+void metal_matvec_q4k_nr4_add_f32(void* queuePtr, void* pipelinePtr,
+                                    void* A, void* B, void* C,
+                                    int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:0 atIndex:2];
+    [encoder setBytes:&N length:sizeof(N) atIndex:3];
+    [encoder setBytes:&K length:sizeof(K) atIndex:4];
+
+    // NR4: 32 outputs per threadgroup (4 per simdgroup × 8 simdgroups)
+    int outputsPerTG = 32;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
     finish_encode(encoder, cmdBuffer, shouldCommit);
 }

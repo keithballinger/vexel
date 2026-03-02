@@ -1949,3 +1949,217 @@ func TestKVConsolidationSimulation(t *testing.T) {
 		t.Logf("  ✗ Consolidation did not help (%.2f ms overhead)", consolidatedMs-separateMs)
 	}
 }
+
+// TestBarrierOverhead measures the cost of memory barriers in a realistic pipeline.
+// Compares matvec-only dispatch (no barriers) vs with barriers between each dispatch group
+// as in the real fused decode path (6 barriers per layer × 32 layers = 192 barriers).
+func TestBarrierOverhead(t *testing.T) {
+	b, err := NewBackend(0)
+	if err != nil {
+		t.Skip("Metal not available")
+	}
+	defer b.Close()
+
+	// LLaMA 2 7B Q4_0 config
+	numLayers := 32
+	hiddenSize := 4096
+	numKVHeads := 8
+	headDim := 128
+	intermediateSize := 11008
+
+	blockSize := 32
+	bytesPerBlock := 18
+	numBlocks4096 := (hiddenSize + blockSize - 1) / blockSize
+	numBlocks11008 := (intermediateSize + blockSize - 1) / blockSize
+
+	// Per-layer weights (different per layer to prevent L2 caching)
+	type layerWeights struct {
+		wq, wk, wv, wo, w1, w3, w2 tensor.DevicePtr
+	}
+	layers := make([]layerWeights, numLayers)
+	var totalWeightBytes int64
+	for l := 0; l < numLayers; l++ {
+		kvDim := numKVHeads * headDim
+		wqSize := hiddenSize * numBlocks4096 * bytesPerBlock
+		wkSize := kvDim * numBlocks4096 * bytesPerBlock
+		w1Size := intermediateSize * numBlocks4096 * bytesPerBlock
+		w2Size := hiddenSize * numBlocks11008 * bytesPerBlock
+		layers[l].wq = b.Alloc(wqSize)
+		layers[l].wk = b.Alloc(wkSize)
+		layers[l].wv = b.Alloc(wkSize)
+		layers[l].wo = b.Alloc(wqSize)
+		layers[l].w1 = b.Alloc(w1Size)
+		layers[l].w3 = b.Alloc(w1Size)
+		layers[l].w2 = b.Alloc(w2Size)
+		totalWeightBytes += int64(wqSize + wkSize*2 + wqSize + w1Size*2 + w2Size)
+	}
+
+	// Activations
+	x := b.Alloc(hiddenSize * 4)
+	gate := b.Alloc(intermediateSize * 4)
+	mlpOut := b.Alloc(hiddenSize * 4)
+
+	kvDim := numKVHeads * headDim
+	warmup := 3
+	iters := 20
+
+	// ============================================
+	// A. No barriers (existing matvec ceiling)
+	// ============================================
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0(x, lw.wq, x, 1, hiddenSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.wk, x, 1, kvDim, hiddenSize)
+			b.MatMulQ4_0(x, lw.wv, x, 1, kvDim, hiddenSize)
+			b.MatMulQ4_0(x, lw.wo, x, 1, hiddenSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.w1, gate, 1, intermediateSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.w3, gate, 1, intermediateSize, hiddenSize)
+			b.MatMulQ4_0(gate, lw.w2, mlpOut, 1, hiddenSize, intermediateSize)
+		}
+		b.EndBatch()
+		b.Sync()
+	}
+	start := time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0(x, lw.wq, x, 1, hiddenSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.wk, x, 1, kvDim, hiddenSize)
+			b.MatMulQ4_0(x, lw.wv, x, 1, kvDim, hiddenSize)
+			b.MatMulQ4_0(x, lw.wo, x, 1, hiddenSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.w1, gate, 1, intermediateSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.w3, gate, 1, intermediateSize, hiddenSize)
+			b.MatMulQ4_0(gate, lw.w2, mlpOut, 1, hiddenSize, intermediateSize)
+		}
+		b.EndBatch()
+		b.Sync()
+	}
+	noBarrierTime := time.Since(start).Seconds() / float64(iters)
+
+	// ============================================
+	// B. With 6 barriers per layer (real pipeline pattern)
+	// Barrier after each dispatch group:
+	//   QKV(3 dispatches) → barrier → Wo(1) → barrier → (skip non-matvec) → barrier → MLP(2) → barrier → W2(1)
+	// Simplified: barrier between each of the 4 matvec groups per layer
+	// ============================================
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			// Group 1: QKV
+			b.MatMulQ4_0(x, lw.wq, x, 1, hiddenSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.wk, x, 1, kvDim, hiddenSize)
+			b.MatMulQ4_0(x, lw.wv, x, 1, kvDim, hiddenSize)
+			b.MemoryBarrier()
+			// Group 2: Wo
+			b.MatMulQ4_0(x, lw.wo, x, 1, hiddenSize, hiddenSize)
+			b.MemoryBarrier()
+			// Group 3: MLP (W1+W3)
+			b.MatMulQ4_0(x, lw.w1, gate, 1, intermediateSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.w3, gate, 1, intermediateSize, hiddenSize)
+			b.MemoryBarrier()
+			// Group 4: W2
+			b.MatMulQ4_0(gate, lw.w2, mlpOut, 1, hiddenSize, intermediateSize)
+			b.MemoryBarrier()
+		}
+		b.EndBatch()
+		b.Sync()
+	}
+	start = time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0(x, lw.wq, x, 1, hiddenSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.wk, x, 1, kvDim, hiddenSize)
+			b.MatMulQ4_0(x, lw.wv, x, 1, kvDim, hiddenSize)
+			b.MemoryBarrier()
+			b.MatMulQ4_0(x, lw.wo, x, 1, hiddenSize, hiddenSize)
+			b.MemoryBarrier()
+			b.MatMulQ4_0(x, lw.w1, gate, 1, intermediateSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.w3, gate, 1, intermediateSize, hiddenSize)
+			b.MemoryBarrier()
+			b.MatMulQ4_0(gate, lw.w2, mlpOut, 1, hiddenSize, intermediateSize)
+			b.MemoryBarrier()
+		}
+		b.EndBatch()
+		b.Sync()
+	}
+	barrier4Time := time.Since(start).Seconds() / float64(iters)
+
+	// ============================================
+	// C. With 6 barriers per layer (matches real fused path exactly)
+	// FusedQKV → barrier → RoPE(skip) → barrier → SDPA(skip) → barrier → Wo → barrier → AddRMSNorm(skip) → barrier → FusedMLP → barrier → W2+Add2
+	// 6 barriers between 7 dispatch slots (4 matvec + 3 non-matvec)
+	// ============================================
+	for i := 0; i < warmup; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			// FusedQKV
+			b.MatMulQ4_0(x, lw.wq, x, 1, hiddenSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.wk, x, 1, kvDim, hiddenSize)
+			b.MatMulQ4_0(x, lw.wv, x, 1, kvDim, hiddenSize)
+			b.MemoryBarrier() // 1: after QKV, before RoPE
+			b.MemoryBarrier() // 2: after RoPE, before SDPA (no RoPE dispatch here)
+			b.MemoryBarrier() // 3: after SDPA, before Wo (no SDPA dispatch here)
+			// Wo
+			b.MatMulQ4_0(x, lw.wo, x, 1, hiddenSize, hiddenSize)
+			b.MemoryBarrier() // 4: after Wo, before AddRMSNorm
+			b.MemoryBarrier() // 5: after AddRMSNorm, before FusedMLP (no AddRMSNorm here)
+			// FusedMLP (W1 + W3)
+			b.MatMulQ4_0(x, lw.w1, gate, 1, intermediateSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.w3, gate, 1, intermediateSize, hiddenSize)
+			b.MemoryBarrier() // 6: after FusedMLP, before W2
+			// W2
+			b.MatMulQ4_0(gate, lw.w2, mlpOut, 1, hiddenSize, intermediateSize)
+		}
+		b.EndBatch()
+		b.Sync()
+	}
+	start = time.Now()
+	for i := 0; i < iters; i++ {
+		b.BeginBatch()
+		for l := 0; l < numLayers; l++ {
+			lw := layers[l]
+			b.MatMulQ4_0(x, lw.wq, x, 1, hiddenSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.wk, x, 1, kvDim, hiddenSize)
+			b.MatMulQ4_0(x, lw.wv, x, 1, kvDim, hiddenSize)
+			b.MemoryBarrier()
+			b.MemoryBarrier()
+			b.MemoryBarrier()
+			b.MatMulQ4_0(x, lw.wo, x, 1, hiddenSize, hiddenSize)
+			b.MemoryBarrier()
+			b.MemoryBarrier()
+			b.MatMulQ4_0(x, lw.w1, gate, 1, intermediateSize, hiddenSize)
+			b.MatMulQ4_0(x, lw.w3, gate, 1, intermediateSize, hiddenSize)
+			b.MemoryBarrier()
+			b.MatMulQ4_0(gate, lw.w2, mlpOut, 1, hiddenSize, intermediateSize)
+		}
+		b.EndBatch()
+		b.Sync()
+	}
+	barrier6Time := time.Since(start).Seconds() / float64(iters)
+
+	numBarriers4 := 4 * numLayers
+	numBarriers6 := 6 * numLayers
+	barrierCost4 := (barrier4Time - noBarrierTime) / float64(numBarriers4)
+	barrierCost6 := (barrier6Time - noBarrierTime) / float64(numBarriers6)
+
+	t.Logf("\n=== Barrier Overhead Analysis (LLaMA 2 7B Q4_0, %d layers) ===", numLayers)
+	t.Logf("  No barriers:    %.2f ms (%.1f tok/s)", noBarrierTime*1e3, 1.0/noBarrierTime)
+	t.Logf("  4 barriers/layer (%d total): %.2f ms (%.1f tok/s)", numBarriers4, barrier4Time*1e3, 1.0/barrier4Time)
+	t.Logf("  6 barriers/layer (%d total): %.2f ms (%.1f tok/s)", numBarriers6, barrier6Time*1e3, 1.0/barrier6Time)
+	t.Logf("")
+	t.Logf("  Barrier overhead (4/layer): %.2f ms total, %.1f µs/barrier",
+		(barrier4Time-noBarrierTime)*1e3, barrierCost4*1e6)
+	t.Logf("  Barrier overhead (6/layer): %.2f ms total, %.1f µs/barrier",
+		(barrier6Time-noBarrierTime)*1e3, barrierCost6*1e6)
+	t.Logf("")
+	t.Logf("  Real decode @ctx16: ~14.34 ms (69.7 tok/s)")
+	t.Logf("  Gap (6-barrier vs real): %.2f ms (non-matvec ops + CGo + fused overhead)",
+		(14.34-barrier6Time*1e3))
+}

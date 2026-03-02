@@ -189,6 +189,16 @@ void metal_matvec_q4k_add_f32(void* queue, void* pipeline,
                                void* A, void* B, void* C,
                                int N, int K);
 
+// Q4_K NR4 F16-input matvec (4 outputs/simdgroup, 32/TG)
+void metal_matvec_q4k_nr4_f16in_f32(void* queue, void* pipeline,
+                                      void* A, void* B, void* C,
+                                      int N, int K);
+
+// Q4_K NR4 Add matvec (4 outputs/simdgroup, 32/TG, C += A @ B^T)
+void metal_matvec_q4k_nr4_add_f32(void* queue, void* pipeline,
+                                    void* A, void* B, void* C,
+                                    int N, int K);
+
 // Q5_K multi-output matvec
 void metal_matvec_q5k_multi_output_f32(void* queue, void* pipeline,
                                         void* A, uint64_t aOff,
@@ -246,12 +256,57 @@ void metal_matvec_q4_0_fused_rmsnorm_qkv_f16(void* queue, void* pipeline,
                                                void* outQ, void* outK, void* outV,
                                                int qDim, int kvDim, int K, float eps);
 
+// Fused RMSNorm + QKV + RoPE + KV Scatter (FP16, decode only)
+void metal_matvec_q4_0_fused_rmsnorm_qkv_rope_scatter_f16(void* queue, void* pipeline,
+                                                            void* x, void* normWeight,
+                                                            void* Wq, void* Wk, void* Wv,
+                                                            void* outQ, void* kCache, void* vCache,
+                                                            int qDim, int kvDim, int K, float eps,
+                                                            int headDim, int ropeDim, int startPos,
+                                                            float theta, int maxSeqLen, int seqPos);
+
 // Fused MLP: SiLU(x @ W1) * (x @ W3)
 // W1, W3: [N, K] Q4_0
 // out: [N] F32
 void metal_matvec_q4_0_fused_mlp_f32(void* queue, void* pipeline,
                                      void* x, void* W1, void* W3, void* out,
                                      int N, int K);
+
+// Fused RMSNorm + MLP: RMSNorm(x) then SiLU(norm @ W1) * (norm @ W3)
+void metal_matvec_q4_0_fused_rmsnorm_mlp_f32(void* queue, void* pipeline,
+                                               void* x, void* normWeight,
+                                               void* W1, void* W3, void* out,
+                                               int N, int K, float eps);
+void metal_matvec_q4_0_fused_rmsnorm_mlp_f32_offset(void* queue, void* pipeline,
+                                                      void* x, uint64_t xOffset,
+                                                      void* normWeight,
+                                                      void* W1, void* W3,
+                                                      void* out, uint64_t outOffset,
+                                                      int N, int K, float eps);
+
+// Fused Add+RMSNorm+MLP: eliminates 1 dispatch/layer
+void metal_matvec_q4_0_fused_addrmsnorm_mlp_f32(void* queue, void* pipeline,
+                                                  void* x, void* woOutput, void* normWeight,
+                                                  void* W1, void* W3, void* out,
+                                                  int N, int K, float eps);
+void metal_matvec_q4_0_fused_addrmsnorm_mlp_f32_offset(void* queue, void* pipeline,
+                                                         void* x, uint64_t xOff,
+                                                         void* woOutput, uint64_t woOff,
+                                                         void* normWeight,
+                                                         void* W1, void* W3,
+                                                         void* out, uint64_t outOff,
+                                                         int N, int K, float eps);
+
+// W2+Add2+Residual: C[i] = C[i] + residual[i] + (A @ B^T)[i]
+void metal_matvec_q4_0_v2_add2_f32(void* queue, void* pipeline,
+                                    void* A, void* B, void* C, void* residual,
+                                    int N, int K);
+void metal_matvec_q4_0_v2_add2_f32_offset(void* queue, void* pipeline,
+                                            void* A, uint64_t aOff,
+                                            void* B,
+                                            void* C, uint64_t cOff,
+                                            void* residual, uint64_t residualOff,
+                                            int N, int K);
 
 void metal_rope_f32(void* queue, void* pipeline,
                     void* q, void* k,
@@ -581,6 +636,11 @@ void metal_scatter_kv_f16_fused(void* queue, void* pipeline,
 void metal_matvec_q4_0_v2_f16in_f32(void* queue, void* pipeline,
                                      void* A, void* B, void* C,
                                      int N, int K);
+
+// MatVec Q4_0 v2 with FP16 input + add-to-output (C += A @ B^T)
+void metal_matvec_q4_0_v2_f16in_add_f32(void* queue, void* pipeline,
+                                          void* A, void* B, void* C,
+                                          int N, int K);
 
 // MatVec Q4_0 v2 with add-to-output (fuses matmul + residual add)
 void metal_matvec_q4_0_v2_add_f32(void* queue, void* pipeline,
