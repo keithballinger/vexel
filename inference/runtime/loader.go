@@ -92,7 +92,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			)
 			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
 			q4Count++
-		} else if info.Type == gguf.TensorTypeQ4_K && m.isWeightMatrix(hfName) {
+		} else if info.Type == gguf.TensorTypeQ4_K && (m.isWeightMatrix(hfName) || hfName == "lm_head.weight") {
 			// Q4_K native GPU kernel - uses get_scale_min_k4 format
 			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
 			if err != nil {
@@ -107,7 +107,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			)
 			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
 			q4Count++
-		} else if info.Type == gguf.TensorTypeQ5_K && m.isWeightMatrix(hfName) {
+		} else if info.Type == gguf.TensorTypeQ5_K && (m.isWeightMatrix(hfName) || hfName == "lm_head.weight") {
 			// Q5_K native GPU kernel
 			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
 			if err != nil {
@@ -137,7 +137,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			)
 			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
 			q4Count++
-		} else if info.Type == gguf.TensorTypeQ8_0 && m.isWeightMatrix(hfName) {
+		} else if info.Type == gguf.TensorTypeQ8_0 && (m.isWeightMatrix(hfName) || hfName == "lm_head.weight") {
 			// Q8_0 native GPU kernel
 			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
 			if err != nil {
@@ -152,7 +152,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			)
 			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
 			q4Count++
-		} else if info.Type == gguf.TensorTypeBF16 && m.isWeightMatrix(hfName) {
+		} else if info.Type == gguf.TensorTypeBF16 && (m.isWeightMatrix(hfName) || hfName == "lm_head.weight") {
 			// BF16 native GPU kernel - keep raw BF16 data on GPU
 			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
 			if err != nil {
