@@ -1674,6 +1674,9 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	type matMulQ4KAdd interface {
 		MatMulQ4_K_Add(a, bMat, out tensor.DevicePtr, n, k int)
 	}
+	type matMulQ4KF16InAdd interface {
+		MatMulQ4_K_F16InAdd(a, bMat, out tensor.DevicePtr, n, k int)
+	}
 	// W2+Add2+Residual: out = out + residual + (a @ B^T). Adds both W2 result AND deferred
 	// attention residual in a single dispatch. Used with FusedAddRMSNormMLP.
 	type matMulQ4Add2 interface {
@@ -1681,13 +1684,18 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	}
 	var didFuseW2Add2Ptr matMulQ4Add
 	var didFuseW2Add2Q4KPtr matMulQ4KAdd
-	var didFuseW2Add2ResidualPtr matMulQ4Add2 // non-nil when using FusedAddRMSNormMLP path
+	var didFuseW2Add2Q4KF16InPtr matMulQ4KF16InAdd // FP16 intermediate: W2+Add reads FP16 from MLP output
+	var didFuseW2Add2ResidualPtr matMulQ4Add2       // non-nil when using FusedAddRMSNormMLP path
 	var didFuseW2Add2 bool
+	var useQ4KF16Intermediate bool // true when FusedRMSNormMLP outputs FP16 and W2+Add reads FP16
 	if seqLen == 1 && !b.ParallelResidual && !b.HasPostNorms && b.W2.IsQuantized() {
 		switch b.W2.QuantProfile() {
 		case tensor.Q4_0:
 			didFuseW2Add2Ptr, _ = b.backend.(matMulQ4Add)
 		case tensor.Q4_K:
+			// Prefer FP16 intermediate path: FusedRMSNormMLP_F16Out → W2+Add f16in.
+			// FP16 intermediate halves activation footprint (44KB → 22KB), boosting W2+Add BW by ~28%.
+			didFuseW2Add2Q4KF16InPtr, _ = b.backend.(matMulQ4KF16InAdd)
 			didFuseW2Add2Q4KPtr, _ = b.backend.(matMulQ4KAdd)
 		}
 	}
@@ -1958,11 +1966,25 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			}
 		}
 		// Q4_K Wo+Add deep fusion: same pattern, FusedRMSNormMLP for Q4_K
+		// Prefer FP16-output variant when downstream W2+Add supports f16in (28% faster W2+Add).
+		type q4kFusedNormMLPF16Out interface {
+			MatMulQ4_K_FusedRMSNormMLP_F16Out(x, normWeight, w1, w3, out tensor.DevicePtr, n, k int, eps float32)
+		}
 		type q4kFusedNormMLP interface {
 			MatMulQ4_K_FusedRMSNormMLP(x, normWeight, w1, w3, out tensor.DevicePtr, n, k int, eps float32)
 		}
 		if !usedFullFusion && canFuseFFN && didFuseWoAdd && mlpQuantProfile == tensor.Q4_K {
-			if fnm, ok := b.backend.(q4kFusedNormMLP); ok {
+			// Try FP16-output path first (requires both FP16-output MLP and f16in W2+Add)
+			if fnm16, ok := b.backend.(q4kFusedNormMLPF16Out); ok && didFuseW2Add2Q4KF16InPtr != nil {
+				w1Dim := b.W1.Shape().Dims()[0]
+				profileOp("FusedRMSNormMLP_Q4K_F16Out", func() {
+					fnm16.MatMulQ4_K_FusedRMSNormMLP_F16Out(xPtr, b.FFNNorm.DevicePtr(),
+						b.W1.DevicePtr(), b.W3.DevicePtr(), gatePtr,
+						w1Dim, hiddenSize, float32(b.RMSNormEPS))
+				})
+				useQ4KF16Intermediate = true
+				usedFullFusion = true
+			} else if fnm, ok := b.backend.(q4kFusedNormMLP); ok {
 				w1Dim := b.W1.Shape().Dims()[0]
 				profileOp("FusedRMSNormMLP_Q4K", func() {
 					fnm.MatMulQ4_K_FusedRMSNormMLP(xPtr, b.FFNNorm.DevicePtr(),
@@ -2120,6 +2142,14 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			profileOp("W2+Add2", func() {
 				w2Dim := b.W2.Shape().Dims()[0]
 				didFuseW2Add2Ptr.MatMulQ4_0_Add(gatePtr, b.W2.DevicePtr(), xPtr, w2Dim, intermediateSize)
+			})
+			didFuseW2Add2 = true
+		} else if useQ4KF16Intermediate && didFuseW2Add2Q4KF16InPtr != nil && !b.W2.DevicePtr().IsNil() {
+			// FP16 intermediate path (Q4_K): xPtr += gatePtr_f16 @ W2^T
+			// gatePtr contains FP16 data from FusedRMSNormMLP_F16Out, f16in kernel reads it.
+			profileOp("W2+Add2_F16In", func() {
+				w2Dim := b.W2.Shape().Dims()[0]
+				didFuseW2Add2Q4KF16InPtr.MatMulQ4_K_F16InAdd(gatePtr, b.W2.DevicePtr(), xPtr, w2Dim, intermediateSize)
 			})
 			didFuseW2Add2 = true
 		} else if didFuseW2Add2Q4KPtr != nil && !b.W2.DevicePtr().IsNil() {

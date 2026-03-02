@@ -124,11 +124,10 @@ type Backend struct {
 			matvecQ4KFusedRMSNormQKVRoPEScatterF16Pipeline unsafe.Pointer // Fused QKV+RoPE+Scatter for Q4_K
 			matvecQ4KFusedMLPPipeline           unsafe.Pointer // Fused MLP for Q4_K: SiLU(x@W1)*x@W3
 			matvecQ4KFusedRMSNormMLPPipeline    unsafe.Pointer // Fused RMSNorm+MLP for Q4_K (Wo+Add path)
+			matvecQ4KFusedRMSNormMLPF16OutPipeline unsafe.Pointer // Fused RMSNorm+MLP for Q4_K, FP16 output
 			matvecQ4KF16InPipeline              unsafe.Pointer // Q4_K matvec with FP16 input
 			matvecQ4KF16InAddPipeline           unsafe.Pointer // Q4_K matvec with FP16 input, adds to output (Wo+Add)
 			matvecQ4KAddPipeline                unsafe.Pointer // Q4_K matvec that adds to output
-			matvecQ4KNR4F16InPipeline           unsafe.Pointer // Q4_K NR4 matvec with FP16 input (32 out/TG)
-			matvecQ4KNR4AddPipeline             unsafe.Pointer // Q4_K NR4 matvec that adds to output (32 out/TG)
 
 	// FP16 (Half-Precision) pipelines
 	addF16Pipeline          unsafe.Pointer
@@ -295,11 +294,10 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matvecQ4KFusedRMSNormQKVRoPEScatterF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_fused_rmsnorm_qkv_rope_scatter_f16"))
 	b.matvecQ4KFusedMLPPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_fused_mlp_f32"))
 	b.matvecQ4KFusedRMSNormMLPPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_fused_rmsnorm_mlp_f32"))
+	b.matvecQ4KFusedRMSNormMLPF16OutPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_fused_rmsnorm_mlp_f16out"))
 	b.matvecQ4KF16InPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_f16in_f32"))
 	b.matvecQ4KF16InAddPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_f16in_add_f32"))
 	b.matvecQ4KAddPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_add_f32"))
-	b.matvecQ4KNR4F16InPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_nr4_f16in_f32"))
-	b.matvecQ4KNR4AddPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_nr4_add_f32"))
 
 	// Q8_0 matmul pipelines
 	b.matvecQ8_0NR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q8_0_nr2_f32"))
@@ -906,6 +904,20 @@ func (b *Backend) MatMulQ4_K_FusedRMSNormMLP(x, normWeight, w1, w3, out tensor.D
 		panic("MatMulQ4_K_FusedRMSNormMLP called but pipeline unavailable")
 	}
 	C.metal_matvec_q4k_fused_rmsnorm_mlp_f32(b.queue, b.matvecQ4KFusedRMSNormMLPPipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(normWeight.Addr()),
+		unsafe.Pointer(w1.Addr()), unsafe.Pointer(w3.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(n), C.int(k), C.float(eps))
+}
+
+// MatMulQ4_K_FusedRMSNormMLP_F16Out performs fused RMSNorm + MLP with FP16 output.
+// Halves the MLP intermediate footprint (44KB → 22KB for LLaMA 2 7B),
+// reducing L1 cache pressure for the downstream W2+Add f16in kernel.
+func (b *Backend) MatMulQ4_K_FusedRMSNormMLP_F16Out(x, normWeight, w1, w3, out tensor.DevicePtr, n, k int, eps float32) {
+	b.profiler.RecordDispatch("FusedRMSNormMLP_Q4K_F16Out")
+	if b.matvecQ4KFusedRMSNormMLPF16OutPipeline == nil {
+		panic("MatMulQ4_K_FusedRMSNormMLP_F16Out called but pipeline unavailable")
+	}
+	C.metal_matvec_q4k_fused_rmsnorm_mlp_f16out(b.queue, b.matvecQ4KFusedRMSNormMLPF16OutPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(normWeight.Addr()),
 		unsafe.Pointer(w1.Addr()), unsafe.Pointer(w3.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(n), C.int(k), C.float(eps))

@@ -194,6 +194,12 @@ void metal_matvec_q4k_fused_rmsnorm_mlp_f32(void* queue, void* pipeline,
                                               void* W1, void* W3, void* out,
                                               int N, int K, float eps);
 
+// Q4_K fused RMSNorm + MLP with FP16 output: halves activation footprint for downstream W2+Add
+void metal_matvec_q4k_fused_rmsnorm_mlp_f16out(void* queue, void* pipeline,
+                                                 void* x, void* normWeight,
+                                                 void* W1, void* W3, void* out,
+                                                 int N, int K, float eps);
+
 // Q4_K matvec with FP16 input, FP32 output
 void metal_matvec_q4k_f16in_f32(void* queue, void* pipeline,
                                  void* A, void* B, void* C,
