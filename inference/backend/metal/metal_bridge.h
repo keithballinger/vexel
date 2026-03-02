@@ -174,6 +174,22 @@ void metal_matvec_q4k_fused_rmsnorm_qkv_f16(void* queue, void* pipeline,
                                               void* outQ, void* outK, void* outV,
                                               int qDim, int kvDim, int K, float eps);
 
+// Q4_K fused RMSNorm + QKV projections NR2 variant (FP16 output, 2 outputs/SG)
+void metal_matvec_q4k_fused_rmsnorm_qkv_nr2_f16(void* queue, void* pipeline,
+                                              void* x, void* normWeight,
+                                              void* Wq, void* Wk, void* Wv,
+                                              void* outQ, void* outK, void* outV,
+                                              int qDim, int kvDim, int K, float eps);
+
+// Q4_K fused RMSNorm + QKV + RoPE + KV Scatter NR2 variant (FP16 output, decode only)
+void metal_matvec_q4k_fused_rmsnorm_qkv_rope_scatter_nr2_f16(void* queue, void* pipeline,
+                                                          void* x, void* normWeight,
+                                                          void* Wq, void* Wk, void* Wv,
+                                                          void* outQ, void* kCache, void* vCache,
+                                                          int qDim, int kvDim, int K, float eps,
+                                                          int headDim, int ropeDim, int startPos,
+                                                          float theta, int maxSeqLen, int seqPos);
+
 // Q4_K fused RMSNorm + QKV + RoPE + KV Scatter (FP16 output, decode only)
 void metal_matvec_q4k_fused_rmsnorm_qkv_rope_scatter_f16(void* queue, void* pipeline,
                                                           void* x, void* normWeight,
@@ -182,6 +198,18 @@ void metal_matvec_q4k_fused_rmsnorm_qkv_rope_scatter_f16(void* queue, void* pipe
                                                           int qDim, int kvDim, int K, float eps,
                                                           int headDim, int ropeDim, int startPos,
                                                           float theta, int maxSeqLen, int seqPos);
+
+// Q4_K FusedRMSNorm + matvec (FP32 in/out): eliminates separate RMSNorm dispatch
+void metal_matvec_q4k_fused_rmsnorm_out_f32(void* queue, void* pipeline,
+                                              void* x, void* normWeight,
+                                              void* W, void* C,
+                                              int N, int K, float eps);
+
+// Q4_K W2 + SiLU_Mul + Add: eliminates separate SiLU_Mul dispatch
+void metal_matvec_q4k_fused_silumul_add_f32(void* queue, void* pipeline,
+                                              void* gate, void* up,
+                                              void* W, void* C,
+                                              int N, int K);
 
 // Q4_K fused MLP: SiLU(x @ W1) * (x @ W3)
 void metal_matvec_q4k_fused_mlp_f32(void* queue, void* pipeline,
@@ -199,6 +227,17 @@ void metal_matvec_q4k_fused_rmsnorm_mlp_f16out(void* queue, void* pipeline,
                                                  void* x, void* normWeight,
                                                  void* W1, void* W3, void* out,
                                                  int N, int K, float eps);
+
+// Q4_K NR1 fused RMSNorm + MLP: 1 output/SG for higher BW utilization
+void metal_matvec_q4k_fused_rmsnorm_mlp_nr1_f32(void* queue, void* pipeline,
+                                                   void* x, void* normWeight,
+                                                   void* W1, void* W3, void* out,
+                                                   int N, int K, float eps);
+
+void metal_matvec_q4k_fused_rmsnorm_mlp_nr1_f16out(void* queue, void* pipeline,
+                                                      void* x, void* normWeight,
+                                                      void* W1, void* W3, void* out,
+                                                      int N, int K, float eps);
 
 // Q4_K matvec with FP16 input, FP32 output
 void metal_matvec_q4k_f16in_f32(void* queue, void* pipeline,
@@ -240,6 +279,11 @@ void metal_matvec_q5k_nr2_f32_v4(void* queue, void* pipeline,
 void metal_rmsnorm_f32(void* queue, void* pipeline,
                        void* x, void* weight, void* out,
                        int batchSize, int dim, float eps);
+
+// RMSNorm with FP32 input → FP16 output (for unfused MLP pipeline)
+void metal_rmsnorm_f32_to_f16(void* queue, void* pipeline,
+                               void* x, void* weight, void* out,
+                               int batchSize, int dim, float eps);
 
 // LayerNorm: out = (x - mean) / sqrt(var + eps) * weight + bias
 void metal_layernorm_f32(void* queue, void* pipeline,
@@ -371,6 +415,10 @@ void metal_silu_f32(void* queue, void* pipeline,
 
 void metal_silu_mul_f32(void* queue, void* pipeline,
                         void* gate, void* up, void* out, int n);
+
+// SiLU-Mul with FP32 input → FP16 output (for unfused MLP pipeline)
+void metal_silu_mul_f32_to_f16(void* queue, void* pipeline,
+                                void* gate, void* up, void* out, int n);
 
 void metal_add_f32(void* queue, void* pipeline,
                    void* a, void* b, void* out, int n);

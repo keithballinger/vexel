@@ -1179,18 +1179,18 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	useFP16Path := canFuseAttn && useFP16KVCache
 
 	if useFP16Path && attnQuantProfile == tensor.Q4_K {
-		// Q4_K FP16 path: try fully fused QKV+RoPE+Scatter first (eliminates pipeline bubble)
-		type q4kFusedQKVRoPEScatter interface {
-			MatMulQ4_K_FusedRMSNormQKVRoPEScatter_F16(
+		// Q4_K FP16 path: try NR2 QKV+RoPE+Scatter first (higher BW: 74% vs 71% NR4)
+		type q4kFusedQKVRoPEScatterNR2 interface {
+			MatMulQ4_K_FusedRMSNormQKVRoPEScatter_NR2_F16(
 				x, normWeight, wq, wk, wv, outQ, kCache, vCache tensor.DevicePtr,
 				qDim, kvDim, k int, eps float32,
 				headDim, ropeDim, startPos int, theta float32, maxSeqLen, seqPos int)
 		}
 		if !b.RoPENeox && gpuCache != nil {
-			if fqrs, ok := b.backend.(q4kFusedQKVRoPEScatter); ok {
+			if fqrs, ok := b.backend.(q4kFusedQKVRoPEScatterNR2); ok {
 				dstK, dstV, cacheSeqPos, fSeqLen, maxSL := gpuCache.ReserveKV(layerIdx, seqLen)
 				profileOp("FusedQKV+RoPE+Scatter_Q4K", func() {
-					fqrs.MatMulQ4_K_FusedRMSNormQKVRoPEScatter_F16(xPtr, b.AttnNorm.DevicePtr(),
+					fqrs.MatMulQ4_K_FusedRMSNormQKVRoPEScatter_NR2_F16(xPtr, b.AttnNorm.DevicePtr(),
 						b.Wq.DevicePtr(), b.Wk.DevicePtr(), b.Wv.DevicePtr(),
 						qF16Ptr, dstK, dstV,
 						qSize, kvSize, hiddenSize, float32(b.RMSNormEPS),
@@ -1965,8 +1965,90 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				// W2 will use didFuseW2Add2Ptr (regular W2+Add2, no deferred residual)
 			}
 		}
-		// Q4_K Wo+Add deep fusion: same pattern, FusedRMSNormMLP for Q4_K
-		// Prefer FP16-output variant when downstream W2+Add supports f16in (28% faster W2+Add).
+		// Q4_K dispatch-reducing MLP pipeline: fuses RMSNorm into W1/W3 and SiLU_Mul into W2.
+		// Reduces 5 dispatches + 4 barriers to 3 dispatches + 2 barriers per layer.
+		// FusedRMSNorm+W1(f32) + FusedRMSNorm+W3(f32) → barrier → W2+SiLU_Mul+Add(f32) → barrier
+		type q4kFusedRMSNormOutF32 interface {
+			MatMulQ4_K_FusedRMSNormOut_F32(x, normWeight, w, out tensor.DevicePtr, n, k int, eps float32)
+		}
+		type q4kFusedSiLUMulAdd interface {
+			MatMulQ4_K_FusedSiLUMulAdd(gate, up, w, residual tensor.DevicePtr, n, k int)
+		}
+		if !usedFullFusion && canFuseFFN && didFuseWoAdd && mlpQuantProfile == tensor.Q4_K {
+			normMatIface, normMatOK := b.backend.(q4kFusedRMSNormOutF32)
+			siluW2Iface, siluW2OK := b.backend.(q4kFusedSiLUMulAdd)
+			if normMatOK && siluW2OK {
+				w1Dim := b.W1.Shape().Dims()[0]
+				w2Dim := b.W2.Shape().Dims()[0]
+
+				// FusedRMSNorm+W1 and FusedRMSNorm+W3 (no barrier between — independent reads)
+				profileOp("W1_FusedNorm", func() {
+					normMatIface.MatMulQ4_K_FusedRMSNormOut_F32(xPtr, b.FFNNorm.DevicePtr(),
+						b.W1.DevicePtr(), gatePtr, w1Dim, hiddenSize, float32(b.RMSNormEPS))
+				})
+				profileOp("W3_FusedNorm", func() {
+					normMatIface.MatMulQ4_K_FusedRMSNormOut_F32(xPtr, b.FFNNorm.DevicePtr(),
+						b.W3.DevicePtr(), upPtr, w1Dim, hiddenSize, float32(b.RMSNormEPS))
+				})
+				barrier()
+				// W2+SiLU_Mul+Add: reads gate+up FP32, applies SiLU_Mul in shared, W2 matvec, adds to residual
+				profileOp("W2+SiLUMul+Add", func() {
+					siluW2Iface.MatMulQ4_K_FusedSiLUMulAdd(gatePtr, upPtr, b.W2.DevicePtr(), xPtr, w2Dim, w1Dim)
+				})
+				didFuseW2Add2 = true
+				usedFullFusion = true
+			}
+		}
+
+		// Q4_K Wo+Add fallback: unfused MLP pipeline with separate RMSNorm and SiLU_Mul.
+		// Used if dispatch-reducing kernels unavailable.
+		type rmsnormF32ToF16 interface {
+			RMSNormF32ToF16(x, weight, out tensor.DevicePtr, rows, cols int, eps float32)
+		}
+		type q4kF16InMatMulMLP interface {
+			MatMulQ4_K_F16In(a, bMat, out tensor.DevicePtr, n, k int)
+		}
+		type siluMulF32ToF16 interface {
+			SiLUMulF32ToF16(gate, up, out tensor.DevicePtr, n int)
+		}
+		if !usedFullFusion && canFuseFFN && didFuseWoAdd && mlpQuantProfile == tensor.Q4_K &&
+			didFuseW2Add2Q4KF16InPtr != nil {
+			normF16Iface, normOK := b.backend.(rmsnormF32ToF16)
+			f16InIface, f16InOK := b.backend.(q4kF16InMatMulMLP)
+			siluIface, siluOK := b.backend.(siluMulF32ToF16)
+			if normOK && f16InOK && siluOK {
+				w1Dim := b.W1.Shape().Dims()[0]
+				// Use normOutPtr for FP16 norm output (8 KB, fits in 16 KB normOutPtr allocation)
+				normF16Buf := normOutPtr
+				// Use fusedMLPTempPtr for FP16 SiLU intermediate (22 KB, fits in 88 KB fusedMLPTempPtr)
+				interF16Buf := fusedMLPTempPtr
+
+				profileOp("RMSNormF32ToF16", func() {
+					normF16Iface.RMSNormF32ToF16(xPtr, b.FFNNorm.DevicePtr(), normF16Buf, 1, hiddenSize, float32(b.RMSNormEPS))
+				})
+				barrier()
+				profileOp("W1_F16In", func() {
+					f16InIface.MatMulQ4_K_F16In(normF16Buf, b.W1.DevicePtr(), gatePtr, w1Dim, hiddenSize)
+				})
+				profileOp("W3_F16In", func() {
+					f16InIface.MatMulQ4_K_F16In(normF16Buf, b.W3.DevicePtr(), upPtr, w1Dim, hiddenSize)
+				})
+				barrier()
+				profileOp("SiLUMulF32ToF16", func() {
+					siluIface.SiLUMulF32ToF16(gatePtr, upPtr, interF16Buf, w1Dim)
+				})
+				barrier()
+				// W2+Add uses f16in path, reading from interF16Buf
+				profileOp("W2+Add2_F16In", func() {
+					w2Dim := b.W2.Shape().Dims()[0]
+					didFuseW2Add2Q4KF16InPtr.MatMulQ4_K_F16InAdd(interF16Buf, b.W2.DevicePtr(), xPtr, w2Dim, w1Dim)
+				})
+				didFuseW2Add2 = true
+				usedFullFusion = true
+			}
+		}
+
+		// Fused fallback: FusedRMSNormMLP for Q4_K (NR4, lower BW but fewer dispatches)
 		type q4kFusedNormMLPF16Out interface {
 			MatMulQ4_K_FusedRMSNormMLP_F16Out(x, normWeight, w1, w3, out tensor.DevicePtr, n, k int, eps float32)
 		}
@@ -2128,7 +2210,10 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 
 		// Fused W2+Add2: for M=1 decode with Q4_0 W2 and serial residual (no PostFFNNorm),
 		// compute xPtr += gatePtr @ W2^T in a single dispatch, saving 1 dispatch per layer.
-		if didFuseW2Add2ResidualPtr != nil && !b.W2.DevicePtr().IsNil() {
+		// Skip if unfused MLP pipeline already dispatched W2+Add inline.
+		if didFuseW2Add2 {
+			// Already dispatched by unfused MLP pipeline — skip duplicate W2+Add.
+		} else if didFuseW2Add2ResidualPtr != nil && !b.W2.DevicePtr().IsNil() {
 			// Deep fusion path (Q4_0): x = x + woOutput + gate@W2^T
 			// Adds both deferred attention residual AND W2 result in one dispatch.
 			// normOutPtr still contains Wo output (FusedAddRMSNormMLP only read it).
