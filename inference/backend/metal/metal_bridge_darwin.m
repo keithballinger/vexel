@@ -6287,6 +6287,13 @@ kernel void sdpa_flash_decode_f16_nwg(
             for (int e = 0; e < elemsPerThread; e++) {
                 out[outBase + threadBase + e] = half(final_result[e] * inv_l);
             }
+
+            // Self-reset: zero counter for next dispatch (eliminates external Zero kernel).
+            // Safe because this TG is the last to finish — no other TG for this qHead is running.
+            // The next dispatch for this qHead will see counter=0 due to memory barrier between dispatches.
+            if (simd_lane == 0) {
+                atomic_store_explicit(&counters[qHead], 0, memory_order_relaxed);
+            }
         }
     }
 }

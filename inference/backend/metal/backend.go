@@ -1708,11 +1708,15 @@ func (b *Backend) SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKV
 			}
 			b.nwgCountersBuf = C.metal_alloc_buffer(b.device, C.size_t(countersNeeded))
 			b.nwgCountersSize = countersNeeded
+			// CPU-zero counters at allocation time. The NWG kernel self-resets
+			// counters after merge, so this is only needed for the initial state.
+			ptr := C.metal_buffer_contents(b.nwgCountersBuf)
+			for i := 0; i < countersNeeded; i++ {
+				*(*byte)(unsafe.Pointer(uintptr(ptr) + uintptr(i))) = 0
+			}
 		}
 
-		// Zero counters + barrier before NWG dispatch (required for atomic merge protocol)
-		C.metal_zero_f32(b.queue, b.zeroPipeline, b.nwgCountersBuf, C.int(numQHeads))
-		C.metal_memory_barrier()
+		// No external Zero dispatch needed — NWG kernel self-resets counters after merge.
 
 		C.metal_sdpa_flash_decode_f16_nwg(b.queue, b.sdpaFlashDecodeF16NWGPipeline,
 			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
