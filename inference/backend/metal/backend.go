@@ -121,8 +121,11 @@ type Backend struct {
 			matmulQ4KBatchedPipeline    unsafe.Pointer
 			matmulQ4KSimdgroupPipeline  unsafe.Pointer
 			matvecQ4KFusedRMSNormQKVF16Pipeline unsafe.Pointer // Fused RMSNorm + QKV for Q4_K (FP16 output)
+			matvecQ4KFusedRMSNormQKVRoPEScatterF16Pipeline unsafe.Pointer // Fused QKV+RoPE+Scatter for Q4_K
 			matvecQ4KFusedMLPPipeline           unsafe.Pointer // Fused MLP for Q4_K: SiLU(x@W1)*x@W3
+			matvecQ4KFusedRMSNormMLPPipeline    unsafe.Pointer // Fused RMSNorm+MLP for Q4_K (Wo+Add path)
 			matvecQ4KF16InPipeline              unsafe.Pointer // Q4_K matvec with FP16 input
+			matvecQ4KF16InAddPipeline           unsafe.Pointer // Q4_K matvec with FP16 input, adds to output (Wo+Add)
 			matvecQ4KAddPipeline                unsafe.Pointer // Q4_K matvec that adds to output
 			matvecQ4KNR4F16InPipeline           unsafe.Pointer // Q4_K NR4 matvec with FP16 input (32 out/TG)
 			matvecQ4KNR4AddPipeline             unsafe.Pointer // Q4_K NR4 matvec that adds to output (32 out/TG)
@@ -289,8 +292,11 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matmulQ4KBatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4k_batched_f32"))
 	b.matmulQ4KSimdgroupPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4k_simdgroup_f32"))
 	b.matvecQ4KFusedRMSNormQKVF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_fused_rmsnorm_qkv_f16"))
+	b.matvecQ4KFusedRMSNormQKVRoPEScatterF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_fused_rmsnorm_qkv_rope_scatter_f16"))
 	b.matvecQ4KFusedMLPPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_fused_mlp_f32"))
+	b.matvecQ4KFusedRMSNormMLPPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_fused_rmsnorm_mlp_f32"))
 	b.matvecQ4KF16InPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_f16in_f32"))
+	b.matvecQ4KF16InAddPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_f16in_add_f32"))
 	b.matvecQ4KAddPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_add_f32"))
 	b.matvecQ4KNR4F16InPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_nr4_f16in_f32"))
 	b.matvecQ4KNR4AddPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_nr4_add_f32"))
@@ -873,6 +879,38 @@ func (b *Backend) MatMulQ4_K_FusedRMSNormQKV_F16(x, normWeight, wq, wk, wv, outQ
 		C.int(qDim), C.int(kvDim), C.int(k), C.float(eps))
 }
 
+// MatMulQ4_K_FusedRMSNormQKVRoPEScatter_F16 performs fused RMSNorm + QKV + RoPE + KV scatter
+// with Q4_K weights. Combines 6 operations into 1 dispatch (decode only).
+func (b *Backend) MatMulQ4_K_FusedRMSNormQKVRoPEScatter_F16(
+	x, normWeight, wq, wk, wv, outQ, kCache, vCache tensor.DevicePtr,
+	qDim, kvDim, k int, eps float32,
+	headDim, ropeDim, startPos int, theta float32, maxSeqLen, seqPos int) {
+	b.profiler.RecordDispatch("FusedQKV+RoPE+Scatter_Q4K")
+	if b.matvecQ4KFusedRMSNormQKVRoPEScatterF16Pipeline == nil {
+		panic("MatMulQ4_K_FusedRMSNormQKVRoPEScatter_F16 called but pipeline unavailable")
+	}
+	C.metal_matvec_q4k_fused_rmsnorm_qkv_rope_scatter_f16(b.queue, b.matvecQ4KFusedRMSNormQKVRoPEScatterF16Pipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(normWeight.Addr()),
+		unsafe.Pointer(wq.Addr()), unsafe.Pointer(wk.Addr()), unsafe.Pointer(wv.Addr()),
+		unsafe.Pointer(outQ.Addr()), unsafe.Pointer(kCache.Addr()), unsafe.Pointer(vCache.Addr()),
+		C.int(qDim), C.int(kvDim), C.int(k), C.float(eps),
+		C.int(headDim), C.int(ropeDim), C.int(startPos),
+		C.float(theta), C.int(maxSeqLen), C.int(seqPos))
+}
+
+// MatMulQ4_K_FusedRMSNormMLP performs fused RMSNorm + MLP: SiLU(RMSNorm(x) @ W1) * (RMSNorm(x) @ W3).
+// Used when Wo+Add is fused — reads only x (residual already added), half the preamble BW.
+func (b *Backend) MatMulQ4_K_FusedRMSNormMLP(x, normWeight, w1, w3, out tensor.DevicePtr, n, k int, eps float32) {
+	b.profiler.RecordDispatch("FusedRMSNormMLP_Q4K")
+	if b.matvecQ4KFusedRMSNormMLPPipeline == nil {
+		panic("MatMulQ4_K_FusedRMSNormMLP called but pipeline unavailable")
+	}
+	C.metal_matvec_q4k_fused_rmsnorm_mlp_f32(b.queue, b.matvecQ4KFusedRMSNormMLPPipeline,
+		unsafe.Pointer(x.Addr()), unsafe.Pointer(normWeight.Addr()),
+		unsafe.Pointer(w1.Addr()), unsafe.Pointer(w3.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(n), C.int(k), C.float(eps))
+}
+
 // MatMulQ4_K_FusedMLP performs fused MLP: SiLU(x @ W1) * (x @ W3) with Q4_K weights.
 // Only supports M=1 (decode).
 func (b *Backend) MatMulQ4_K_FusedMLP(x, w1, w3, out tensor.DevicePtr, m, n, k int) {
@@ -897,6 +935,18 @@ func (b *Backend) MatMulQ4_K_F16In(a, bMat, out tensor.DevicePtr, n, k int) {
 		panic("MatMulQ4_K_F16In called but pipeline unavailable")
 	}
 	C.metal_matvec_q4k_f16in_f32(b.queue, b.matvecQ4KF16InPipeline,
+		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(n), C.int(k))
+}
+
+// MatMulQ4_K_F16InAdd performs Q4_K matvec with FP16 input and ADDS to output: out += a_f16 @ B^T.
+// Fuses Wo matmul + residual addition (x += Wo @ attn_f16). Decode only.
+func (b *Backend) MatMulQ4_K_F16InAdd(a, bMat, out tensor.DevicePtr, n, k int) {
+	b.profiler.RecordDispatch("MatMulQ4_K_F16InAdd")
+	if b.matvecQ4KF16InAddPipeline == nil {
+		panic("MatMulQ4_K_F16InAdd called but pipeline unavailable")
+	}
+	C.metal_matvec_q4k_f16in_add_f32(b.queue, b.matvecQ4KF16InAddPipeline,
 		unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(n), C.int(k))
 }

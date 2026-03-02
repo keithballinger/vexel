@@ -403,3 +403,316 @@ func TestQ4KAdd(t *testing.T) {
 		})
 	}
 }
+
+// TestQ4KF16InAdd tests Q4_K matvec with FP16 input that ADDS to output (Wo+Add fusion).
+func TestQ4KF16InAdd(t *testing.T) {
+	backend, err := NewBackend(0)
+	if err != nil {
+		t.Skipf("Metal backend not available: %v", err)
+	}
+	defer backend.Close()
+
+	if backend.matvecQ4KF16InAddPipeline == nil {
+		t.Skip("Q4_K F16InAdd pipeline not available")
+	}
+
+	tests := []struct {
+		name   string
+		N      int
+		K      int
+		absTol float64
+		relTol float64
+	}{
+		{"small", 128, 256, 0.01, 0.005},
+		{"llama7b_wo", 4096, 4096, 0.1, 0.005},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rng := rand.New(rand.NewSource(42))
+
+			// FP32 activations → convert to FP16
+			aF32 := make([]float32, tc.K)
+			for i := range aF32 {
+				aF32[i] = (rng.Float32() - 0.5) * 2.0
+			}
+			aF16Bytes := make([]byte, tc.K*2)
+			for i, v := range aF32 {
+				binary.LittleEndian.PutUint16(aF16Bytes[i*2:], float32ToFloat16(v))
+			}
+			aRounded := make([]float32, tc.K)
+			for i := range aF32 {
+				aRounded[i] = float16ToFloat32CPU(float32ToFloat16(aF32[i]))
+			}
+
+			// Pre-existing output (residual)
+			residual := make([]float32, tc.N)
+			for i := range residual {
+				residual[i] = (rng.Float32() - 0.5) * 1.0
+			}
+
+			wData := generateQ4KWeights(tc.N, tc.K, 100)
+
+			// CPU reference: out = residual + (aRounded @ W^T)
+			matvecResult := cpuMatVecQ4_K(aRounded, wData, 1, tc.N, tc.K)
+			expected := make([]float32, tc.N)
+			for i := range expected {
+				expected[i] = residual[i] + matvecResult[i]
+			}
+
+			// GPU
+			aBuf := backend.Alloc(tc.K * 2) // FP16
+			wBuf := backend.Alloc(len(wData))
+			outBuf := backend.Alloc(tc.N * 4)
+			defer backend.Free(aBuf)
+			defer backend.Free(wBuf)
+			defer backend.Free(outBuf)
+
+			backend.ToDevice(aBuf, aF16Bytes)
+			backend.ToDevice(wBuf, wData)
+			backend.ToDevice(outBuf, float32ToBytes(residual)) // pre-fill with residual
+
+			backend.MatMulQ4_K_F16InAdd(aBuf, wBuf, outBuf, tc.N, tc.K)
+			backend.Sync()
+
+			resultBytes := make([]byte, tc.N*4)
+			backend.ToHost(resultBytes, outBuf)
+			result := bytesToFloat32(resultBytes)
+
+			checkCombinedTolerance(t, "F16InAdd", expected, result, tc.absTol, tc.relTol)
+		})
+	}
+}
+
+// TestQ4KFusedRMSNormMLP tests fused RMSNorm + MLP: SiLU(RMSNorm(x)@W1) * (RMSNorm(x)@W3) for Q4_K.
+// Used when Wo+Add is active — reads only x (residual already in x).
+func TestQ4KFusedRMSNormMLP(t *testing.T) {
+	backend, err := NewBackend(0)
+	if err != nil {
+		t.Skipf("Metal backend not available: %v", err)
+	}
+	defer backend.Close()
+
+	if backend.matvecQ4KFusedRMSNormMLPPipeline == nil {
+		t.Skip("Q4_K FusedRMSNormMLP pipeline not available")
+	}
+
+	tests := []struct {
+		name   string
+		N      int // intermediate size
+		K      int // hidden size
+		absTol float64
+		relTol float64
+	}{
+		{"small", 128, 256, 0.01, 0.01},
+		{"medium", 512, 512, 0.1, 0.01},
+		{"llama7b", 11008, 4096, 2.0, 0.01},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rng := rand.New(rand.NewSource(42))
+
+			x := make([]float32, tc.K)
+			for i := range x {
+				x[i] = (rng.Float32() - 0.5) * 2.0
+			}
+
+			normWeight := make([]float32, tc.K)
+			for i := range normWeight {
+				normWeight[i] = rng.Float32() + 0.5
+			}
+
+			eps := float32(1e-5)
+
+			w1Data := generateQ4KWeights(tc.N, tc.K, 100)
+			w3Data := generateQ4KWeights(tc.N, tc.K, 200)
+
+			// CPU reference: xNorm = RMSNorm(x), gate = xNorm @ W1^T, up = xNorm @ W3^T, out = SiLU(gate) * up
+			xNorm := cpuRMSNorm(x, normWeight, eps)
+			gate := cpuMatVecQ4_K(xNorm, w1Data, 1, tc.N, tc.K)
+			up := cpuMatVecQ4_K(xNorm, w3Data, 1, tc.N, tc.K)
+			expected := make([]float32, tc.N)
+			for i := 0; i < tc.N; i++ {
+				sigmoid := float32(1.0 / (1.0 + math.Exp(-float64(gate[i]))))
+				expected[i] = (gate[i] * sigmoid) * up[i]
+			}
+
+			// GPU
+			xBuf := backend.Alloc(tc.K * 4)
+			normBuf := backend.Alloc(tc.K * 4)
+			w1Buf := backend.Alloc(len(w1Data))
+			w3Buf := backend.Alloc(len(w3Data))
+			outBuf := backend.Alloc(tc.N * 4)
+			defer backend.Free(xBuf)
+			defer backend.Free(normBuf)
+			defer backend.Free(w1Buf)
+			defer backend.Free(w3Buf)
+			defer backend.Free(outBuf)
+
+			backend.ToDevice(xBuf, float32ToBytes(x))
+			backend.ToDevice(normBuf, float32ToBytes(normWeight))
+			backend.ToDevice(w1Buf, w1Data)
+			backend.ToDevice(w3Buf, w3Data)
+
+			backend.MatMulQ4_K_FusedRMSNormMLP(xBuf, normBuf, w1Buf, w3Buf, outBuf, tc.N, tc.K, eps)
+			backend.Sync()
+
+			resultBytes := make([]byte, tc.N*4)
+			backend.ToHost(resultBytes, outBuf)
+			result := bytesToFloat32(resultBytes)
+
+			checkCombinedTolerance(t, "FusedRMSNormMLP", expected, result, tc.absTol, tc.relTol)
+		})
+	}
+}
+
+// TestQ4KFusedRMSNormQKVRoPEScatter tests the fully fused QKV+RoPE+Scatter kernel for Q4_K.
+// Verifies that Q output has RoPE applied, K values are scattered to cache with RoPE,
+// and V values are scattered to cache without RoPE.
+func TestQ4KFusedRMSNormQKVRoPEScatter(t *testing.T) {
+	backend, err := NewBackend(0)
+	if err != nil {
+		t.Skipf("Metal backend not available: %v", err)
+	}
+	defer backend.Close()
+
+	if backend.matvecQ4KFusedRMSNormQKVRoPEScatterF16Pipeline == nil {
+		t.Skip("Q4_K FusedRMSNormQKVRoPEScatter pipeline not available")
+	}
+
+	// LLaMA 2 7B dimensions
+	qDim := 4096
+	kvDim := 1024    // GQA: 8 KV heads * 128 headDim
+	K := 4096
+	headDim := 128
+	ropeDim := 128
+	numKVHeads := 8
+	maxSeqLen := 64
+	seqPos := 5       // current sequence position
+	startPos := seqPos // position for RoPE frequencies
+	theta := float32(10000.0)
+	eps := float32(1e-5)
+
+	rng := rand.New(rand.NewSource(42))
+
+	x := make([]float32, K)
+	for i := range x {
+		x[i] = (rng.Float32() - 0.5) * 2.0
+	}
+	normWeight := make([]float32, K)
+	for i := range normWeight {
+		normWeight[i] = rng.Float32() + 0.5
+	}
+
+	wqData := generateQ4KWeights(qDim, K, 100)
+	wkData := generateQ4KWeights(kvDim, K, 200)
+	wvData := generateQ4KWeights(kvDim, K, 300)
+
+	// CPU reference: RMSNorm → MatVec → RoPE
+	xNorm := cpuRMSNorm(x, normWeight, eps)
+	rawQ := cpuMatVecQ4_K(xNorm, wqData, 1, qDim, K)
+	rawK := cpuMatVecQ4_K(xNorm, wkData, 1, kvDim, K)
+	rawV := cpuMatVecQ4_K(xNorm, wvData, 1, kvDim, K)
+
+	// Apply RoPE to Q and K
+	expectedQ := make([]float32, qDim)
+	copy(expectedQ, rawQ)
+	cpuRoPE(expectedQ, headDim, ropeDim, startPos, theta)
+
+	expectedK := make([]float32, kvDim)
+	copy(expectedK, rawK)
+	cpuRoPE(expectedK, headDim, ropeDim, startPos, theta)
+
+	// GPU buffers
+	xBuf := backend.Alloc(K * 4)
+	normBuf := backend.Alloc(K * 4)
+	wqBuf := backend.Alloc(len(wqData))
+	wkBuf := backend.Alloc(len(wkData))
+	wvBuf := backend.Alloc(len(wvData))
+	outQBuf := backend.Alloc(qDim * 2) // FP16
+	kCacheSize := numKVHeads * maxSeqLen * headDim * 2
+	vCacheSize := numKVHeads * maxSeqLen * headDim * 2
+	kCacheBuf := backend.Alloc(kCacheSize) // FP16
+	vCacheBuf := backend.Alloc(vCacheSize) // FP16
+	defer backend.Free(xBuf)
+	defer backend.Free(normBuf)
+	defer backend.Free(wqBuf)
+	defer backend.Free(wkBuf)
+	defer backend.Free(wvBuf)
+	defer backend.Free(outQBuf)
+	defer backend.Free(kCacheBuf)
+	defer backend.Free(vCacheBuf)
+
+	// Zero cache
+	backend.Zero(kCacheBuf, kCacheSize)
+	backend.Zero(vCacheBuf, vCacheSize)
+
+	backend.ToDevice(xBuf, float32ToBytes(x))
+	backend.ToDevice(normBuf, float32ToBytes(normWeight))
+	backend.ToDevice(wqBuf, wqData)
+	backend.ToDevice(wkBuf, wkData)
+	backend.ToDevice(wvBuf, wvData)
+
+	backend.MatMulQ4_K_FusedRMSNormQKVRoPEScatter_F16(
+		xBuf, normBuf,
+		wqBuf, wkBuf, wvBuf,
+		outQBuf, kCacheBuf, vCacheBuf,
+		qDim, kvDim, K, eps,
+		headDim, ropeDim, startPos, theta, maxSeqLen, seqPos)
+	backend.Sync()
+
+	// Read back Q (FP16)
+	qBytes := make([]byte, qDim*2)
+	backend.ToHost(qBytes, outQBuf)
+	resultQ := halfBytesToFloat32(qBytes)
+
+	// Read back K cache at seqPos for each head
+	kCacheBytes := make([]byte, kCacheSize)
+	backend.ToHost(kCacheBytes, kCacheBuf)
+	resultK := make([]float32, kvDim)
+	for head := 0; head < numKVHeads; head++ {
+		for d := 0; d < headDim; d++ {
+			offset := (head*maxSeqLen*headDim + seqPos*headDim + d) * 2
+			h := binary.LittleEndian.Uint16(kCacheBytes[offset:])
+			resultK[head*headDim+d] = float16ToFloat32CPU(h)
+		}
+	}
+
+	// Read back V cache at seqPos for each head
+	vCacheBytes := make([]byte, vCacheSize)
+	backend.ToHost(vCacheBytes, vCacheBuf)
+	resultV := make([]float32, kvDim)
+	for head := 0; head < numKVHeads; head++ {
+		for d := 0; d < headDim; d++ {
+			offset := (head*maxSeqLen*headDim + seqPos*headDim + d) * 2
+			h := binary.LittleEndian.Uint16(vCacheBytes[offset:])
+			resultV[head*headDim+d] = float16ToFloat32CPU(h)
+		}
+	}
+
+	// Q4_K + FP16 intermediate + RoPE compounding: wider tolerance
+	checkCombinedTolerance(t, "Q(RoPE)", expectedQ, resultQ, 3.0, 0.002)
+	checkCombinedTolerance(t, "K(RoPE+Scatter)", expectedK, resultK, 3.0, 0.002)
+	checkCombinedTolerance(t, "V(Scatter)", rawV, resultV, 3.0, 0.001)
+}
+
+// cpuRoPE applies standard RoPE (non-neox) to a flat vector in-place.
+// The vector is interpreted as [numHeads][headDim], and RoPE is applied
+// pairwise to the first ropeDim elements of each head.
+func cpuRoPE(data []float32, headDim, ropeDim, pos int, theta float32) {
+	numHeads := len(data) / headDim
+	for h := 0; h < numHeads; h++ {
+		offset := h * headDim
+		for j := 0; j < ropeDim/2; j++ {
+			freq := float64(1.0) / math.Pow(float64(theta), float64(2*j)/float64(ropeDim))
+			angle := float64(pos) * freq
+			cosVal := float32(math.Cos(angle))
+			sinVal := float32(math.Sin(angle))
+			v0 := data[offset+2*j]
+			v1 := data[offset+2*j+1]
+			data[offset+2*j] = v0*cosVal - v1*sinVal
+			data[offset+2*j+1] = v0*sinVal + v1*cosVal
+		}
+	}
+}

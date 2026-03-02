@@ -174,15 +174,35 @@ void metal_matvec_q4k_fused_rmsnorm_qkv_f16(void* queue, void* pipeline,
                                               void* outQ, void* outK, void* outV,
                                               int qDim, int kvDim, int K, float eps);
 
+// Q4_K fused RMSNorm + QKV + RoPE + KV Scatter (FP16 output, decode only)
+void metal_matvec_q4k_fused_rmsnorm_qkv_rope_scatter_f16(void* queue, void* pipeline,
+                                                          void* x, void* normWeight,
+                                                          void* Wq, void* Wk, void* Wv,
+                                                          void* outQ, void* kCache, void* vCache,
+                                                          int qDim, int kvDim, int K, float eps,
+                                                          int headDim, int ropeDim, int startPos,
+                                                          float theta, int maxSeqLen, int seqPos);
+
 // Q4_K fused MLP: SiLU(x @ W1) * (x @ W3)
 void metal_matvec_q4k_fused_mlp_f32(void* queue, void* pipeline,
                                      void* x, void* W1, void* W3, void* out,
                                      int N, int K);
 
+// Q4_K fused RMSNorm + MLP: SiLU(RMSNorm(x) @ W1) * (RMSNorm(x) @ W3) — Wo+Add path
+void metal_matvec_q4k_fused_rmsnorm_mlp_f32(void* queue, void* pipeline,
+                                              void* x, void* normWeight,
+                                              void* W1, void* W3, void* out,
+                                              int N, int K, float eps);
+
 // Q4_K matvec with FP16 input, FP32 output
 void metal_matvec_q4k_f16in_f32(void* queue, void* pipeline,
                                  void* A, void* B, void* C,
                                  int N, int K);
+
+// Q4_K matvec with FP16 input that adds to output: C += A_f16 @ B^T (Wo+Add)
+void metal_matvec_q4k_f16in_add_f32(void* queue, void* pipeline,
+                                     void* A, void* B, void* C,
+                                     int N, int K);
 
 // Q4_K matvec that adds to output: C += A @ B^T
 void metal_matvec_q4k_add_f32(void* queue, void* pipeline,
