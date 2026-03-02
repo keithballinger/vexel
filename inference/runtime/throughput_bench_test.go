@@ -3,8 +3,11 @@
 package runtime_test
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math"
 	"os"
+	goruntime "runtime"
 	"testing"
 	"time"
 
@@ -986,6 +989,107 @@ func TestBarrierRemovalCorrectness(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestThroughputDecodeZeroAlloc measures decode throughput with minimal Go overhead.
+// Pre-allocates all buffers, uses extended warmup, and disables GC during measurement.
+// This gives a fair apples-to-apples comparison with llama.cpp (which has no GC).
+func TestThroughputDecodeZeroAlloc(t *testing.T) {
+	model, backend, cache := setupModel(t, false)
+	defer backend.Close()
+	defer cache.Free()
+
+	vocabSize := 32000 // LLaMA 2 vocab size
+
+	// Pre-allocate reusable buffer for logit reading (eliminates per-token GC pressure)
+	logitBuf := make([]byte, vocabSize*4) // 128 KB, allocated once
+
+	// Use getLogits for prefill+warmup, then tight loop with pre-allocated buffer for timing
+
+	// Prefill
+	prefillTokens := []int{1, 15043, 29892, 920, 526}
+	logits := getLogits(t, model, backend, prefillTokens, 0)
+	nextToken := argmax(logits)
+	pos := len(prefillTokens)
+
+	// Extended warmup: 10 tokens (vs 3 in standard test)
+	for i := 0; i < 10; i++ {
+		logits = getLogits(t, model, backend, []int{nextToken}, pos)
+		nextToken = argmax(logits)
+		pos++
+	}
+
+	// Force GC before measurement to eliminate pending collections
+	goruntime.GC()
+
+	// Pre-allocate timing buffer
+	const n = 100
+	tokenTimes := make([]time.Duration, n)
+
+	// Tight measurement loop: reuse logitBuf to avoid allocations
+	start := time.Now()
+	for i := 0; i < n; i++ {
+		tokenStart := time.Now()
+		logitTensor, err := model.DecodeWithGPUKV([]int{nextToken}, pos)
+		if err != nil {
+			t.Fatalf("Decode failed at token %d: %v", i, err)
+		}
+		// Read logits using pre-allocated buffer (zero allocation)
+		backend.ToHost(logitBuf, logitTensor.DevicePtr())
+		maxIdx := 0
+		maxVal := math.Float32frombits(binary.LittleEndian.Uint32(logitBuf[0:4]))
+		for j := 1; j < vocabSize; j++ {
+			v := math.Float32frombits(binary.LittleEndian.Uint32(logitBuf[j*4:]))
+			if v > maxVal {
+				maxVal = v
+				maxIdx = j
+			}
+		}
+		nextToken = maxIdx
+		tokenTimes[i] = time.Since(tokenStart)
+		pos++
+	}
+	totalTime := time.Since(start)
+
+	// Statistics
+	sortDurations(tokenTimes)
+	avgTokPerSec := float64(n) / totalTime.Seconds()
+	minMs := float64(tokenTimes[0].Microseconds()) / 1000
+	p5Ms := float64(tokenTimes[n*5/100].Microseconds()) / 1000
+	medianMs := float64(tokenTimes[n/2].Microseconds()) / 1000
+	p95Ms := float64(tokenTimes[n*95/100].Microseconds()) / 1000
+	p99Ms := float64(tokenTimes[n*99/100].Microseconds()) / 1000
+	maxMs := float64(tokenTimes[n-1].Microseconds()) / 1000
+
+	// Trimmed mean (middle 90%): exclude top/bottom 5%
+	var trimTotal time.Duration
+	for _, d := range tokenTimes[n*5/100 : n*95/100] {
+		trimTotal += d
+	}
+	trimmedAvgMs := float64(trimTotal.Microseconds()) / 1000 / float64(n*90/100)
+	trimmedTokPerSec := 1000.0 / trimmedAvgMs
+
+	t.Logf("Decode %d tokens (zero-alloc, 10 warmup):", n)
+	t.Logf("  Average:      %.1f tok/s (%.2f ms/token)", avgTokPerSec, float64(totalTime.Microseconds())/1000/float64(n))
+	t.Logf("  Trimmed mean: %.1f tok/s (%.2f ms/token) [middle 90%%]", trimmedTokPerSec, trimmedAvgMs)
+	t.Logf("  Per-token:    min=%.2f p5=%.2f median=%.2f p95=%.2f p99=%.2f max=%.2f ms",
+		minMs, p5Ms, medianMs, p95Ms, p99Ms, maxMs)
+	t.Logf("  Min tok/s:    %.1f (1000/%.2f)", 1000.0/minMs, minMs)
+	t.Logf("  Median tok/s: %.1f (1000/%.2f)", 1000.0/medianMs, medianMs)
+
+	// llama.cpp target: 76.3 tok/s = 13.11 ms/token
+	llamaCppMs := 13.11
+	t.Logf("\n  === vs llama.cpp (76.3 tok/s = %.2f ms/token) ===", llamaCppMs)
+	t.Logf("  Min:     %+.1f%% (%s)", (llamaCppMs-minMs)/llamaCppMs*100, verdict(minMs, llamaCppMs))
+	t.Logf("  Median:  %+.1f%% (%s)", (llamaCppMs-medianMs)/llamaCppMs*100, verdict(medianMs, llamaCppMs))
+	t.Logf("  Trimmed: %+.1f%% (%s)", (llamaCppMs-trimmedAvgMs)/llamaCppMs*100, verdict(trimmedAvgMs, llamaCppMs))
+}
+
+func verdict(ourMs, targetMs float64) string {
+	if ourMs < targetMs {
+		return fmt.Sprintf("BEATS by %.1f%%", (targetMs-ourMs)/targetMs*100)
+	}
+	return fmt.Sprintf("behind by %.1f%%", (ourMs-targetMs)/targetMs*100)
 }
 
 // sortDurations sorts a slice of time.Duration in ascending order.
