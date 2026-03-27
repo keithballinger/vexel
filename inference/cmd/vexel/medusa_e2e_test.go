@@ -15,10 +15,11 @@ func TestMedusaSchedulerCreation(t *testing.T) {
 		t.Skip("VEXEL_TEST_MODEL not set; skipping E2E test")
 	}
 
-	rt, tok, _, err := initModel(modelPath, 128, false)
+	rt, tok, gpuBackend, err := initModel(modelPath, 128, false)
 	if err != nil {
 		t.Fatalf("initModel failed: %v", err)
 	}
+	defer gpuBackend.Close()
 
 	cfg := scheduler.Config{
 		MaxBatchSize: 1,

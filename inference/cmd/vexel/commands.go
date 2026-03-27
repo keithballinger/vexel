@@ -138,11 +138,32 @@ func loadDraftModel(draftPath string, gpuBackend *metal.Backend, maxTokens int, 
 	return draft, nil
 }
 
+// createMedusaScheduler creates a MedusaScheduler from global flags and model.
+func createMedusaScheduler(globals GlobalFlags, model *runtime.ModelRuntime, tok *tokenizer.Tokenizer, schedConfig scheduler.Config) (*scheduler.MedusaScheduler, error) {
+	medusaCfg := scheduler.DefaultMedusaConfig()
+	medusaCfg.EnableOnlineTraining = true
+	medusaCfg.UseGPUTraining = true
+	if globals.MedusaHeadsPath != "" {
+		medusaCfg.HeadsPath = globals.MedusaHeadsPath
+	}
+	ms, err := scheduler.NewMedusaScheduler(model, tok, schedConfig, medusaCfg)
+	if err != nil {
+		return nil, fmt.Errorf("create medusa scheduler: %w", err)
+	}
+	log.Printf("Using Medusa speculative decoding (online training=%v, GPU=%v)",
+		medusaCfg.EnableOnlineTraining, medusaCfg.UseGPUTraining)
+	return ms, nil
+}
+
 // runServe starts the HTTP inference server.
 func runServe(globals GlobalFlags, args []string) error {
 	sf, err := parseServeFlags(subcommandArgs(args))
 	if err != nil {
 		return err
+	}
+
+	if globals.DraftModel != "" && globals.Medusa {
+		return fmt.Errorf("--draft-model and --medusa are mutually exclusive")
 	}
 
 	model, tok, gpuBackend, err := initModel(globals.Model, sf.MaxTokens, globals.Verbose)
@@ -179,18 +200,10 @@ func runServe(globals GlobalFlags, args []string) error {
 		baseSched = ss.Scheduler
 		runFunc = ss.Run
 	} else if globals.Medusa {
-		medusaCfg := scheduler.DefaultMedusaConfig()
-		medusaCfg.EnableOnlineTraining = true
-		medusaCfg.UseGPUTraining = true
-		if globals.MedusaHeadsPath != "" {
-			medusaCfg.HeadsPath = globals.MedusaHeadsPath
-		}
-		ms, err := scheduler.NewMedusaScheduler(model, tok, schedConfig, medusaCfg)
+		ms, err := createMedusaScheduler(globals, model, tok, schedConfig)
 		if err != nil {
-			return fmt.Errorf("create medusa scheduler: %w", err)
+			return err
 		}
-		log.Printf("Using Medusa speculative decoding (online training=%v, GPU=%v)",
-			medusaCfg.EnableOnlineTraining, medusaCfg.UseGPUTraining)
 		baseSched = ms.BaseScheduler()
 		runFunc = ms.Run
 	} else {
@@ -243,6 +256,9 @@ func runGenerate(globals GlobalFlags, args []string) error {
 	if gf.Prompt == "" {
 		return fmt.Errorf("--prompt is required")
 	}
+	if globals.DraftModel != "" && globals.Medusa {
+		return fmt.Errorf("--draft-model and --medusa are mutually exclusive")
+	}
 
 	model, tok, gpuBackend, err := initModel(globals.Model, gf.MaxTokens, globals.Verbose)
 	if err != nil {
@@ -282,18 +298,10 @@ func runGenerate(globals GlobalFlags, args []string) error {
 		runFunc = ss.Run
 		specSched = ss
 	} else if globals.Medusa {
-		medusaCfg := scheduler.DefaultMedusaConfig()
-		medusaCfg.EnableOnlineTraining = true
-		medusaCfg.UseGPUTraining = true
-		if globals.MedusaHeadsPath != "" {
-			medusaCfg.HeadsPath = globals.MedusaHeadsPath
-		}
-		ms, err := scheduler.NewMedusaScheduler(model, tok, schedConfig, medusaCfg)
+		ms, err := createMedusaScheduler(globals, model, tok, schedConfig)
 		if err != nil {
-			return fmt.Errorf("create medusa scheduler: %w", err)
+			return err
 		}
-		log.Printf("Using Medusa speculative decoding (online training=%v, GPU=%v)",
-			medusaCfg.EnableOnlineTraining, medusaCfg.UseGPUTraining)
 		baseSched = ms.BaseScheduler()
 		runFunc = ms.Run
 	} else {
@@ -361,18 +369,10 @@ func runChat(globals GlobalFlags, args []string) error {
 	var runFunc func(context.Context) error
 
 	if globals.Medusa {
-		medusaCfg := scheduler.DefaultMedusaConfig()
-		medusaCfg.EnableOnlineTraining = true
-		medusaCfg.UseGPUTraining = true
-		if globals.MedusaHeadsPath != "" {
-			medusaCfg.HeadsPath = globals.MedusaHeadsPath
-		}
-		ms, err := scheduler.NewMedusaScheduler(model, tok, schedConfig, medusaCfg)
+		ms, err := createMedusaScheduler(globals, model, tok, schedConfig)
 		if err != nil {
-			return fmt.Errorf("create medusa scheduler: %w", err)
+			return err
 		}
-		log.Printf("Using Medusa speculative decoding (online training=%v, GPU=%v)",
-			medusaCfg.EnableOnlineTraining, medusaCfg.UseGPUTraining)
 		sched = ms.BaseScheduler()
 		runFunc = ms.Run
 	} else {
