@@ -8,9 +8,11 @@ import (
 
 // GlobalFlags holds flags shared across all subcommands.
 type GlobalFlags struct {
-	Model      string
-	DraftModel string // Optional: path to draft model for speculative decoding
-	Verbose    bool
+	Model          string
+	DraftModel     string // Optional: path to draft model for speculative decoding
+	Verbose        bool
+	Medusa         bool   // Enable Medusa-style speculative decoding
+	MedusaHeadsPath string // Path to Medusa heads weights file (implies --medusa)
 }
 
 // validSubcommands lists the recognized subcommand names.
@@ -53,6 +55,16 @@ func parseArgs(args []string) (string, GlobalFlags, error) {
 		case "--verbose":
 			globals.Verbose = true
 			i++
+		case "--medusa":
+			globals.Medusa = true
+			i++
+		case "--medusa-heads":
+			if i+1 >= len(args) {
+				return "", GlobalFlags{}, fmt.Errorf("--medusa-heads requires a value")
+			}
+			globals.MedusaHeadsPath = args[i+1]
+			globals.Medusa = true
+			i += 2
 		default:
 			// Not a global flag — must be the subcommand
 			goto foundCmd
@@ -201,6 +213,8 @@ Global flags:
   --model        Path to GGUF model file (required for serve/generate/chat)
   --draft-model  Path to draft model for speculative decoding (optional)
   --verbose      Enable verbose logging
+  --medusa       Enable Medusa-style speculative decoding
+  --medusa-heads Path to Medusa heads weights file (implies --medusa)
 
 Examples:
   vexel --model model.gguf serve --port 8080 --grpc-port 9090
