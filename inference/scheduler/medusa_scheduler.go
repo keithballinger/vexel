@@ -173,6 +173,12 @@ func (ms *MedusaScheduler) Stop() {
 	}
 }
 
+// BaseScheduler returns the underlying Scheduler for use with components
+// that require a *Scheduler (e.g., the HTTP server).
+func (ms *MedusaScheduler) BaseScheduler() *Scheduler {
+	return ms.Scheduler
+}
+
 // Run starts the Medusa scheduler's main loop.
 func (ms *MedusaScheduler) Run(ctx context.Context) error {
 	ms.Start(ctx)

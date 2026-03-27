@@ -178,6 +178,21 @@ func runServe(globals GlobalFlags, args []string) error {
 		log.Printf("Using speculative decoding with draft model: %s", globals.DraftModel)
 		baseSched = ss.Scheduler
 		runFunc = ss.Run
+	} else if globals.Medusa {
+		medusaCfg := scheduler.DefaultMedusaConfig()
+		medusaCfg.EnableOnlineTraining = true
+		medusaCfg.UseGPUTraining = true
+		if globals.MedusaHeadsPath != "" {
+			medusaCfg.HeadsPath = globals.MedusaHeadsPath
+		}
+		ms, err := scheduler.NewMedusaScheduler(model, tok, schedConfig, medusaCfg)
+		if err != nil {
+			return fmt.Errorf("create medusa scheduler: %w", err)
+		}
+		log.Printf("Using Medusa speculative decoding (online training=%v, GPU=%v)",
+			medusaCfg.EnableOnlineTraining, medusaCfg.UseGPUTraining)
+		baseSched = ms.BaseScheduler()
+		runFunc = ms.Run
 	} else {
 		sched, err := scheduler.NewScheduler(model, tok, schedConfig)
 		if err != nil {
