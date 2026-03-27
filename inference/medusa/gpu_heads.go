@@ -606,6 +606,43 @@ func (h *GPUHeads) Evaluate(samples []TrainingSample) []float32 {
 	return accuracies
 }
 
+// ToCPUHeads converts GPU heads to CPU Heads format for saving.
+// This reads all weight data from GPU memory back to the host.
+func (g *GPUHeads) ToCPUHeads() *Heads {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	h := &Heads{
+		NumHeads:   g.NumHeads,
+		HiddenSize: g.HiddenSize,
+		VocabSize:  g.VocabSize,
+		heads:      make([]Head, g.NumHeads),
+	}
+
+	hiddenSize := g.HiddenSize
+	vocabSize := g.VocabSize
+
+	for i := range g.heads {
+		head := &g.heads[i]
+
+		// Read FC1 weights from GPU
+		fc1Bytes := make([]byte, hiddenSize*hiddenSize*4)
+		g.backend.ToHost(fc1Bytes, head.FC1)
+
+		// Read FC2 weights from GPU
+		fc2Bytes := make([]byte, hiddenSize*vocabSize*4)
+		g.backend.ToHost(fc2Bytes, head.FC2)
+
+		h.heads[i] = Head{
+			FC1: bytesToFloat32(fc1Bytes),
+			FC2: bytesToFloat32(fc2Bytes),
+		}
+	}
+
+	g.backend.Sync()
+	return h
+}
+
 // MemorySize returns approximate GPU memory usage in bytes.
 func (h *GPUHeads) MemorySize() int64 {
 	perHead := int64(h.HiddenSize*h.HiddenSize + h.HiddenSize*h.VocabSize)

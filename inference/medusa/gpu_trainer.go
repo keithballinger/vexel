@@ -297,8 +297,15 @@ func (t *GPUOnlineTrainer) evaluate() {
 }
 
 // SaveHeads saves the current heads to a file.
-// Note: GPU heads need to be converted to CPU format for saving.
+// GPU weights are converted to CPU format before serialization.
 func (t *GPUOnlineTrainer) SaveHeads(path string) error {
-	// TODO: Implement CPU conversion and save
-	return nil
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	if t.gpuHeads == nil {
+		return fmt.Errorf("gpu heads not initialized")
+	}
+
+	cpuHeads := t.gpuHeads.ToCPUHeads()
+	return cpuHeads.Save(path)
 }
