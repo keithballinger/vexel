@@ -281,6 +281,21 @@ func runGenerate(globals GlobalFlags, args []string) error {
 		baseSched = ss.Scheduler
 		runFunc = ss.Run
 		specSched = ss
+	} else if globals.Medusa {
+		medusaCfg := scheduler.DefaultMedusaConfig()
+		medusaCfg.EnableOnlineTraining = true
+		medusaCfg.UseGPUTraining = true
+		if globals.MedusaHeadsPath != "" {
+			medusaCfg.HeadsPath = globals.MedusaHeadsPath
+		}
+		ms, err := scheduler.NewMedusaScheduler(model, tok, schedConfig, medusaCfg)
+		if err != nil {
+			return fmt.Errorf("create medusa scheduler: %w", err)
+		}
+		log.Printf("Using Medusa speculative decoding (online training=%v, GPU=%v)",
+			medusaCfg.EnableOnlineTraining, medusaCfg.UseGPUTraining)
+		baseSched = ms.BaseScheduler()
+		runFunc = ms.Run
 	} else {
 		sched, err := scheduler.NewScheduler(model, tok, schedConfig)
 		if err != nil {
@@ -335,21 +350,45 @@ func runChat(globals GlobalFlags, args []string) error {
 	}
 	defer gpuBackend.Close()
 
-	sched, err := scheduler.NewScheduler(model, tok, scheduler.Config{
+	schedConfig := scheduler.Config{
 		MaxBatchSize:  1,
 		MaxSequences:  1,
 		MaxTokens:     256,
 		SamplerConfig: sampler.DefaultConfig(),
-	})
-	if err != nil {
-		return fmt.Errorf("create scheduler: %w", err)
+	}
+
+	var sched *scheduler.Scheduler
+	var runFunc func(context.Context) error
+
+	if globals.Medusa {
+		medusaCfg := scheduler.DefaultMedusaConfig()
+		medusaCfg.EnableOnlineTraining = true
+		medusaCfg.UseGPUTraining = true
+		if globals.MedusaHeadsPath != "" {
+			medusaCfg.HeadsPath = globals.MedusaHeadsPath
+		}
+		ms, err := scheduler.NewMedusaScheduler(model, tok, schedConfig, medusaCfg)
+		if err != nil {
+			return fmt.Errorf("create medusa scheduler: %w", err)
+		}
+		log.Printf("Using Medusa speculative decoding (online training=%v, GPU=%v)",
+			medusaCfg.EnableOnlineTraining, medusaCfg.UseGPUTraining)
+		sched = ms.BaseScheduler()
+		runFunc = ms.Run
+	} else {
+		s, err := scheduler.NewScheduler(model, tok, schedConfig)
+		if err != nil {
+			return fmt.Errorf("create scheduler: %w", err)
+		}
+		sched = s
+		runFunc = s.Run
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go func() {
-		if err := sched.Run(ctx); err != nil && err != context.Canceled {
+		if err := runFunc(ctx); err != nil && err != context.Canceled {
 			log.Printf("Scheduler stopped: %v", err)
 		}
 	}()
