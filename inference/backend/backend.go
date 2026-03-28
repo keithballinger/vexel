@@ -407,6 +407,12 @@ type PagedKVOps interface {
 	// tokensInLastBlock: valid tokens in the last logical block
 	SDPAPagedDecode(q, kvPool, blockTable, out tensor.DevicePtr, numBlocks, blockSize, numQHeads, numKVHeads, headDim int, scale float32, tokensInLastBlock int)
 
+	// SDPAPagedDecodeF16 performs paged SDPA with F16 KV cache blocks.
+	// Falls back to F32 path if native F16 paged kernel is unavailable.
+	SDPAPagedDecodeF16(q, kvPool, blockTable, out tensor.DevicePtr,
+		numBlocks, blockSize, numQHeads, numKVHeads, headDim int,
+		scale float32, tokensInLastBlock int)
+
 	// SDPAPagedDecodeBatched performs batched SDPA across multiple sequences.
 	// Each sequence has its own query, block table, and context length.
 	// q: [batchSize, numQHeads, headDim] - queries concatenated per sequence

@@ -2348,6 +2348,15 @@ func (b *Backend) SDPAPagedDecode(q, kvPool, blockTable, out tensor.DevicePtr, n
 		C.float(scale), C.int(tokensInLastBlock))
 }
 
+func (b *Backend) SDPAPagedDecodeF16(q, kvPool, blockTable, out tensor.DevicePtr, numBlocks, blockSize, numQHeads, numKVHeads, headDim int, scale float32, tokensInLastBlock int) {
+	b.profiler.RecordDispatch("SDPAPagedDecodeF16")
+	// Initial implementation: delegate to F32 path.
+	// Native F16 paged kernel will be added when F16 block pool is supported.
+	b.SDPAPagedDecode(q, kvPool, blockTable, out,
+		numBlocks, blockSize, numQHeads, numKVHeads, headDim,
+		scale, tokensInLastBlock)
+}
+
 func (b *Backend) SDPAPagedDecodeBatched(q, kvPool tensor.DevicePtr, blockTables []tensor.DevicePtr, out tensor.DevicePtr, batchSize, maxBlocks, blockSize, numQHeads, numKVHeads, headDim int, scale float32, seqLens []int) {
 	b.profiler.RecordDispatch("SDPAPagedDecodeBatched")
 	stride := uintptr(numQHeads * headDim * 4)
