@@ -19,7 +19,16 @@ func nwgBufferSizes(numQHeads, numTGsPerHead, headDim int) (partialsBytes, count
 }
 
 func nwgNumTGs(kvLen int) int {
-	n := (kvLen + 255) / 256
+	var tile int
+	switch {
+	case kvLen <= 128:
+		tile = 64
+	case kvLen <= 512:
+		tile = 128
+	default:
+		tile = 256
+	}
+	n := (kvLen + tile - 1) / tile
 	if n < 1 {
 		n = 1
 	}
@@ -410,5 +419,147 @@ func TestSDPAFlashDecodeF16NWG_Throughput(t *testing.T) {
 		t.Logf("  V3:  %.1f µs → %.1f µs (%.1f%% increase)", v3Base, v3Max, v3Deg)
 		t.Logf("  NWG: %.1f µs → %.1f µs (%.1f%% increase)", nwgBase, nwgMax, nwgDeg)
 		t.Logf("  NWG improvement: %.1f pp reduction in overhead", v3Deg-nwgDeg)
+	}
+}
+
+// TestNWGAdaptiveTileSize verifies that adaptive tile sizing produces correct
+// results across different context length ranges by comparing NWG against V3.
+func TestNWGAdaptiveTileSize(t *testing.T) {
+	backend, err := NewBackend(0)
+	if err != nil {
+		t.Skipf("Metal backend not available: %v", err)
+	}
+	defer backend.Close()
+
+	if backend.sdpaFlashDecodeF16NWGPipeline == nil {
+		t.Skip("NWG pipeline not available")
+	}
+	if backend.sdpaFlashDecodeF16V3Pipeline == nil {
+		t.Skip("V3 pipeline not available")
+	}
+
+	// Test at different context lengths that exercise each adaptive tile range.
+	testCases := []struct {
+		kvLen int
+		desc  string
+	}{
+		{100, "short-medium (tile=64)"},
+		{128, "boundary 64->128 (tile=64)"},
+		{300, "medium (tile=128)"},
+		{512, "boundary 128->256 (tile=128)"},
+		{1024, "long (tile=256)"},
+	}
+
+	numQHeads := 32
+	numKVHeads := 8
+	headDim := 128
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			kvLen := tc.kvLen
+			kvHeadStride := kvLen * headDim
+
+			// Generate deterministic test data
+			qData := make([]float32, numQHeads*headDim)
+			kData := make([]float32, numKVHeads*kvLen*headDim)
+			vData := make([]float32, numKVHeads*kvLen*headDim)
+
+			for i := range qData {
+				qData[i] = float32(i%17-8) * 0.05
+			}
+			for i := range kData {
+				kData[i] = float32(i%13-6) * 0.05
+			}
+			for i := range vData {
+				vData[i] = float32(i%11-5) * 0.05
+			}
+
+			// Upload F32 data
+			qF32 := backend.Alloc(len(qData) * 4)
+			kF32 := backend.Alloc(len(kData) * 4)
+			vF32 := backend.Alloc(len(vData) * 4)
+			defer backend.Free(qF32)
+			defer backend.Free(kF32)
+			defer backend.Free(vF32)
+
+			backend.ToDevice(qF32, float32ToBytes(qData))
+			backend.ToDevice(kF32, float32ToBytes(kData))
+			backend.ToDevice(vF32, float32ToBytes(vData))
+
+			// Convert to F16
+			qF16 := backend.Alloc(len(qData) * 2)
+			kF16 := backend.Alloc(len(kData) * 2)
+			vF16 := backend.Alloc(len(vData) * 2)
+			outV3F16 := backend.Alloc(numQHeads * headDim * 2)
+			outNWGF16 := backend.Alloc(numQHeads * headDim * 2)
+			defer backend.Free(qF16)
+			defer backend.Free(kF16)
+			defer backend.Free(vF16)
+			defer backend.Free(outV3F16)
+			defer backend.Free(outNWGF16)
+
+			backend.ConvertF32ToF16(qF32, qF16, len(qData))
+			backend.ConvertF32ToF16(kF32, kF16, len(kData))
+			backend.ConvertF32ToF16(vF32, vF16, len(vData))
+			backend.Sync()
+
+			// Run V3 as reference
+			backend.SDPAF16V3(qF16, kF16, vF16, outV3F16, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+			backend.Sync()
+
+			// Run NWG with adaptive tiling
+			numTGs := nwgNumTGs(kvLen)
+			partialsBytes, countersBytes := nwgBufferSizes(numQHeads, numTGs, headDim)
+			partialsBuf := backend.Alloc(partialsBytes)
+			countersBuf := backend.Alloc(countersBytes)
+			defer backend.Free(partialsBuf)
+			defer backend.Free(countersBuf)
+
+			backend.Zero(countersBuf, numQHeads)
+			backend.Sync()
+
+			backend.SDPAF16NWG(qF16, kF16, vF16, outNWGF16, partialsBuf, countersBuf,
+				kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+			backend.Sync()
+
+			// Convert both outputs to F32 for comparison
+			outV3F32 := backend.Alloc(numQHeads * headDim * 4)
+			outNWGF32 := backend.Alloc(numQHeads * headDim * 4)
+			defer backend.Free(outV3F32)
+			defer backend.Free(outNWGF32)
+
+			backend.ConvertF16ToF32(outV3F16, outV3F32, numQHeads*headDim)
+			backend.ConvertF16ToF32(outNWGF16, outNWGF32, numQHeads*headDim)
+			backend.Sync()
+
+			v3Bytes := make([]byte, numQHeads*headDim*4)
+			nwgBytes := make([]byte, numQHeads*headDim*4)
+			backend.ToHost(v3Bytes, outV3F32)
+			backend.ToHost(nwgBytes, outNWGF32)
+			v3Result := bytesToFloat32(v3Bytes)
+			nwgResult := bytesToFloat32(nwgBytes)
+
+			maxDiff := 0.0
+			maxDiffIdx := 0
+			for i := range v3Result {
+				if math.IsNaN(float64(nwgResult[i])) || math.IsInf(float64(nwgResult[i]), 0) {
+					t.Fatalf("NaN/Inf at index %d (head=%d, dim=%d)", i, i/headDim, i%headDim)
+				}
+				diff := math.Abs(float64(v3Result[i] - nwgResult[i]))
+				if diff > maxDiff {
+					maxDiff = diff
+					maxDiffIdx = i
+				}
+			}
+
+			t.Logf("kvLen=%d numTGs=%d: NWG vs V3 max_diff=%.6f at idx=%d", kvLen, numTGs, maxDiff, maxDiffIdx)
+			if maxDiff > 2e-3 {
+				head := maxDiffIdx / headDim
+				dim := maxDiffIdx % headDim
+				t.Fatalf("kvLen=%d: NWG vs V3 diff=%.6f exceeds 2e-3 at head=%d dim=%d (v3=%.6f, nwg=%.6f)",
+					kvLen, maxDiff, head, dim, v3Result[maxDiffIdx], nwgResult[maxDiffIdx])
+			}
+		})
 	}
 }

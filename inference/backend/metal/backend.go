@@ -1995,7 +1995,19 @@ func (b *Backend) SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKV
 	// NWG (multi-threadgroup) kernel: uses multiple TGs per Q head with atomic merge.
 	// V3 with 2 SGs is inefficient at medium contexts, so NWG handles kvLen > 64.
 	if b.sdpaFlashDecodeF16NWGPipeline != nil && headDim%32 == 0 && kvLen > 64 {
-		numTGs := (kvLen + 255) / 256
+		// Adaptive tile sizing for NWG dispatch.
+		// Smaller logical tiles → more TGs → better occupancy at medium contexts.
+		// Larger tiles → fewer TGs → less merge overhead at long contexts.
+		var nwgTile int
+		switch {
+		case kvLen <= 128:
+			nwgTile = 64
+		case kvLen <= 512:
+			nwgTile = 128
+		default:
+			nwgTile = 256
+		}
+		numTGs := (kvLen + nwgTile - 1) / nwgTile
 		if numTGs < 1 {
 			numTGs = 1
 		}
