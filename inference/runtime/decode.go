@@ -438,6 +438,145 @@ func (m *ModelRuntime) DecodeWithPagedKV(tokens []int, seqID int64, pos int) (te
 	return logits, nil
 }
 
+// DecodeWithPagedKVAndHidden is like DecodeWithPagedKV but also returns the post-norm hidden
+// state for the last token. This is used for Medusa speculative decoding where the hidden
+// state is needed to run Medusa heads alongside the main model output.
+func (m *ModelRuntime) DecodeWithPagedKVAndHidden(tokens []int, seqID int64, pos int) (tensor.Tensor, []float32, error) {
+	if len(tokens) == 0 {
+		return tensor.Tensor{}, nil, nil
+	}
+
+	if debugDecode {
+		fmt.Printf("[DECODE-PAGED-HIDDEN] tokens=%v seqID=%d pos=%d\n", tokens, seqID, pos)
+	}
+
+	// Lazily create GPU block pool if backend supports paged KV ops
+	if m.gpuPool == nil {
+		if _, ok := m.backend.(backend.PagedKVOps); ok {
+			blockSize := 16
+			maxSeq := m.config.MaxSeqLen
+			if maxSeq == 0 {
+				maxSeq = 4096
+			}
+			maxBlocksPerLayer := (maxSeq + blockSize - 1) / blockSize
+			m.CreateGPUBlockPool(maxBlocksPerLayer)
+		}
+	}
+	// Ensure GPU pool sequence exists
+	if m.gpuPool != nil && !m.gpuPool.HasSequence(seqID) {
+		m.gpuPool.CreateSequence(seqID)
+	}
+
+	// Reset buffer pool if the backend supports it
+	if pooler, ok := m.backend.(interface{ ResetPool() }); ok {
+		pooler.ResetPool()
+	}
+
+	batchSize := len(tokens)
+	hiddenSize := m.config.HiddenSize
+	vocabSize := m.config.VocabSize
+
+	if m.ctx == nil {
+		return tensor.Tensor{}, nil, fmt.Errorf("inference context not initialized")
+	}
+
+	arena := m.ctx.GetArena(memory.Scratch)
+	if arena == nil {
+		return tensor.Tensor{}, nil, fmt.Errorf("scratch arena not initialized")
+	}
+
+	m.ctx.ResetScratch()
+
+	allocPtr := func(bytes int) (tensor.DevicePtr, error) {
+		return arena.Alloc(bytes)
+	}
+
+	// 1. Copy token IDs to device
+	tokenBytes := int32ToBytes(tokens)
+	tokenPtr, err := allocPtr(len(tokenBytes))
+	if err != nil {
+		return tensor.Tensor{}, nil, err
+	}
+	m.backend.ToDevice(tokenPtr, tokenBytes)
+
+	// 2. Allocate State [Batch, Hidden]
+	statePtr, err := allocPtr(batchSize * hiddenSize * 4)
+	if err != nil {
+		return tensor.Tensor{}, nil, err
+	}
+	state := tensor.NewTensor(tensor.NewShape(batchSize, hiddenSize), m.config.DType, statePtr)
+
+	// 3. Embedding Lookup
+	if !m.Embedding.DevicePtr().IsNil() {
+		m.backend.Embedding(tokenPtr, batchSize, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
+	}
+	m.backend.Sync() // Wait for embedding before layers read state
+
+	// 4. Allocate Scratch for Layers
+	scratchBytes := m.config.ScratchBytes(batchSize)
+	// Add extra space for full KV sequences from cache
+	maxKVLen := pos + batchSize
+	kvHeadDim := m.config.NumKeyValueHeads * (m.config.HiddenSize / m.config.NumAttentionHeads)
+	scratchBytes += int64(maxKVLen * kvHeadDim * 4 * 2) // K and V
+	scratchPtr, err := allocPtr(int(scratchBytes))
+	if err != nil {
+		return tensor.Tensor{}, nil, err
+	}
+	scratch := tensor.NewTensor(tensor.NewShape(int(scratchBytes/4)), m.config.DType, scratchPtr)
+
+	// 5. Layer Loop using ExecuteWithPagedKV
+	for i, layer := range m.layers {
+		state, err = layer.ExecuteWithPagedKV(state, scratch, m.pagedCache, m.gpuPool, seqID, i, pos)
+		if err != nil {
+			return tensor.Tensor{}, nil, fmt.Errorf("layer %d: %w", i, err)
+		}
+	}
+	// Sync after all layers to ensure state is ready for final norm
+	m.backend.Sync()
+
+	// 6. Extract hidden state BEFORE final norm (for Medusa training)
+	// For prefill (batchSize > 1), extract last token's hidden state
+	var lastStatePtr tensor.DevicePtr
+	if batchSize == 1 {
+		lastStatePtr = statePtr
+	} else {
+		lastStatePtr = m.backend.Alloc(hiddenSize * 4)
+		if copier, ok := m.backend.(backend.BufferCopier); ok {
+			srcOffset := (batchSize - 1) * hiddenSize * 4
+			copier.CopyBuffer(statePtr, srcOffset, lastStatePtr, 0, hiddenSize*4)
+		} else {
+			return tensor.Tensor{}, nil, fmt.Errorf("backend doesn't support BufferCopier interface")
+		}
+	}
+
+	// 7. Final Norm (only on last token)
+	m.applyFinalNorm(lastStatePtr, lastStatePtr, 1, hiddenSize)
+
+	// Capture post-norm hidden state for Medusa training
+	m.backend.Sync()
+	hiddenBytes := make([]byte, hiddenSize*4)
+	m.backend.ToHost(hiddenBytes, lastStatePtr)
+	m.backend.Sync()
+	hidden := bytesToFloat32(hiddenBytes)
+
+	// 8. Compute Logits for last token only (M=1)
+	logitsPtr, err := allocPtr(vocabSize * 4)
+	if err != nil {
+		return tensor.Tensor{}, nil, err
+	}
+	logits := tensor.NewTensor(tensor.NewShape(1, vocabSize), m.config.DType, logitsPtr)
+
+	m.outputHeadMatMul(lastStatePtr, logitsPtr, 1, vocabSize, hiddenSize)
+
+	m.backend.Sync()
+
+	if debugDecode {
+		debugLogits(m.backend, logitsPtr, vocabSize)
+	}
+
+	return logits, hidden, nil
+}
+
 // DecodeWithPagedKVBatched processes multiple sequences in a single forward pass.
 // tokens: [batchSize] - one token per sequence
 // seqIDs: [batchSize] - paged KV cache sequence IDs
@@ -1303,6 +1442,136 @@ func (m *ModelRuntime) VerifySpeculativeWithHidden(tokens []int, pos int) (tenso
 
 	// 7. Extract POST-NORM hidden states for training
 	// This matches what lm_head sees, so Medusa heads initialized from lm_head will work correctly
+	m.backend.Sync()
+	hiddenBytes := make([]byte, seqLen*hiddenSize*4)
+	m.backend.ToHost(hiddenBytes, statePtr)
+
+	// Convert to [][]float32
+	hiddenStates := make([][]float32, seqLen)
+	for i := 0; i < seqLen; i++ {
+		start := i * hiddenSize * 4
+		end := start + hiddenSize*4
+		hiddenStates[i] = bytesToFloat32(hiddenBytes[start:end])
+	}
+
+	// 8. Compute Logits for ALL tokens
+	logitsPtr, err := allocPtr(seqLen * vocabSize * 4)
+	if err != nil {
+		return tensor.Tensor{}, nil, err
+	}
+	logits := tensor.NewTensor(tensor.NewShape(seqLen, vocabSize), m.config.DType, logitsPtr)
+
+	// Run output projection for all positions
+	m.outputHeadMatMul(statePtr, logitsPtr, seqLen, vocabSize, hiddenSize)
+
+	m.backend.Sync()
+
+	return logits, hiddenStates, nil
+}
+
+// VerifySpeculativeWithPagedKVAndHidden is like VerifySpeculativeWithHidden but uses the paged
+// KV cache. It runs the model on a sequence of tokens and returns logits for ALL positions
+// plus per-token post-norm hidden states for Medusa head training/inference.
+//
+// tokens: [input_token, draft_token_0, draft_token_1, ..., draft_token_K-1]
+// seqID: paged KV cache sequence ID
+// startPos: starting position in the sequence
+// Returns: logits tensor of shape [len(tokens), vocabSize], per-token hidden states
+func (m *ModelRuntime) VerifySpeculativeWithPagedKVAndHidden(tokens []int, seqID int64, startPos int) (tensor.Tensor, [][]float32, error) {
+	seqLen := len(tokens)
+	if seqLen == 0 {
+		return tensor.Tensor{}, nil, nil
+	}
+
+	if m.pagedCache == nil && m.gpuPool == nil {
+		return tensor.Tensor{}, nil, fmt.Errorf("paged KV cache not initialized")
+	}
+
+	// Lazily create GPU block pool if backend supports paged KV ops
+	if m.gpuPool == nil {
+		if _, ok := m.backend.(backend.PagedKVOps); ok {
+			blockSize := 16
+			maxSeq := m.config.MaxSeqLen
+			if maxSeq == 0 {
+				maxSeq = 4096
+			}
+			maxBlocksPerLayer := (maxSeq + blockSize - 1) / blockSize
+			m.CreateGPUBlockPool(maxBlocksPerLayer)
+		}
+	}
+	// Ensure GPU pool sequence exists
+	if m.gpuPool != nil && !m.gpuPool.HasSequence(seqID) {
+		m.gpuPool.CreateSequence(seqID)
+	}
+
+	// Reset buffer pool if the backend supports it
+	if pooler, ok := m.backend.(interface{ ResetPool() }); ok {
+		pooler.ResetPool()
+	}
+
+	hiddenSize := m.config.HiddenSize
+	vocabSize := m.config.VocabSize
+
+	if m.ctx == nil {
+		return tensor.Tensor{}, nil, fmt.Errorf("inference context not initialized")
+	}
+
+	arena := m.ctx.GetArena(memory.Scratch)
+	if arena == nil {
+		return tensor.Tensor{}, nil, fmt.Errorf("scratch arena not initialized")
+	}
+
+	m.ctx.ResetScratch()
+
+	allocPtr := func(bytes int) (tensor.DevicePtr, error) {
+		return arena.Alloc(bytes)
+	}
+
+	// 1. Copy token IDs to device
+	tokenBytes := int32ToBytes(tokens)
+	tokenPtr, err := allocPtr(len(tokenBytes))
+	if err != nil {
+		return tensor.Tensor{}, nil, err
+	}
+	m.backend.ToDevice(tokenPtr, tokenBytes)
+
+	// 2. Allocate State [seqLen, Hidden]
+	statePtr, err := allocPtr(seqLen * hiddenSize * 4)
+	if err != nil {
+		return tensor.Tensor{}, nil, err
+	}
+	state := tensor.NewTensor(tensor.NewShape(seqLen, hiddenSize), m.config.DType, statePtr)
+
+	// 3. Embedding Lookup
+	if !m.Embedding.DevicePtr().IsNil() {
+		m.backend.Embedding(tokenPtr, seqLen, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
+	}
+
+	// 4. Allocate scratch tensor
+	scratchBytes := m.config.ScratchBytes(seqLen)
+	// Add extra space for full KV sequences from cache
+	maxKVLen := startPos + seqLen
+	kvHeadDim := m.config.NumKeyValueHeads * (m.config.HiddenSize / m.config.NumAttentionHeads)
+	scratchBytes += int64(maxKVLen * kvHeadDim * 4 * 2) // K and V
+	scratchPtr, err := allocPtr(int(scratchBytes))
+	if err != nil {
+		return tensor.Tensor{}, nil, err
+	}
+	scratch := tensor.NewTensor(tensor.NewShape(seqLen, hiddenSize), m.config.DType, scratchPtr)
+
+	// 5. Run through all layers using paged KV cache
+	for i := 0; i < m.config.NumHiddenLayers; i++ {
+		layer := m.layers[i]
+		state, err = layer.ExecuteWithPagedKV(state, scratch, m.pagedCache, m.gpuPool, seqID, i, startPos)
+		if err != nil {
+			return tensor.Tensor{}, nil, err
+		}
+	}
+
+	// 6. Final Norm - apply to all positions
+	m.applyFinalNorm(statePtr, statePtr, seqLen, hiddenSize)
+
+	// 7. Extract POST-NORM hidden states for training
 	m.backend.Sync()
 	hiddenBytes := make([]byte, seqLen*hiddenSize*4)
 	m.backend.ToHost(hiddenBytes, statePtr)
