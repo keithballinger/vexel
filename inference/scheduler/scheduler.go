@@ -322,49 +322,7 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 		if len(decodeSeqs) == 1 {
 			logits, err = s.runtime.DecodeWithPagedKV(tokens, seqIDs[0], positions[0])
 		} else {
-			// Fallback for batches - process one at a time
-			// TODO: batch decode with paged KV
-			for i, seq := range decodeSeqs {
-				singleLogits, singleErr := s.runtime.DecodeWithPagedKV([]int{tokens[i]}, seqIDs[i], positions[i])
-				if singleErr != nil {
-					err = singleErr
-					break
-				}
-				if i == 0 {
-					logits = singleLogits
-				}
-				// Sample immediately for this sequence
-				vocabSize := s.runtime.Config().VocabSize
-				singleLogitsData := s.getLogitsOnCPU(singleLogits, vocabSize)
-				if singleLogitsData != nil {
-					seq.AdvancePosition()
-					if seq.State() == StatePending {
-						seq.SetState(StateDecoding)
-					}
-					tokenID := s.sampler.Sample(singleLogitsData)
-					seq.AddGeneratedToken(tokenID)
-					eosToken := 2
-					if s.tokenizer != nil {
-						eosToken = s.tokenizer.EOS()
-					}
-					if tokenID == eosToken {
-						seq.SetState(StateFinished)
-						seq.Close()
-					} else if s.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= s.config.MaxTokens {
-						seq.SetState(StateFinished)
-						seq.Close()
-					} else {
-						var text string
-						if s.tokenizer != nil {
-							text, _ = s.tokenizer.Decode([]int{tokenID})
-						} else {
-							text = fmt.Sprintf(" %d", tokenID)
-						}
-						seq.PushToken(text)
-					}
-				}
-			}
-			// Fall through
+			logits, err = s.runtime.DecodeWithPagedKVBatched(tokens, seqIDs, positions)
 		}
 	} else {
 		inputs := runtime.NewBatchRuntimeInputsWithPos(tokens, positions, nil)
@@ -386,7 +344,7 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 	// We need to avoid double sampling.
 
 	// Refactor: Only sample here if we didn't sample in loop.
-	alreadySampled := (useGPUCache && len(decodeSeqs) > 1) || (usePagedCache && len(decodeSeqs) > 1)
+	alreadySampled := useGPUCache && len(decodeSeqs) > 1
 
 	if !alreadySampled {
 		// Sample and Decode
