@@ -372,6 +372,10 @@ func (m *ModelRuntime) GetOutputHeadWeightsF32() []float32 {
 			// Q4_0: 18 bytes per 32 elements
 			numBlocks := (numElements + 31) / 32
 			dataSize = numBlocks * 18
+		case tensor.Q8_0:
+			// Q8_0: 34 bytes per 32 elements
+			numBlocks := (numElements + 31) / 32
+			dataSize = numBlocks * 34
 		default:
 			// Unknown quantization, try F32
 			dataSize = numElements * 4
@@ -397,6 +401,8 @@ func (m *ModelRuntime) GetOutputHeadWeightsF32() []float32 {
 			tensorType = gguf.TensorTypeQ5_K
 		case tensor.Q4_0:
 			tensorType = gguf.TensorTypeQ4_0
+		case tensor.Q8_0:
+			tensorType = gguf.TensorTypeQ8_0
 		default:
 			tensorType = gguf.TensorTypeF32
 		}
