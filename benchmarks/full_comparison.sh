@@ -95,31 +95,33 @@ export VEXEL_BIN LLAMA_CLI LLAMA_SERVER LLAMA_SPECULATIVE
 ###############################################################################
 # Run suites
 ###############################################################################
-run_suite() {
-    local suite_name="$1"
-    local suite_script="$SCRIPT_DIR/lib/bench_${suite_name}.sh"
-
-    if [[ ! -f "$suite_script" ]]; then
-        echo "[SKIP] $suite_name — $suite_script not found"
-        return 0
-    fi
-
-    echo "=== Running: $suite_name ==="
-    source "$suite_script"
+if [[ "$SUITE" == "all" || "$SUITE" == "decode" ]]; then
+    echo "=== Running: standard decode ==="
+    source "$SCRIPT_DIR/lib/bench_standard.sh"
+    run_standard_decode
     echo ""
-}
+fi
 
-case "$SUITE" in
-    all)
-        run_suite decode
-        run_suite speculative
-        run_suite context
-        run_suite batched
-        ;;
-    *)
-        run_suite "$SUITE"
-        ;;
-esac
+if [[ "$SUITE" == "all" || "$SUITE" == "speculative" ]]; then
+    echo "=== Running: speculative decode ==="
+    source "$SCRIPT_DIR/lib/bench_speculative.sh"
+    run_speculative
+    echo ""
+fi
+
+if [[ "$SUITE" == "all" || "$SUITE" == "context" ]]; then
+    echo "=== Running: context scaling ==="
+    source "$SCRIPT_DIR/lib/bench_context.sh"
+    run_context_scaling
+    echo ""
+fi
+
+if [[ "$SUITE" == "all" || "$SUITE" == "batched" ]]; then
+    echo "=== Running: batched decode ==="
+    source "$SCRIPT_DIR/lib/bench_batched.sh"
+    run_batched
+    echo ""
+fi
 
 ###############################################################################
 # Generate report
