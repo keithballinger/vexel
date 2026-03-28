@@ -29,7 +29,7 @@ import (
 
 // initModel loads the model from a GGUF file and returns the runtime, tokenizer, and backend.
 // This is shared setup used by serve, generate, and chat subcommands.
-func initModel(modelPath string, maxTokens int, verbose bool) (*runtime.ModelRuntime, *tokenizer.Tokenizer, *metal.Backend, error) {
+func initModel(modelPath string, maxTokens int, verbose, usePaged bool) (*runtime.ModelRuntime, *tokenizer.Tokenizer, *metal.Backend, error) {
 	if modelPath == "" {
 		return nil, nil, nil, fmt.Errorf("--model flag is required")
 	}
@@ -77,7 +77,14 @@ func initModel(modelPath string, maxTokens int, verbose bool) (*runtime.ModelRun
 		gpuBackend.Close()
 		return nil, nil, nil, fmt.Errorf("copy weights: %w", err)
 	}
-	model.CreateGPUKVCache(maxContextLen)
+	if usePaged {
+		blockSize := 16
+		maxBlocks := (maxContextLen + blockSize - 1) / blockSize
+		model.CreatePagedKVCache(maxBlocks)
+		log.Printf("Using paged KV cache (maxBlocks=%d, blockSize=%d, maxContext=%d)", maxBlocks, blockSize, maxContextLen)
+	} else {
+		model.CreateGPUKVCache(maxContextLen)
+	}
 
 	// Initialize GPU scratch allocator for decode-path bump allocation.
 	// Sized for one layer's intermediates at decode (seqLen=1): normOut + Q + K + V + attnOut + gate + up,
@@ -166,7 +173,7 @@ func runServe(globals GlobalFlags, args []string) error {
 		return fmt.Errorf("--draft-model and --medusa are mutually exclusive")
 	}
 
-	model, tok, gpuBackend, err := initModel(globals.Model, sf.MaxTokens, globals.Verbose)
+	model, tok, gpuBackend, err := initModel(globals.Model, sf.MaxTokens, globals.Verbose, true)
 	if err != nil {
 		return err
 	}
@@ -260,7 +267,7 @@ func runGenerate(globals GlobalFlags, args []string) error {
 		return fmt.Errorf("--draft-model and --medusa are mutually exclusive")
 	}
 
-	model, tok, gpuBackend, err := initModel(globals.Model, gf.MaxTokens, globals.Verbose)
+	model, tok, gpuBackend, err := initModel(globals.Model, gf.MaxTokens, globals.Verbose, false)
 	if err != nil {
 		return err
 	}
@@ -352,7 +359,7 @@ func runChat(globals GlobalFlags, args []string) error {
 		return err
 	}
 
-	model, tok, gpuBackend, err := initModel(globals.Model, 256, globals.Verbose)
+	model, tok, gpuBackend, err := initModel(globals.Model, 256, globals.Verbose, false)
 	if err != nil {
 		return err
 	}
