@@ -188,10 +188,14 @@ func runServe(globals GlobalFlags, args []string) error {
 	}
 	defer gpuBackend.Close()
 
+	maxTokens := sf.MaxTokens
+	if globals.Medusa && maxTokens < 700 {
+		maxTokens = 700 // Ensure enough tokens for Medusa warmup (600 samples needed)
+	}
 	schedConfig := scheduler.Config{
 		MaxBatchSize:  sf.MaxBatchSize,
 		MaxSequences:  64,
-		MaxTokens:     sf.MaxTokens,
+		MaxTokens:     maxTokens,
 		SamplerConfig: sampler.DefaultConfig(),
 	}
 
