@@ -52,19 +52,22 @@ benchmark doesn't give enough warmup time.
 
 ### Batched Decode (LLaMA 3.1 8B, server mode)
 
-| Concurrency | Vexel tok/s | llama.cpp tok/s |
-|------------|------------|----------------|
-| 1 | 8.0 | 42.0 |
-| 2 | 8.0 | 59.1 |
-| 4 | 8.0 | 91.8 |
-| 8 | — | 114.1 |
+| Concurrency | Vexel tok/s | llama.cpp tok/s | Vexel vs llama.cpp |
+|------------|------------|----------------|-------------------|
+| 1 | 97.7 | 45.0 | **2.2x** |
+| 2 | 75.9 | 61.6 | **1.2x** |
+| 4 | 151.8 | 97.3 | **1.6x** |
+| 8 | 283.2 | 124.1 | **2.3x** |
 
-Vexel server has a throughput issue at all concurrency levels (~8 tok/s).
-The `/generate` endpoint appears to serialize requests rather than batching.
-This is a known issue to investigate — the batched decode runtime path works
-correctly in tests but the HTTP server layer doesn't leverage it yet.
+After switching to paged KV cache for the serve command, Vexel now scales
+with concurrency. At 8 concurrent clients, Vexel achieves **283 tok/s
+aggregate throughput** vs llama.cpp's 124 tok/s — **2.3x faster**.
 
-llama.cpp server scales well: 42→114 tok/s from 1→8 concurrent requests.
+The paged KV cache gives each sequence its own block table, and the batched
+decode pipeline processes all sequences in a single GPU forward pass.
+
+Note: Vexel run 1 at concurrency=1 shows cold-start overhead (2.5 tok/s);
+subsequent runs show true throughput. llama.cpp numbers are best-of-3.
 
 ---
 
