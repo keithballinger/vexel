@@ -32,7 +32,7 @@ run_speculative() {
     local medusa_pid=$!
 
     # Wait for server
-    for i in $(seq 1 15); do
+    for i in $(seq 1 60); do
         if curl -sf "http://localhost:$medusa_port/health" > /dev/null 2>&1; then
             echo "    Server ready after ${i}s"
             break
