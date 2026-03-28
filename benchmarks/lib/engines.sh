@@ -39,8 +39,8 @@ find_vexel() {
 #   Prints "[missing]" and continues if a binary is not found.
 ###############################################################################
 find_llama() {
-    local binaries=("llama-cli" "llama-server" "llama-speculative")
-    local varnames=("LLAMA_CLI" "LLAMA_SERVER" "LLAMA_SPECULATIVE")
+    local binaries=("llama-completion" "llama-cli" "llama-server" "llama-speculative")
+    local varnames=("LLAMA_COMPLETION" "LLAMA_CLI" "LLAMA_SERVER" "LLAMA_SPECULATIVE")
 
     for i in "${!binaries[@]}"; do
         local bin="${binaries[$i]}"
@@ -75,6 +75,7 @@ setup_engines() {
 
     echo ""
     echo "[engines] VEXEL_BIN          = $VEXEL_BIN"
+    echo "[engines] LLAMA_COMPLETION   = ${LLAMA_COMPLETION:-[missing]}"
     echo "[engines] LLAMA_CLI          = $LLAMA_CLI"
     echo "[engines] LLAMA_SERVER       = $LLAMA_SERVER"
     echo "[engines] LLAMA_SPECULATIVE  = $LLAMA_SPECULATIVE"

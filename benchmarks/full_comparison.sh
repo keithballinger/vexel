@@ -90,7 +90,7 @@ setup_engines
 
 export WARMUP RUNS GEN_TOKENS RESULTS_DIR
 export MODEL_LLAMA_8B MODEL_QWEN_05B MODEL_TINYLLAMA
-export VEXEL_BIN LLAMA_CLI LLAMA_SERVER LLAMA_SPECULATIVE
+export VEXEL_BIN LLAMA_COMPLETION LLAMA_CLI LLAMA_SERVER LLAMA_SPECULATIVE
 
 ###############################################################################
 # Run suites
