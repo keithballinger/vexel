@@ -2312,8 +2312,18 @@ func (b *Backend) SDPAPagedDecode(q, kvPool, blockTable, out tensor.DevicePtr, n
 }
 
 func (b *Backend) SDPAPagedDecodeBatched(q, kvPool tensor.DevicePtr, blockTables []tensor.DevicePtr, out tensor.DevicePtr, batchSize, maxBlocks, blockSize, numQHeads, numKVHeads, headDim int, scale float32, seqLens []int) {
-	// Initial implementation: loop over single-sequence calls
-	panic("SDPAPagedDecodeBatched not yet implemented")
+	b.profiler.RecordDispatch("SDPAPagedDecodeBatched")
+	stride := uintptr(numQHeads * headDim * 4)
+
+	for i := 0; i < batchSize; i++ {
+		seqQ := tensor.DevicePtrOffset(q, uintptr(i)*stride)
+		seqOut := tensor.DevicePtrOffset(out, uintptr(i)*stride)
+		numBlocks := (seqLens[i] + blockSize - 1) / blockSize
+		tokensInLastBlock := seqLens[i] - (numBlocks-1)*blockSize
+
+		b.SDPAPagedDecode(seqQ, kvPool, blockTables[i], seqOut,
+			numBlocks, blockSize, numQHeads, numKVHeads, headDim, scale, tokensInLastBlock)
+	}
 }
 
 // bytesToFloat32Slice reinterprets bytes as a float32 slice.
