@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# full_comparison.sh — Main orchestrator for the Vexel benchmark suite.
+#
+# Usage:
+#   ./benchmarks/full_comparison.sh [all|decode|speculative|context|batched]
+#
+# Compares Vexel against llama.cpp across multiple benchmark dimensions.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+###############################################################################
+# Source libraries
+###############################################################################
+source "$SCRIPT_DIR/lib/models.sh"
+source "$SCRIPT_DIR/lib/engines.sh"
+source "$SCRIPT_DIR/lib/parse.sh"
+
+###############################################################################
+# Defaults
+###############################################################################
+WARMUP=3
+RUNS=5
+GEN_TOKENS=128
+
+SUITE="${1:-all}"
+
+###############################################################################
+# Validate subcommand
+###############################################################################
+case "$SUITE" in
+    all|decode|speculative|context|batched) ;;
+    *)
+        echo "Usage: $0 [all|decode|speculative|context|batched]"
+        echo "  all          Run every benchmark suite (default)"
+        echo "  decode       Single-stream decode throughput"
+        echo "  speculative  Speculative decoding comparison"
+        echo "  context      Context-length scaling"
+        echo "  batched      Batched inference throughput"
+        exit 1
+        ;;
+esac
+
+###############################################################################
+# Results directory (timestamped)
+###############################################################################
+TODAY="$(date +%Y-%m-%d)"
+RESULTS_DIR="$SCRIPT_DIR/results/$TODAY"
+mkdir -p "$RESULTS_DIR"
+
+echo "============================================="
+echo " Vexel Benchmark Suite"
+echo " Suite:   $SUITE"
+echo " Warmup:  $WARMUP runs"
+echo " Runs:    $RUNS measured runs"
+echo " Tokens:  $GEN_TOKENS per generation"
+echo " Results: $RESULTS_DIR"
+echo "============================================="
+echo ""
+
+###############################################################################
+# Hardware info
+###############################################################################
+echo "=== Hardware Info ==="
+HW_INFO="$RESULTS_DIR/hardware.txt"
+{
+    echo "Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "Host: $(hostname)"
+    echo ""
+    echo "CPU: $(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo 'unknown')"
+    echo "CPU Cores (physical): $(sysctl -n hw.physicalcpu 2>/dev/null || echo 'unknown')"
+    echo "CPU Cores (logical):  $(sysctl -n hw.logicalcpu 2>/dev/null || echo 'unknown')"
+    echo "Memory: $(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 )) GB"
+    echo "macOS: $(sw_vers -productVersion 2>/dev/null || echo 'unknown')"
+    echo "Chip:  $(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo 'unknown')"
+    echo ""
+    echo "Metal GPU:"
+    system_profiler SPDisplaysDataType 2>/dev/null | grep -A5 "Chipset Model" || echo "  (unable to query)"
+} > "$HW_INFO"
+cat "$HW_INFO"
+echo ""
+
+###############################################################################
+# Setup
+###############################################################################
+setup_models
+setup_engines
+
+export WARMUP RUNS GEN_TOKENS RESULTS_DIR
+export MODEL_LLAMA_8B MODEL_QWEN_05B MODEL_TINYLLAMA
+export VEXEL_BIN LLAMA_CLI LLAMA_SERVER LLAMA_SPECULATIVE
+
+###############################################################################
+# Run suites
+###############################################################################
+run_suite() {
+    local suite_name="$1"
+    local suite_script="$SCRIPT_DIR/lib/bench_${suite_name}.sh"
+
+    if [[ ! -f "$suite_script" ]]; then
+        echo "[SKIP] $suite_name — $suite_script not found"
+        return 0
+    fi
+
+    echo "=== Running: $suite_name ==="
+    source "$suite_script"
+    echo ""
+}
+
+case "$SUITE" in
+    all)
+        run_suite decode
+        run_suite speculative
+        run_suite context
+        run_suite batched
+        ;;
+    *)
+        run_suite "$SUITE"
+        ;;
+esac
+
+###############################################################################
+# Generate report
+###############################################################################
+echo "=== Generating report ==="
+python3 "$SCRIPT_DIR/lib/report.py" "$RESULTS_DIR"
+
+echo ""
+echo "============================================="
+echo " Benchmark complete. Results in: $RESULTS_DIR"
+echo "============================================="
