@@ -184,17 +184,34 @@ func (ms *MedusaScheduler) Run(ctx context.Context) error {
 	ms.Start(ctx)
 	defer ms.Stop()
 
-	ticker := time.NewTicker(1 * time.Millisecond)
-	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-ticker.C:
-			if err := ms.step(ctx); err != nil {
-				return err
-			}
+		default:
+		}
+
+		if err := ms.step(ctx); err != nil {
+			return err
+		}
+
+		if ms.SequenceCount() > 0 {
+			continue
+		}
+
+		done := make(chan struct{})
+		go func() {
+			ms.cond.L.Lock()
+			ms.cond.Wait()
+			ms.cond.L.Unlock()
+			close(done)
+		}()
+
+		select {
+		case <-ctx.Done():
+			ms.cond.Broadcast()
+			return nil
+		case <-done:
 		}
 	}
 }
