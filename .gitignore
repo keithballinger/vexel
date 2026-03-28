@@ -13,3 +13,6 @@ vexel_old
 benchmarks/.venv/
 benchmarks/models/
 benchmarks/results/
+
+# Memory/cache
+.remember/
