@@ -247,12 +247,18 @@ func (ms *MedusaScheduler) runDecodeStepWithTraining(ctx context.Context, batch 
 	}
 
 	useGPUCache := ms.runtime.GPUKVCache() != nil
+	usePagedCache := ms.runtime.PagedKVCache() != nil
 
 	// Process each sequence - check if any need prefill
 	for _, seq := range batch {
 		if seq.State() == StatePending && len(seq.PromptTokens()) > 0 && !seq.IsPrefillComplete() {
 			if useGPUCache {
 				if err := ms.runGPUPrefill(seq); err != nil {
+					return err
+				}
+				continue
+			} else if usePagedCache {
+				if err := ms.runBatchedPrefill(seq); err != nil {
 					return err
 				}
 				continue
@@ -291,6 +297,10 @@ func (ms *MedusaScheduler) runDecodeStepWithTraining(ctx context.Context, batch 
 			logits, hidden, err = ms.runtime.DecodeWithGPUKVAndHidden([]int{token}, pos)
 		} else if useGPUCache {
 			logits, err = ms.runtime.DecodeWithGPUKV([]int{token}, pos)
+		} else if usePagedCache && ms.trainer != nil {
+			logits, hidden, err = ms.runtime.DecodeWithPagedKVAndHidden([]int{token}, seq.KVSeqID(), pos)
+		} else if usePagedCache {
+			logits, err = ms.runtime.DecodeWithPagedKV([]int{token}, seq.KVSeqID(), pos)
 		} else {
 			inputs := runtime.NewBatchRuntimeInputsWithPos([]int{token}, []int{pos}, nil)
 			logits, err = ms.runtime.DecodeStep(inputs)
@@ -406,11 +416,16 @@ func (ms *MedusaScheduler) runMedusaDecodeStep(ctx context.Context, batch []*Seq
 
 	seq := batch[0]
 	useGPUCache := ms.runtime.GPUKVCache() != nil
+	usePagedCache := ms.runtime.PagedKVCache() != nil
 
 	// Handle prefill first
 	if seq.State() == StatePending && len(seq.PromptTokens()) > 0 && !seq.IsPrefillComplete() {
 		if useGPUCache {
 			if err := ms.runGPUPrefill(seq); err != nil {
+				return err
+			}
+		} else if usePagedCache {
+			if err := ms.runBatchedPrefill(seq); err != nil {
 				return err
 			}
 		}
@@ -457,13 +472,21 @@ func (ms *MedusaScheduler) runMedusaDecodeStep(ctx context.Context, batch []*Seq
 	// Step 3: Run target model on all tokens at once
 	// First, save the current KV cache position for potential rollback
 	cache := ms.runtime.GPUKVCache()
+	pagedCache := ms.runtime.PagedKVCache()
 	startPos := pos
 	if cache != nil {
 		startPos = cache.SeqLen()
 	}
 
 	startTime := time.Now()
-	allLogits, hiddenStates, err := ms.runtime.VerifySpeculativeWithHidden(verifyTokens, startPos)
+	var allLogits tensor.Tensor
+	var hiddenStates [][]float32
+	var err error
+	if usePagedCache {
+		allLogits, hiddenStates, err = ms.runtime.VerifySpeculativeWithPagedKVAndHidden(verifyTokens, seq.KVSeqID(), startPos)
+	} else {
+		allLogits, hiddenStates, err = ms.runtime.VerifySpeculativeWithHidden(verifyTokens, startPos)
+	}
 	verifyTime := time.Since(startTime)
 
 	if err != nil {
@@ -565,9 +588,12 @@ func (ms *MedusaScheduler) runMedusaDecodeStep(ctx context.Context, batch []*Seq
 	// The verification added (1 + numHeads) tokens to cache
 	// We want to keep (1 + numAccepted) tokens (input + accepted drafts)
 	// But actually, we need to rollback to startPos + (1 + numAccepted)
+	newCacheLen := startPos + 1 + numAccepted
 	if cache != nil {
-		newCacheLen := startPos + 1 + numAccepted
 		cache.Truncate(newCacheLen)
+	}
+	if pagedCache != nil && seq.KVSeqID() != 0 {
+		pagedCache.TruncateSequence(seq.KVSeqID(), newCacheLen)
 	}
 
 	// Step 7: Output all accepted tokens + final token
@@ -672,11 +698,16 @@ func (ms *MedusaScheduler) runTreeMedusaDecodeStep(ctx context.Context, batch []
 
 	seq := batch[0]
 	useGPUCache := ms.runtime.GPUKVCache() != nil
+	usePagedCache := ms.runtime.PagedKVCache() != nil
 
 	// Handle prefill first
 	if seq.State() == StatePending && len(seq.PromptTokens()) > 0 && !seq.IsPrefillComplete() {
 		if useGPUCache {
 			if err := ms.runGPUPrefill(seq); err != nil {
+				return err
+			}
+		} else if usePagedCache {
+			if err := ms.runBatchedPrefill(seq); err != nil {
 				return err
 			}
 		}
@@ -725,13 +756,21 @@ func (ms *MedusaScheduler) runTreeMedusaDecodeStep(ctx context.Context, batch []
 
 	// Step 5: Run target model verification
 	cache := ms.runtime.GPUKVCache()
+	pagedCache := ms.runtime.PagedKVCache()
 	startPos := pos
 	if cache != nil {
 		startPos = cache.SeqLen()
 	}
 
 	startTime := time.Now()
-	allLogits, hiddenStates, err := ms.runtime.VerifySpeculativeWithHidden(verifyTokens, startPos)
+	var allLogits tensor.Tensor
+	var hiddenStates [][]float32
+	var err error
+	if usePagedCache {
+		allLogits, hiddenStates, err = ms.runtime.VerifySpeculativeWithPagedKVAndHidden(verifyTokens, seq.KVSeqID(), startPos)
+	} else {
+		allLogits, hiddenStates, err = ms.runtime.VerifySpeculativeWithHidden(verifyTokens, startPos)
+	}
 	verifyTime := time.Since(startTime)
 
 	if err != nil {
@@ -761,9 +800,12 @@ func (ms *MedusaScheduler) runTreeMedusaDecodeStep(ctx context.Context, batch []
 	}
 
 	// Step 8: Truncate KV cache
+	newCacheLen := startPos + 1 + numAccepted
 	if cache != nil {
-		newCacheLen := startPos + 1 + numAccepted
 		cache.Truncate(newCacheLen)
+	}
+	if pagedCache != nil && seq.KVSeqID() != 0 {
+		pagedCache.TruncateSequence(seq.KVSeqID(), newCacheLen)
 	}
 
 	// Step 9: Output accepted tokens + final token
