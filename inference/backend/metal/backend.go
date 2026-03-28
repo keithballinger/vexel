@@ -1992,6 +1992,31 @@ func (b *Backend) MatMulQ4_0_F16(a, bMat, out tensor.DevicePtr, n, k int) {
 func (b *Backend) SDPAF16(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {
 	b.profiler.RecordDispatch("SDPA")
 
+	// Tiled split-K kernel: best for very long contexts (kvLen > 2048).
+	// Splits KV into 64-position tiles for maximum GPU occupancy.
+	if kvLen > 2048 && b.sdpaFlashDecodeF16TiledPipeline != nil && headDim%32 == 0 {
+		tileKV := 64
+		numTiles := (kvLen + tileKV - 1) / tileKV
+		partialsSize := numQHeads * numTiles * (2 + headDim) * 4
+
+		var partialsPtr tensor.DevicePtr
+		fromScratch := false
+		if b.scratch != nil {
+			partialsPtr = b.scratch.Alloc(partialsSize)
+			fromScratch = !partialsPtr.IsNil()
+		}
+		if !fromScratch {
+			partialsPtr = b.Alloc(partialsSize)
+		}
+
+		b.SDPAF16Tiled(q, k, v, out, partialsPtr, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+
+		if !fromScratch {
+			b.Free(partialsPtr)
+		}
+		return
+	}
+
 	// NWG (multi-threadgroup) kernel: uses multiple TGs per Q head with atomic merge.
 	// V3 with 2 SGs is inefficient at medium contexts, so NWG handles kvLen > 64.
 	if b.sdpaFlashDecodeF16NWGPipeline != nil && headDim%32 == 0 && kvLen > 64 {

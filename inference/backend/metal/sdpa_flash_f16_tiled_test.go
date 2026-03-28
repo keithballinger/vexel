@@ -277,6 +277,118 @@ func TestSDPAFlashDecodeF16Tiled_vs_NonTiled(t *testing.T) {
 	}
 }
 
+// TestTiledAutoSelectionAtLongContext verifies that SDPAF16 auto-selects the
+// tiled split-K kernel at kvLen=4096 and produces results matching the V3 reference.
+func TestTiledAutoSelectionAtLongContext(t *testing.T) {
+	b, err := NewBackend(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	if b.sdpaFlashDecodeF16TiledPipeline == nil {
+		t.Skip("Tiled pipeline not available")
+	}
+
+	// At kvLen=4096, SDPAF16 should auto-select tiled kernel
+	// Verify output matches V3 reference within tolerance
+	numQHeads, numKVHeads, headDim := 32, 8, 128
+	kvLen := 4096
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+	kvHeadStride := kvLen * headDim
+
+	// Generate deterministic test data
+	qData := make([]float32, numQHeads*headDim)
+	kData := make([]float32, numKVHeads*kvLen*headDim)
+	vData := make([]float32, numKVHeads*kvLen*headDim)
+
+	for i := range qData {
+		qData[i] = float32(i%17-8) * 0.05
+	}
+	for i := range kData {
+		kData[i] = float32(i%13-6) * 0.05
+	}
+	for i := range vData {
+		vData[i] = float32(i%11-5) * 0.05
+	}
+
+	// Allocate F32 staging buffers
+	qF32 := b.Alloc(len(qData) * 4)
+	kF32 := b.Alloc(len(kData) * 4)
+	vF32 := b.Alloc(len(vData) * 4)
+	defer b.Free(qF32)
+	defer b.Free(kF32)
+	defer b.Free(vF32)
+
+	b.ToDevice(qF32, float32ToBytes(qData))
+	b.ToDevice(kF32, float32ToBytes(kData))
+	b.ToDevice(vF32, float32ToBytes(vData))
+
+	// Convert to F16
+	qF16 := b.Alloc(len(qData) * 2)
+	kF16 := b.Alloc(len(kData) * 2)
+	vF16 := b.Alloc(len(vData) * 2)
+	defer b.Free(qF16)
+	defer b.Free(kF16)
+	defer b.Free(vF16)
+
+	b.ConvertF32ToF16(qF32, qF16, len(qData))
+	b.ConvertF32ToF16(kF32, kF16, len(kData))
+	b.ConvertF32ToF16(vF32, vF16, len(vData))
+	b.Sync()
+
+	// Run SDPAF16 (auto-selects tiled at kvLen=4096)
+	outAuto := b.Alloc(numQHeads * headDim * 2)
+	defer b.Free(outAuto)
+	b.SDPAF16(qF16, kF16, vF16, outAuto, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+	b.Sync()
+
+	// Run V3 as reference
+	outV3 := b.Alloc(numQHeads * headDim * 2)
+	defer b.Free(outV3)
+	b.SDPAF16V3(qF16, kF16, vF16, outV3, kvLen, numQHeads, numKVHeads, headDim, scale, kvHeadStride)
+	b.Sync()
+
+	// Convert both to F32 for comparison
+	autoF32 := b.Alloc(numQHeads * headDim * 4)
+	v3F32 := b.Alloc(numQHeads * headDim * 4)
+	defer b.Free(autoF32)
+	defer b.Free(v3F32)
+
+	b.ConvertF16ToF32(outAuto, autoF32, numQHeads*headDim)
+	b.ConvertF16ToF32(outV3, v3F32, numQHeads*headDim)
+	b.Sync()
+
+	autoBytes := make([]byte, numQHeads*headDim*4)
+	v3Bytes := make([]byte, numQHeads*headDim*4)
+	b.ToHost(autoBytes, autoF32)
+	b.ToHost(v3Bytes, v3F32)
+	autoResult := bytesToFloat32(autoBytes)
+	v3Result := bytesToFloat32(v3Bytes)
+
+	maxDiff := 0.0
+	maxDiffIdx := 0
+	for i := range autoResult {
+		if math.IsNaN(float64(autoResult[i])) || math.IsInf(float64(autoResult[i]), 0) {
+			t.Fatalf("NaN/Inf at index %d (head=%d, dim=%d)", i, i/headDim, i%headDim)
+		}
+		diff := math.Abs(float64(autoResult[i] - v3Result[i]))
+		if diff > maxDiff {
+			maxDiff = diff
+			maxDiffIdx = i
+		}
+	}
+
+	tol := 5e-3
+	t.Logf("kvLen=%d: auto(tiled) vs V3 max_diff=%.6f (tol=%.4f)", kvLen, maxDiff, tol)
+	if maxDiff > tol {
+		head := maxDiffIdx / headDim
+		dim := maxDiffIdx % headDim
+		t.Fatalf("Mismatch: diff=%.6f > tol=%.4f at head=%d dim=%d (auto=%.6f, v3=%.6f)",
+			maxDiff, tol, head, dim, autoResult[maxDiffIdx], v3Result[maxDiffIdx])
+	}
+}
+
 // TestSDPAFlashDecodeF16Tiled_Throughput benchmarks the tiled kernel vs non-tiled
 // at various context lengths to measure the occupancy improvement.
 func TestSDPAFlashDecodeF16Tiled_Throughput(t *testing.T) {
