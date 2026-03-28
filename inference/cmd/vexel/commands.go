@@ -179,12 +179,9 @@ func runServe(globals GlobalFlags, args []string) error {
 		return fmt.Errorf("--draft-model and --medusa are mutually exclusive")
 	}
 
-	// Medusa and draft-model speculation require GPU KV cache for hidden state capture.
-	// Paged KV (multi-client batching) is used only in standard mode.
-	usePaged := !globals.Medusa && globals.DraftModel == ""
-	if globals.Medusa {
-		log.Printf("Note: Medusa mode uses GPU KV cache (single-sequence). Multi-client batching requires non-Medusa mode.")
-	}
+	// Draft-model speculation still requires GPU KV cache (VerifySpeculativeWithHidden uses it).
+	// Medusa and standard modes use paged KV for multi-client batching.
+	usePaged := globals.DraftModel == ""
 	model, tok, gpuBackend, err := initModel(globals.Model, sf.MaxTokens, globals.ContextLen, globals.Verbose, usePaged)
 	if err != nil {
 		return err
