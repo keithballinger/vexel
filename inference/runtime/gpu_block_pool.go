@@ -273,6 +273,58 @@ func (g *GPUBlockPool) Attention(layerIdx int, seqID int64,
 	return nil
 }
 
+// AttentionBatched performs batched SDPA across multiple sequences using paged KV.
+func (g *GPUBlockPool) AttentionBatched(
+	layerIdx int,
+	seqIDs []int64,
+	qPtr, outPtr tensor.DevicePtr,
+	numQHeads, headDim int,
+	scale float32,
+) error {
+	batchSize := len(seqIDs)
+	blockTables := make([]tensor.DevicePtr, batchSize)
+	seqLens := make([]int, batchSize)
+	maxBlocks := 0
+
+	g.mu.Lock()
+	for i, seqID := range seqIDs {
+		seq, ok := g.seqs[seqID]
+		if !ok {
+			g.mu.Unlock()
+			return fmt.Errorf("sequence %d not found in GPU block pool", seqID)
+		}
+
+		bt := seq.blockTables[layerIdx]
+		numBlocks := len(bt)
+		if numBlocks == 0 {
+			g.mu.Unlock()
+			return fmt.Errorf("no blocks for seq %d layer %d", seqID, layerIdx)
+		}
+
+		// Sync block table to GPU if dirty
+		if seq.btDirty[layerIdx] || seq.btGPU[layerIdx].IsNil() {
+			if !seq.btGPU[layerIdx].IsNil() {
+				g.be.Free(seq.btGPU[layerIdx])
+			}
+			seq.btGPU[layerIdx] = g.be.Alloc(numBlocks * 4)
+			g.be.ToDevice(seq.btGPU[layerIdx], gpuInt32ToBytes(bt))
+			seq.btDirty[layerIdx] = false
+		}
+
+		blockTables[i] = seq.btGPU[layerIdx]
+		seqLens[i] = seq.seqLen
+		if numBlocks > maxBlocks {
+			maxBlocks = numBlocks
+		}
+	}
+	g.mu.Unlock()
+
+	g.pagedOps.SDPAPagedDecodeBatched(qPtr, g.pools[layerIdx], blockTables, outPtr,
+		batchSize, maxBlocks, g.blockSize, numQHeads, g.numKVHeads, headDim, scale, seqLens)
+
+	return nil
+}
+
 // ShareBlocks shares the first numBlocks logical blocks from srcSeq to dstSeq
 // across all layers. The shared physical blocks have their ref count incremented.
 // This is used for prefix caching: when a new sequence shares a prefix with
