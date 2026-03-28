@@ -98,12 +98,12 @@ func DefaultOnlineConfig() OnlineConfig {
 	return OnlineConfig{
 		NumHeads:       4,
 		BufferCapacity: 50000,   // 50K samples
-		WarmupSamples:  5000,    // Start training after 5K samples
+		WarmupSamples:  500,     // Start training after 500 samples
 		MinAccuracy:    0.3,     // 30% top-1 accuracy to go hot
 		BatchSize:      64,      // Train on 64 samples at a time
 		LearningRate:   0.001,   // Conservative learning rate
 		TrainInterval:  100 * time.Millisecond,
-		EvalInterval:   5 * time.Second,
+		EvalInterval:   1 * time.Second,
 	}
 }
 

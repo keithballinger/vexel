@@ -224,7 +224,7 @@ func (t *GPUOnlineTrainer) trainingLoop(ctx context.Context) {
 			// 1. At least 20 training steps
 			// 2. Loss has decreased below initial random loss (~10.4 for 32k vocab)
 			//    Use 10.2 threshold - slightly below random to verify learning started
-			minStepsForHot := int64(20)
+			minStepsForHot := int64(10)
 			maxLossForHot := float32(10.2) // Just below random 10.4
 
 			if phase == PhaseWarming && steps >= minStepsForHot {
