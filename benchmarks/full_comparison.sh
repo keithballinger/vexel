@@ -8,15 +8,15 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+BENCH_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$BENCH_ROOT/.." && pwd)"
 
 ###############################################################################
 # Source libraries
 ###############################################################################
-source "$SCRIPT_DIR/lib/models.sh"
-source "$SCRIPT_DIR/lib/engines.sh"
-source "$SCRIPT_DIR/lib/parse.sh"
+source "$BENCH_ROOT/lib/models.sh"
+source "$BENCH_ROOT/lib/engines.sh"
+source "$BENCH_ROOT/lib/parse.sh"
 
 ###############################################################################
 # Defaults
@@ -47,7 +47,7 @@ esac
 # Results directory (timestamped)
 ###############################################################################
 TODAY="$(date +%Y-%m-%d)"
-RESULTS_DIR="$SCRIPT_DIR/results/$TODAY"
+RESULTS_DIR="$BENCH_ROOT/results/$TODAY"
 mkdir -p "$RESULTS_DIR"
 
 echo "============================================="
@@ -97,28 +97,28 @@ export VEXEL_BIN LLAMA_CLI LLAMA_SERVER LLAMA_SPECULATIVE
 ###############################################################################
 if [[ "$SUITE" == "all" || "$SUITE" == "decode" ]]; then
     echo "=== Running: standard decode ==="
-    source "$SCRIPT_DIR/lib/bench_standard.sh"
+    source "$BENCH_ROOT/lib/bench_standard.sh"
     run_standard_decode
     echo ""
 fi
 
 if [[ "$SUITE" == "all" || "$SUITE" == "speculative" ]]; then
     echo "=== Running: speculative decode ==="
-    source "$SCRIPT_DIR/lib/bench_speculative.sh"
+    source "$BENCH_ROOT/lib/bench_speculative.sh"
     run_speculative
     echo ""
 fi
 
 if [[ "$SUITE" == "all" || "$SUITE" == "context" ]]; then
     echo "=== Running: context scaling ==="
-    source "$SCRIPT_DIR/lib/bench_context.sh"
+    source "$BENCH_ROOT/lib/bench_context.sh"
     run_context_scaling
     echo ""
 fi
 
 if [[ "$SUITE" == "all" || "$SUITE" == "batched" ]]; then
     echo "=== Running: batched decode ==="
-    source "$SCRIPT_DIR/lib/bench_batched.sh"
+    source "$BENCH_ROOT/lib/bench_batched.sh"
     run_batched
     echo ""
 fi
@@ -127,7 +127,7 @@ fi
 # Generate report
 ###############################################################################
 echo "=== Generating report ==="
-python3 "$SCRIPT_DIR/lib/report.py" "$RESULTS_DIR"
+python3 "$BENCH_ROOT/lib/report.py" "$RESULTS_DIR"
 
 echo ""
 echo "============================================="

@@ -45,7 +45,7 @@ run_vexel_generate() {
     local output
     output=$("$VEXEL_BIN" --model "$model" --verbose generate \
         --prompt "$prompt" --max-tokens "$max_tokens" \
-        "${extra_flags[@]}" 2>&1) || true
+        ${extra_flags[@]+"${extra_flags[@]}"} 2>&1) || true
 
     local decode_tok_s prefill_tok_s
     # Parse: [N tokens | prefill: X.X tok/s | decode: Y.Y tok/s]
@@ -70,7 +70,7 @@ run_vexel_medusa() {
     local output
     output=$("$VEXEL_BIN" --model "$model" --verbose --medusa generate \
         --prompt "$prompt" --max-tokens "$max_tokens" \
-        "${extra_flags[@]}" 2>&1) || true
+        ${extra_flags[@]+"${extra_flags[@]}"} 2>&1) || true
 
     local decode_tok_s prefill_tok_s acceptance_pct speedup
     decode_tok_s=$(echo "$output" | grep -oE 'decode: [0-9]+\.?[0-9]* tok/s' | grep -oE '[0-9]+\.?[0-9]*' | head -1)
@@ -98,7 +98,7 @@ run_vexel_draft() {
     local output
     output=$("$VEXEL_BIN" --model "$model" --draft-model "$draft_model" --verbose generate \
         --prompt "$prompt" --max-tokens "$max_tokens" \
-        "${extra_flags[@]}" 2>&1) || true
+        ${extra_flags[@]+"${extra_flags[@]}"} 2>&1) || true
 
     local decode_tok_s prefill_tok_s acceptance_pct speedup
     decode_tok_s=$(echo "$output" | grep -oE 'decode: [0-9]+\.?[0-9]* tok/s' | grep -oE '[0-9]+\.?[0-9]*' | head -1)
@@ -127,16 +127,20 @@ run_llama_generate() {
         return 0
     fi
 
-    local output
-    output=$("$LLAMA_CLI" -m "$model" -p "$prompt" -n "$max_tokens" \
-        --no-display-prompt "${extra_flags[@]}" 2>&1) || true
+    # Use temp file to avoid bash xrealloc issues with binary/unicode model output
+    local tmpfile
+    tmpfile=$(mktemp)
+    trap "rm -f '$tmpfile'" RETURN
+
+    "$LLAMA_CLI" -m "$model" -p "$prompt" -n "$max_tokens" \
+        --no-display-prompt ${extra_flags[@]+"${extra_flags[@]}"} > "$tmpfile" 2>&1 || true
 
     local decode_tok_s prefill_tok_s
     # Parse: eval time = ... tokens per second)
-    decode_tok_s=$(echo "$output" | grep 'eval time' | grep -v 'prompt eval' | \
+    decode_tok_s=$(grep 'eval time' "$tmpfile" | grep -v 'prompt eval' | \
         grep -oE '[0-9]+\.?[0-9]* tokens per second' | grep -oE '[0-9]+\.?[0-9]*' | head -1)
     # Parse: prompt eval time = ... tokens per second)
-    prefill_tok_s=$(echo "$output" | grep 'prompt eval time' | \
+    prefill_tok_s=$(grep 'prompt eval time' "$tmpfile" | \
         grep -oE '[0-9]+\.?[0-9]* tokens per second' | grep -oE '[0-9]+\.?[0-9]*' | head -1)
 
     echo "${decode_tok_s:-0} ${prefill_tok_s:-0}"
@@ -161,18 +165,22 @@ run_llama_speculative() {
         return 0
     fi
 
-    local output
-    output=$("$LLAMA_SPECULATIVE" -m "$model" -md "$draft_model" \
+    # Use temp file to avoid bash xrealloc issues with binary/unicode model output
+    local tmpfile
+    tmpfile=$(mktemp)
+    trap "rm -f '$tmpfile'" RETURN
+
+    "$LLAMA_SPECULATIVE" -m "$model" -md "$draft_model" \
         -p "$prompt" -n "$max_tokens" \
-        --no-display-prompt "${extra_flags[@]}" 2>&1) || true
+        --no-display-prompt ${extra_flags[@]+"${extra_flags[@]}"} > "$tmpfile" 2>&1 || true
 
     local decode_tok_s prefill_tok_s acceptance_pct
-    decode_tok_s=$(echo "$output" | grep 'eval time' | grep -v 'prompt eval' | \
+    decode_tok_s=$(grep 'eval time' "$tmpfile" | grep -v 'prompt eval' | \
         grep -oE '[0-9]+\.?[0-9]* tokens per second' | grep -oE '[0-9]+\.?[0-9]*' | head -1)
-    prefill_tok_s=$(echo "$output" | grep 'prompt eval time' | \
+    prefill_tok_s=$(grep 'prompt eval time' "$tmpfile" | \
         grep -oE '[0-9]+\.?[0-9]* tokens per second' | grep -oE '[0-9]+\.?[0-9]*' | head -1)
     # Parse: speculative: accept rate: 0.456
-    acceptance_pct=$(echo "$output" | grep -oE 'accept rate: [0-9]+\.?[0-9]*' | grep -oE '[0-9]+\.?[0-9]*' | head -1)
+    acceptance_pct=$(grep -oE 'accept rate: [0-9]+\.?[0-9]*' "$tmpfile" | grep -oE '[0-9]+\.?[0-9]*' | head -1)
     # Convert from 0-1 fraction to percentage if present
     if [[ -n "$acceptance_pct" ]]; then
         acceptance_pct=$(awk "BEGIN {printf \"%.1f\", $acceptance_pct * 100}")

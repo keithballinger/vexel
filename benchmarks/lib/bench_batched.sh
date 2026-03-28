@@ -172,5 +172,6 @@ run_batched() {
     echo "Batched decode results: $outfile"
 }
 
-# Run the benchmark
-run_batched
+# When sourced by full_comparison.sh, the caller invokes run_batched.
+# When run standalone: uncomment the line below.
+# run_batched

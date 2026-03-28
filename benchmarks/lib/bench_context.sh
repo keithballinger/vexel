@@ -65,5 +65,6 @@ run_context_scaling() {
     echo "Context scaling results: $outfile"
 }
 
-# Run the benchmark
-run_context_scaling
+# When sourced by full_comparison.sh, the caller invokes run_context_scaling.
+# When run standalone: uncomment the line below.
+# run_context_scaling

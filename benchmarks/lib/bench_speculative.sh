@@ -94,5 +94,6 @@ run_speculative() {
     echo "Speculative decode results: $outfile"
 }
 
-# Run the benchmark
-run_speculative
+# When sourced by full_comparison.sh, the caller invokes run_speculative.
+# When run standalone: uncomment the line below.
+# run_speculative

@@ -19,14 +19,13 @@ run_standard_decode() {
     local prompt
     prompt=$(generate_prompt 64)
 
-    # Model name mapping: path -> short name
-    declare -A model_names=(
-        ["$MODEL_QWEN_05B"]="qwen-0.5b"
-        ["$MODEL_LLAMA_8B"]="llama-8b"
-    )
+    # Model paths and short names (parallel arrays)
+    local model_paths=("$MODEL_QWEN_05B" "$MODEL_LLAMA_8B")
+    local model_short_names=("qwen-0.5b" "llama-8b")
 
-    for model_path in "$MODEL_QWEN_05B" "$MODEL_LLAMA_8B"; do
-        local model_name="${model_names[$model_path]}"
+    for idx in "${!model_paths[@]}"; do
+        local model_path="${model_paths[$idx]}"
+        local model_name="${model_short_names[$idx]}"
 
         echo "--- Standard decode: $model_name ---"
 
@@ -76,5 +75,6 @@ run_standard_decode() {
     echo "Standard decode results: $outfile"
 }
 
-# Run the benchmark
-run_standard_decode
+# When sourced by full_comparison.sh, the caller invokes run_standard_decode.
+# When run standalone: uncomment the line below.
+# run_standard_decode
