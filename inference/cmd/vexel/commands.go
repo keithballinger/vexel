@@ -29,7 +29,7 @@ import (
 
 // initModel loads the model from a GGUF file and returns the runtime, tokenizer, and backend.
 // This is shared setup used by serve, generate, and chat subcommands.
-func initModel(modelPath string, maxTokens int, verbose, usePaged bool) (*runtime.ModelRuntime, *tokenizer.Tokenizer, *metal.Backend, error) {
+func initModel(modelPath string, maxTokens, contextLen int, verbose, usePaged bool) (*runtime.ModelRuntime, *tokenizer.Tokenizer, *metal.Backend, error) {
 	if modelPath == "" {
 		return nil, nil, nil, fmt.Errorf("--model flag is required")
 	}
@@ -50,7 +50,10 @@ func initModel(modelPath string, maxTokens int, verbose, usePaged bool) (*runtim
 	// During prefill, batchSize = prompt length, which can be up to maxContextLen.
 	// During decode, batchSize = 1 (or small batch for concurrent requests).
 	// Use the KV cache context length as the upper bound for prefill.
-	maxContextLen := 2048 // matches CreateGPUKVCache below
+	maxContextLen := contextLen
+	if maxContextLen <= 0 {
+		maxContextLen = 2048
+	}
 	maxBatchSize := maxContextLen
 	if maxTokens > maxBatchSize {
 		maxBatchSize = maxTokens
@@ -108,7 +111,7 @@ func initModel(modelPath string, maxTokens int, verbose, usePaged bool) (*runtim
 
 // loadDraftModel loads a separate draft model for speculative decoding.
 // It shares the same GPU backend as the target model for efficient memory use.
-func loadDraftModel(draftPath string, gpuBackend *metal.Backend, maxTokens int, verbose bool) (*runtime.ModelRuntime, error) {
+func loadDraftModel(draftPath string, gpuBackend *metal.Backend, maxTokens, contextLen int, verbose bool) (*runtime.ModelRuntime, error) {
 	gf, err := gguf.Open(draftPath)
 	if err != nil {
 		return nil, fmt.Errorf("open draft GGUF: %w", err)
@@ -116,7 +119,10 @@ func loadDraftModel(draftPath string, gpuBackend *metal.Backend, maxTokens int, 
 	draftCfg := runtime.ModelConfigFromGGUF(gf.GetModelConfig())
 	gf.Close()
 
-	maxContextLen := 2048
+	maxContextLen := contextLen
+	if maxContextLen <= 0 {
+		maxContextLen = 2048
+	}
 	maxBatchSize := maxContextLen
 	if maxTokens > maxBatchSize {
 		maxBatchSize = maxTokens
@@ -140,7 +146,7 @@ func loadDraftModel(draftPath string, gpuBackend *metal.Backend, maxTokens int, 
 	if err := draft.CopyWeightsToDevice(); err != nil {
 		return nil, fmt.Errorf("copy draft weights: %w", err)
 	}
-	draft.CreateGPUKVCache(2048)
+	draft.CreateGPUKVCache(maxContextLen)
 
 	return draft, nil
 }
@@ -173,7 +179,7 @@ func runServe(globals GlobalFlags, args []string) error {
 		return fmt.Errorf("--draft-model and --medusa are mutually exclusive")
 	}
 
-	model, tok, gpuBackend, err := initModel(globals.Model, sf.MaxTokens, globals.Verbose, true)
+	model, tok, gpuBackend, err := initModel(globals.Model, sf.MaxTokens, globals.ContextLen, globals.Verbose, true)
 	if err != nil {
 		return err
 	}
@@ -194,7 +200,7 @@ func runServe(globals GlobalFlags, args []string) error {
 
 	// Use speculative scheduling if a draft model is provided
 	if globals.DraftModel != "" {
-		draft, err := loadDraftModel(globals.DraftModel, gpuBackend, sf.MaxTokens, globals.Verbose)
+		draft, err := loadDraftModel(globals.DraftModel, gpuBackend, sf.MaxTokens, globals.ContextLen, globals.Verbose)
 		if err != nil {
 			return fmt.Errorf("load draft model: %w", err)
 		}
@@ -267,7 +273,7 @@ func runGenerate(globals GlobalFlags, args []string) error {
 		return fmt.Errorf("--draft-model and --medusa are mutually exclusive")
 	}
 
-	model, tok, gpuBackend, err := initModel(globals.Model, gf.MaxTokens, globals.Verbose, false)
+	model, tok, gpuBackend, err := initModel(globals.Model, gf.MaxTokens, globals.ContextLen, globals.Verbose, false)
 	if err != nil {
 		return err
 	}
@@ -291,7 +297,7 @@ func runGenerate(globals GlobalFlags, args []string) error {
 	var specSched *scheduler.SpeculativeScheduler
 
 	if globals.DraftModel != "" {
-		draft, err := loadDraftModel(globals.DraftModel, gpuBackend, gf.MaxTokens, globals.Verbose)
+		draft, err := loadDraftModel(globals.DraftModel, gpuBackend, gf.MaxTokens, globals.ContextLen, globals.Verbose)
 		if err != nil {
 			return fmt.Errorf("load draft model: %w", err)
 		}
@@ -359,7 +365,7 @@ func runChat(globals GlobalFlags, args []string) error {
 		return err
 	}
 
-	model, tok, gpuBackend, err := initModel(globals.Model, 256, globals.Verbose, false)
+	model, tok, gpuBackend, err := initModel(globals.Model, 256, globals.ContextLen, globals.Verbose, false)
 	if err != nil {
 		return err
 	}

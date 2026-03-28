@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strconv"
 )
 
 // GlobalFlags holds flags shared across all subcommands.
@@ -11,8 +12,9 @@ type GlobalFlags struct {
 	Model          string
 	DraftModel     string // Optional: path to draft model for speculative decoding
 	Verbose        bool
-	Medusa         bool   // Enable Medusa-style speculative decoding
+	Medusa          bool   // Enable Medusa-style speculative decoding
 	MedusaHeadsPath string // Path to Medusa heads weights file (implies --medusa)
+	ContextLen      int    // Maximum context length for KV cache (0 = default 2048)
 }
 
 // validSubcommands lists the recognized subcommand names.
@@ -64,6 +66,16 @@ func parseArgs(args []string) (string, GlobalFlags, error) {
 			}
 			globals.MedusaHeadsPath = args[i+1]
 			globals.Medusa = true
+			i += 2
+		case "--context-len":
+			if i+1 >= len(args) {
+				return "", GlobalFlags{}, fmt.Errorf("--context-len requires a value")
+			}
+			v, err := strconv.Atoi(args[i+1])
+			if err != nil {
+				return "", GlobalFlags{}, fmt.Errorf("--context-len requires an integer value: %w", err)
+			}
+			globals.ContextLen = v
 			i += 2
 		default:
 			// Not a global flag — must be the subcommand
@@ -215,6 +227,7 @@ Global flags:
   --verbose      Enable verbose logging
   --medusa       Enable Medusa-style speculative decoding
   --medusa-heads Path to Medusa heads weights file (implies --medusa)
+  --context-len  Maximum context length for KV cache (default 2048)
 
 Examples:
   vexel --model model.gguf serve --port 8080 --grpc-port 9090

@@ -46,6 +46,47 @@ func TestParseMedusaHeadsMissingValue(t *testing.T) {
 	}
 }
 
+func TestParseContextLenFlag(t *testing.T) {
+	args := []string{"vexel", "--model", "model.gguf", "--context-len", "4096", "generate"}
+	cmd, globals, err := parseArgs(args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd != "generate" {
+		t.Errorf("expected subcommand %q, got %q", "generate", cmd)
+	}
+	if globals.ContextLen != 4096 {
+		t.Errorf("expected ContextLen 4096, got %d", globals.ContextLen)
+	}
+}
+
+func TestParseContextLenDefault(t *testing.T) {
+	args := []string{"vexel", "--model", "model.gguf", "serve"}
+	_, globals, err := parseArgs(args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if globals.ContextLen != 0 {
+		t.Errorf("expected ContextLen 0 (default), got %d", globals.ContextLen)
+	}
+}
+
+func TestParseContextLenMissingValue(t *testing.T) {
+	args := []string{"vexel", "--context-len"}
+	_, _, err := parseArgs(args)
+	if err == nil {
+		t.Fatal("expected error for --context-len without value")
+	}
+}
+
+func TestParseContextLenInvalidValue(t *testing.T) {
+	args := []string{"vexel", "--context-len", "abc", "generate"}
+	_, _, err := parseArgs(args)
+	if err == nil {
+		t.Fatal("expected error for --context-len with non-integer value")
+	}
+}
+
 func TestParseMedusaWithOtherFlags(t *testing.T) {
 	args := []string{"vexel", "--verbose", "--model", "m.gguf", "--medusa", "--medusa-heads", "heads.bin", "chat"}
 	cmd, globals, err := parseArgs(args)
