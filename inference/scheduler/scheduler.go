@@ -333,17 +333,9 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 		return err
 	}
 
-	// For batched GPU/Paged paths, sampling is already done above.
-	// We only need to sample here if we took the single-sequence path OR the BatchRuntimeInputs path.
-	// But wait, the single-sequence GPU path (len=1) falls through here and needs sampling.
-	// The multi-sequence GPU path (loop) did sampling inside loop.
-	// This structure is messy.
-	// Let's rely on `logits` being set. If `logits` is set, we sample.
-	// But in loop cases, `logits` is set to first result?
-	// And we already sampled.
-	// We need to avoid double sampling.
-
-	// Refactor: Only sample here if we didn't sample in loop.
+	// The multi-sequence GPU KV cache path does inline sampling above.
+	// All other paths (single-seq GPU, paged, BatchRuntimeInputs) produce
+	// logits that need sampling here.
 	alreadySampled := useGPUCache && len(decodeSeqs) > 1
 
 	if !alreadySampled {
