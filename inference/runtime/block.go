@@ -998,6 +998,44 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 	return x, nil
 }
 
+// ExecuteWithPagedKVBatched executes a transformer block for multiple sequences.
+// x: [batchSize, hiddenSize] — one hidden state per sequence (decode mode, seqLen=1 each).
+// Each sequence is independently processed through the full block (attention + MLP).
+// Initial implementation: sequential per-sequence for correctness.
+func (b *BlockRuntime) ExecuteWithPagedKVBatched(
+	x, scratch tensor.Tensor,
+	pagedCache *kv.PagedKVCache,
+	gpuPool *GPUBlockPool,
+	seqIDs []int64,
+	layerIdx int,
+	positions []int,
+) (tensor.Tensor, error) {
+	batchSize := len(seqIDs)
+	hiddenSize := b.HiddenSize
+
+	if batchSize == 0 {
+		return x, nil
+	}
+
+	// Process each sequence through the block.
+	// Each sequence's hidden state is a [1, hiddenSize] slice of x [batchSize, hiddenSize].
+	// ExecuteWithPagedKV updates x in-place (residual additions write back to xPtr),
+	// so we create sub-tensors pointing into the batch tensor and each call modifies
+	// its own slice. No separate output concatenation needed.
+	for i := range seqIDs {
+		offset := uintptr(i * hiddenSize * 4) // float32 = 4 bytes
+		seqPtr := tensor.DevicePtrOffset(x.DevicePtr(), offset)
+		seqX := tensor.NewTensor(tensor.NewShape(1, hiddenSize), x.DType(), seqPtr)
+
+		_, err := b.ExecuteWithPagedKV(seqX, scratch, pagedCache, gpuPool, seqIDs[i], layerIdx, positions[i])
+		if err != nil {
+			return tensor.Tensor{}, fmt.Errorf("batch seq %d (seqID=%d): %w", i, seqIDs[i], err)
+		}
+	}
+
+	return x, nil
+}
+
 // ExecuteWithGPUKV performs the forward pass using GPU-resident KV cache.
 // This avoids CPU roundtrips for KV data during decode, providing significant speedup.
 func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUKVCache, layerIdx, startPos int) (tensor.Tensor, error) {
