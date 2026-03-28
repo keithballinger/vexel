@@ -17,7 +17,7 @@ func newTestScheduler(cfg Config) *Scheduler {
 		sampler:   s,
 		config:    cfg,
 		sequences: make(map[SequenceID]*Sequence),
-		signal:    make(chan struct{}, 1),
+		cond: sync.NewCond(&sync.Mutex{}),
 	}
 }
 

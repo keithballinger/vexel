@@ -67,7 +67,7 @@ type Scheduler struct {
 	config    Config
 	sequences map[SequenceID]*Sequence
 	metrics   SchedulerMetrics
-	signal    chan struct{} // Event channel to wake up the scheduler loop
+	cond *sync.Cond // Condition variable for reliable concurrent wakeup
 }
 
 // NewScheduler creates a new Scheduler instance.
@@ -93,17 +93,13 @@ func NewScheduler(rt *runtime.ModelRuntime, tok *tokenizer.Tokenizer, config Con
 		sampler:   s,
 		config:    config,
 		sequences: make(map[SequenceID]*Sequence),
-		signal:    make(chan struct{}, 1), // Buffered channel for non-blocking signals
+		cond: sync.NewCond(&sync.Mutex{}),
 	}, nil
 }
 
 // wakeUp triggers the scheduler loop to run a step immediately.
 func (s *Scheduler) wakeUp() {
-	select {
-	case s.signal <- struct{}{}:
-	default:
-		// Signal already pending
-	}
+	s.cond.Broadcast()
 }
 
 // Run starts the scheduler's main loop.
@@ -115,29 +111,36 @@ func (s *Scheduler) wakeUp() {
 //  2. Forms a batch up to MaxBatchSize.
 //  3. Runs a decode step (prefill or generate token).
 func (s *Scheduler) Run(ctx context.Context) error {
-	// Ticker for periodic checks (e.g., timeouts, stalled sequences), but main driver is signal
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-s.signal:
-			if err := s.step(ctx); err != nil {
-				return err
-			}
-			// If there are still active sequences, signal again to keep processing
-			if s.SequenceCount() > 0 {
-				s.wakeUp()
-			}
-		case <-ticker.C:
-			// Periodic check just in case
-			if s.SequenceCount() > 0 {
-				if err := s.step(ctx); err != nil {
-					return err
-				}
-			}
+		default:
+		}
+
+		if err := s.step(ctx); err != nil {
+			return err
+		}
+
+		// If sequences remain, loop immediately
+		if s.SequenceCount() > 0 {
+			continue
+		}
+
+		// No sequences — wait for wakeup from AddSequence
+		done := make(chan struct{})
+		go func() {
+			s.cond.L.Lock()
+			s.cond.Wait()
+			s.cond.L.Unlock()
+			close(done)
+		}()
+
+		select {
+		case <-ctx.Done():
+			s.cond.Broadcast()
+			return nil
+		case <-done:
 		}
 	}
 }

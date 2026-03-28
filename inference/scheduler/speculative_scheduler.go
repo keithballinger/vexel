@@ -60,26 +60,36 @@ func NewSpeculativeScheduler(
 
 // Run starts the speculative scheduler's main loop.
 func (ss *SpeculativeScheduler) Run(ctx context.Context) error {
-	ticker := time.NewTicker(1 * time.Millisecond)
-	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-ss.signal:
-			if err := ss.step(ctx); err != nil {
-				return err
-			}
-			if ss.SequenceCount() > 0 {
-				ss.wakeUp()
-			}
-		case <-ticker.C:
-			if ss.SequenceCount() > 0 {
-				if err := ss.step(ctx); err != nil {
-					return err
-				}
-			}
+		default:
+		}
+
+		if err := ss.step(ctx); err != nil {
+			return err
+		}
+
+		// If sequences remain, loop immediately
+		if ss.SequenceCount() > 0 {
+			continue
+		}
+
+		// No sequences — wait for wakeup from AddSequence
+		done := make(chan struct{})
+		go func() {
+			ss.cond.L.Lock()
+			ss.cond.Wait()
+			ss.cond.L.Unlock()
+			close(done)
+		}()
+
+		select {
+		case <-ctx.Done():
+			ss.cond.Broadcast()
+			return nil
+		case <-done:
 		}
 	}
 }
