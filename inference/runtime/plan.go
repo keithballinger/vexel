@@ -115,6 +115,21 @@ type TuningParams struct {
 
 	// UnrollFactor for inner loops in matmul kernels.
 	UnrollFactor int
+
+	// SDPANWGThreshold is the minimum kvLen to use NWG multi-TG kernel (default: 64)
+	SDPANWGThreshold int
+
+	// SDPATiledThreshold is the minimum kvLen to use tiled split-K kernel (default: 2048)
+	SDPATiledThreshold int
+
+	// SDPANWGTileShort is the NWG tile size for kvLen <= 128 (default: 64)
+	SDPANWGTileShort int
+
+	// SDPANWGTileMedium is the NWG tile size for 128 < kvLen <= 512 (default: 128)
+	SDPANWGTileMedium int
+
+	// SDPANWGTileLong is the NWG tile size for kvLen > 512 (default: 256)
+	SDPANWGTileLong int
 }
 
 // ExecutionPlan is a model- and device-specific configuration that selects
@@ -321,7 +336,7 @@ func applySmallModelDefaults(plan *ExecutionPlan, model ModelMeta, device Device
 
 	// Kernels: prefer fused variants, standard SDPA (don't over-optimize)
 	plan.Kernels = KernelVariants{
-		SDPADecode:  "sdpa_decode_f16", // Standard kernel, exp-latency bound anyway
+		SDPADecode:  "sdpa_flash_decode_f16_adaptive", // Adaptive kernel selects strategy based on kvLen
 		SDPAPrefill: "flash_attention_2_f16",
 		QKV:         "fused_rmsnorm_qkv_f16",
 		Wo:          "matvec_q4_0_nr2",
@@ -348,6 +363,11 @@ func applySmallModelDefaults(plan *ExecutionPlan, model ModelMeta, device Device
 		TileSizeSDPA: 32,
 		UnrollFactor: 4,
 	}
+	plan.Tuning.SDPANWGThreshold = 64
+	plan.Tuning.SDPATiledThreshold = 2048
+	plan.Tuning.SDPANWGTileShort = 64
+	plan.Tuning.SDPANWGTileMedium = 128
+	plan.Tuning.SDPANWGTileLong = 256
 
 	// Prefill uses batched matmul
 	plan.PrefillOverrides = &PrefillSettings{
@@ -373,13 +393,8 @@ func applyLargeModelDefaults(plan *ExecutionPlan, model ModelMeta, device Device
 	}
 
 	// Kernels: prefer high-throughput variants
-	sdpaKernel := "sdpa_decode_f16"
-	if model.HeadDim == 128 {
-		sdpaKernel = "sdpa_decode_f16" // Could use specialized hd128 variant
-	}
-
 	plan.Kernels = KernelVariants{
-		SDPADecode:  sdpaKernel,
+		SDPADecode:  "sdpa_flash_decode_f16_adaptive", // Adaptive kernel selects strategy based on kvLen
 		SDPAPrefill: "flash_attention_2_f16",
 		QKV:         "fused_rmsnorm_qkv_f16",
 		Wo:          "matvec_q4_0_nr4", // More outputs per simdgroup
@@ -406,6 +421,11 @@ func applyLargeModelDefaults(plan *ExecutionPlan, model ModelMeta, device Device
 		TileSizeSDPA: 64,
 		UnrollFactor: 8,
 	}
+	plan.Tuning.SDPANWGThreshold = 64
+	plan.Tuning.SDPATiledThreshold = 2048
+	plan.Tuning.SDPANWGTileShort = 64
+	plan.Tuning.SDPANWGTileMedium = 128
+	plan.Tuning.SDPANWGTileLong = 256
 
 	// Prefill uses batched matmul
 	plan.PrefillOverrides = &PrefillSettings{
@@ -470,6 +490,16 @@ func applyEnvOverrides(plan *ExecutionPlan) {
 	if v := os.Getenv("VEXEL_TILE_SIZE_SDPA"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			plan.Tuning.TileSizeSDPA = n
+		}
+	}
+	if v := os.Getenv("VEXEL_SDPA_TILED_THRESHOLD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			plan.Tuning.SDPATiledThreshold = n
+		}
+	}
+	if v := os.Getenv("VEXEL_SDPA_NWG_THRESHOLD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			plan.Tuning.SDPANWGThreshold = n
 		}
 	}
 
