@@ -44,7 +44,7 @@ CLI (cmd/vexel)  →  Scheduler  →  Runtime  →  Backend (Metal/CPU/CUDA)
 
 - **`inference/cmd/vexel/`** — Unified CLI: `serve`, `generate`, `chat`, `bench`, `tokenize` subcommands
 - **`inference/serve/`** — HTTP (`/generate`, `/stream`, `/health`) + gRPC server with TLS
-- **`inference/scheduler/`** — Event-driven continuous batching scheduler. Manages sequence state transitions: Pending → Prefill → Decoding → Finished. Includes speculative decoding via Medusa heads.
+- **`inference/scheduler/`** — Event-driven continuous batching scheduler. Manages sequence state transitions: Pending → Prefill → Decoding → Finished. Includes speculative decoding via draft models and Medusa heads, and batched decode with paged KV cache.
 - **`inference/runtime/`** — Model loading, forward pass execution
   - `model.go` — Model struct, weight loading from GGUF
   - `decode.go` — Forward pass: prefill and decode loops
@@ -75,6 +75,8 @@ CLI (cmd/vexel)  →  Scheduler  →  Runtime  →  Backend (Metal/CPU/CUDA)
 | `VEXEL_FORCE_REGIME` | Override execution plan regime |
 | `VEXEL_FORCE_SDPA` | Override SDPA kernel selection |
 | `VEXEL_FORCE_FFN` | Override FFN kernel selection |
+| `VEXEL_SDPA_TILED_THRESHOLD` | Override tiled split-K kvLen threshold (default: 2048) |
+| `VEXEL_SDPA_NWG_THRESHOLD` | Override NWG kvLen threshold (default: 64) |
 | `VEXEL_TEST_MODEL` | Path to model for integration tests |
 | `DEBUG_DECODE=1` | Verbose decode loop output |
 | `DEBUG_MATMUL=1` | Debug matrix multiplication |

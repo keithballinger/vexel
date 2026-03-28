@@ -10,8 +10,10 @@ Vexel is a high-performance inference engine for Large Language Models (LLMs) on
 - **Streaming Support**: Server-Sent Events (SSE) for real-time token streaming.
 - **Go Client Library**: High-level Go client (`vexel/client`) for easy integration.
 - **Direct Inference API**: Use the runtime directly for custom pipelines and benchmarking.
-- **GGUF Support**: Compatible with GGUF model format (Q4_0, Q4_K_M, Q6_K quantizations).
-- **Multi-Architecture**: Supports LLaMA family (LLaMA 2/3, Mistral) and Phi family (Phi-2, Phi-3).
+- **Speculative Decoding**: Draft-model and Medusa-style speculative decoding for 20-50% throughput gains.
+- **Batched Decode**: True multi-sequence batched decode with paged KV cache for high-throughput serving.
+- **GGUF Support**: Compatible with GGUF model format (Q4_0, Q4_K_M, Q5_K, Q6_K, Q8_0, BF16 quantizations).
+- **Multi-Architecture**: Supports LLaMA family (LLaMA 2/3, Mistral), Phi family (Phi-2, Phi-3), and Gemma 2.
 
 ## Getting Started
 
@@ -37,8 +39,11 @@ This produces a single `./vexel` binary with all subcommands. Requires macOS wit
 vexel [global flags] <subcommand> [flags]
 
 Global flags:
-  --model    Path to GGUF model file (required for serve/generate/chat)
-  --verbose  Enable verbose logging
+  --model        Path to GGUF model file (required for serve/generate/chat)
+  --draft-model  Path to draft model for speculative decoding
+  --medusa       Enable Medusa-style speculative decoding
+  --medusa-heads Path to pre-trained Medusa heads file (implies --medusa)
+  --verbose      Enable verbose logging
 
 Subcommands:
   serve      Start the HTTP inference server
@@ -57,7 +62,7 @@ Subcommands:
 Serve flags:
 - `--port`: HTTP port (default: 8080).
 - `--max-tokens`: Max tokens per request (default: 256).
-- `--max-batch-size`: Max batch size for scheduler (default: 1).
+- `--max-batch-size`: Max concurrent sequences for batched decode (default: 1). Set higher (e.g., 4-8) for multi-client serving throughput.
 
 ### Text Generation
 
@@ -72,6 +77,27 @@ Serve flags:
 ./vexel --model models/tinyllama-1.1b-chat-v1.0.Q4_0.gguf chat \
   --system-prompt "You are a helpful assistant."
 ```
+
+### Speculative Decoding
+
+**Draft-model speculation** uses a smaller model to draft tokens, verified by the target model:
+
+```bash
+./vexel --model models/llama-7b.Q4_0.gguf --draft-model models/tinyllama-1.1b.Q4_0.gguf \
+  generate --prompt "Once upon a time"
+```
+
+**Medusa speculation** uses online-learned heads that predict multiple future tokens in parallel, with no separate draft model required:
+
+```bash
+# Medusa with online training (heads learn during inference)
+./vexel --model models/llama-7b.Q4_0.gguf --medusa serve --port 8080
+
+# Medusa with pre-trained heads (instant speculation)
+./vexel --model models/llama-7b.Q4_0.gguf --medusa-heads heads.bin generate --prompt "Hello"
+```
+
+Note: `--draft-model` and `--medusa` are mutually exclusive.
 
 ### Tokenization
 
@@ -236,14 +262,14 @@ Benchmarks on Apple M3 Max (128 GB) with LLaMA 2 7B:
 Vexel achieves **85% of llama.cpp's decode throughput** on Q4_0 and supports
 Q4_K_M with custom sub-block strided decode and simdgroup tiled prefill kernels.
 
-**Flash Attention:** Tiled split-KV decode with online softmax reduced context
-scaling degradation from -24.5% to ~-10% (ctx=16 → ctx=512).
+**Flash Attention:** Adaptive SDPA kernel dispatch with tiled split-K for long contexts and NWG multi-threadgroup for medium contexts. Context scaling degradation reduced from -24.5% to ~-10% (ctx=16 → ctx=512). The dispatch chain auto-selects: tiled split-K (kvLen > 2048) → NWG adaptive (kvLen > 64) → v3 chunk-based → v1 fallback.
 
 See [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md) for detailed analysis,
 context-length scaling data, and optimization roadmap.
 
 **Where Vexel differentiates:**
-- Go scheduler with continuous batching (multi-client throughput)
+- Go scheduler with continuous batching and batched decode (multi-client throughput)
+- Speculative decoding: draft-model and Medusa-style online-learned heads
 - gRPC + HTTP dual protocol for production serving
 - Single binary deployment — no Python dependency chain
 - Pure Go codebase — easy to embed, extend, and deploy
