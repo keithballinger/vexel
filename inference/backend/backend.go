@@ -406,4 +406,20 @@ type PagedKVOps interface {
 	// out: [numQHeads, headDim]
 	// tokensInLastBlock: valid tokens in the last logical block
 	SDPAPagedDecode(q, kvPool, blockTable, out tensor.DevicePtr, numBlocks, blockSize, numQHeads, numKVHeads, headDim int, scale float32, tokensInLastBlock int)
+
+	// SDPAPagedDecodeBatched performs batched SDPA across multiple sequences.
+	// Each sequence has its own query, block table, and context length.
+	// q: [batchSize, numQHeads, headDim] - queries concatenated per sequence
+	// kvPool: base pointer to shared block pool
+	// blockTables: [batchSize] device pointers, each pointing to [numBlocks] int32
+	// out: [batchSize, numQHeads, headDim]
+	// seqLens: [batchSize] int - context length per sequence
+	SDPAPagedDecodeBatched(
+		q, kvPool tensor.DevicePtr,
+		blockTables []tensor.DevicePtr,
+		out tensor.DevicePtr,
+		batchSize, maxBlocks, blockSize, numQHeads, numKVHeads, headDim int,
+		scale float32,
+		seqLens []int,
+	)
 }
