@@ -32,7 +32,7 @@ run_standard_decode() {
         # ── Vexel ──
         echo "  Vexel warmup ($WARMUP runs)..."
         for ((w = 1; w <= WARMUP; w++)); do
-            run_vexel_generate "$model_path" "$prompt" "$GEN_TOKENS" > /dev/null
+            run_vexel_generate "$model_path" "$prompt" "$GEN_TOKENS" > /dev/null || true
         done
 
         echo "  Vexel measured ($RUNS runs)..."
@@ -48,10 +48,10 @@ run_standard_decode() {
         done
 
         # ── llama.cpp ──
-        if [[ -n "${LLAMA_CLI:-}" && "$LLAMA_CLI" != "[missing]" ]]; then
+        if [[ (-n "${LLAMA_COMPLETION:-}" && "$LLAMA_COMPLETION" != "[missing]") || (-n "${LLAMA_CLI:-}" && "$LLAMA_CLI" != "[missing]") ]]; then
             echo "  llama.cpp warmup ($WARMUP runs)..."
             for ((w = 1; w <= WARMUP; w++)); do
-                run_llama_generate "$model_path" "$prompt" "$GEN_TOKENS" > /dev/null
+                run_llama_generate "$model_path" "$prompt" "$GEN_TOKENS" > /dev/null || true
             done
 
             echo "  llama.cpp measured ($RUNS runs)..."

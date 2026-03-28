@@ -30,21 +30,25 @@ run_context_scaling() {
 
         echo "  Context length=$ctx_len"
 
-        # ── Vexel ──
-        echo "    Vexel ($context_runs runs)..."
-        for ((r = 1; r <= context_runs; r++)); do
-            local result
-            result=$(run_vexel_generate "$model" "$prompt" "$decode_tokens")
-            local decode_tok_s prefill_tok_s
-            decode_tok_s=$(echo "$result" | awk '{print $1}')
-            prefill_tok_s=$(echo "$result" | awk '{print $2}')
+        # ── Vexel (max context = 2048, skip longer) ──
+        if (( ctx_len <= 2048 )); then
+            echo "    Vexel ($context_runs runs)..."
+            for ((r = 1; r <= context_runs; r++)); do
+                local result
+                result=$(run_vexel_generate "$model" "$prompt" "$decode_tokens") || true
+                local decode_tok_s prefill_tok_s
+                decode_tok_s=$(echo "$result" | awk '{print $1}')
+                prefill_tok_s=$(echo "$result" | awk '{print $2}')
 
-            emit_jsonl "$outfile" "{\"engine\":\"vexel\",\"mode\":\"context_scaling\",\"model\":\"$model_name\",\"run\":$r,\"context_length\":$ctx_len,\"decode_tokens\":$decode_tokens,\"decode_tok_s\":$decode_tok_s,\"prefill_tok_s\":$prefill_tok_s}"
-            echo "      run $r: decode=${decode_tok_s} tok/s, prefill=${prefill_tok_s} tok/s"
-        done
+                emit_jsonl "$outfile" "{\"engine\":\"vexel\",\"mode\":\"context_scaling\",\"model\":\"$model_name\",\"run\":$r,\"context_length\":$ctx_len,\"decode_tokens\":$decode_tokens,\"decode_tok_s\":$decode_tok_s,\"prefill_tok_s\":$prefill_tok_s}"
+                echo "      run $r: decode=${decode_tok_s} tok/s, prefill=${prefill_tok_s} tok/s"
+            done
+        else
+            echo "    Vexel [SKIP] ctx=$ctx_len exceeds Vexel max context (2048)"
+        fi
 
         # ── llama.cpp ──
-        if [[ -n "${LLAMA_CLI:-}" && "$LLAMA_CLI" != "[missing]" ]]; then
+        if [[ (-n "${LLAMA_COMPLETION:-}" && "$LLAMA_COMPLETION" != "[missing]") || (-n "${LLAMA_CLI:-}" && "$LLAMA_CLI" != "[missing]") ]]; then
             echo "    llama.cpp ($context_runs runs)..."
             for ((r = 1; r <= context_runs; r++)); do
                 local result

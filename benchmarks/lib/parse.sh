@@ -132,7 +132,7 @@ run_llama_generate() {
         llama_flags=(-no-cnv --no-display-prompt)
     elif [[ -n "${LLAMA_CLI:-}" && "$LLAMA_CLI" != "[missing]" ]]; then
         llama_bin="$LLAMA_CLI"
-        llama_flags=(--no-display-prompt)
+        llama_flags=(-no-cnv --no-display-prompt)
     else
         echo "0 0"
         return 0
