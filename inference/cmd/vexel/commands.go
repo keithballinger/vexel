@@ -237,6 +237,27 @@ func runServe(globals GlobalFlags, args []string) error {
 		}
 	}()
 
+	// Medusa warmup: generate tokens to collect training samples before serving.
+	// With WarmupSamples=500, we need ~600 tokens for Cold→Warming transition,
+	// then a few seconds for training steps to reach Hot phase.
+	if globals.Medusa {
+		warmupTokens := 600
+		log.Printf("Warming Medusa heads (%d tokens)...", warmupTokens)
+		warmupPrompt := "The quick brown fox jumps over the lazy dog and runs across the wide green field"
+		warmupSeq := scheduler.NewSequence(scheduler.SequenceID(999999), warmupPrompt)
+		baseSched.AddSequence(warmupSeq)
+		count := 0
+		for range warmupSeq.TokenChan() {
+			count++
+			if count >= warmupTokens {
+				break
+			}
+		}
+		log.Printf("Medusa warmup complete (%d tokens generated). Waiting for heads to train...", count)
+		time.Sleep(3 * time.Second)
+		log.Printf("Medusa heads ready. Starting server.")
+	}
+
 	srvCfg := serve.Config{
 		RequestTimeout: time.Duration(sf.RequestTimeout) * time.Second,
 	}
