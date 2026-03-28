@@ -82,6 +82,17 @@ CLI (cmd/vexel)  →  Scheduler  →  Runtime  →  Backend (Metal/CPU/CUDA)
 | `DEBUG_MATMUL=1` | Debug matrix multiplication |
 | `DEBUG_PROFILE=1` | Enable runtime profiling |
 
+## CLI Flags
+
+| Flag | Purpose |
+|------|---------|
+| `--model` | Path to GGUF model file (required for serve/generate/chat) |
+| `--draft-model` | Path to draft model for speculative decoding |
+| `--context-len` | Max context length for KV cache (default: 2048) |
+| `--medusa` | Enable Medusa-style speculative decoding |
+| `--medusa-heads` | Path to pre-trained Medusa heads file |
+| `--verbose` | Enable verbose logging |
+
 ## Commit Convention
 
 Prefix: `feat()`, `fix()`, `perf()`, `chore()`, `docs()`, `build()`

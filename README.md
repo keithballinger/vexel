@@ -43,6 +43,7 @@ Global flags:
   --draft-model  Path to draft model for speculative decoding
   --medusa       Enable Medusa-style speculative decoding
   --medusa-heads Path to pre-trained Medusa heads file (implies --medusa)
+  --context-len  Max context length for KV cache (default: 2048)
   --verbose      Enable verbose logging
 
 Subcommands:

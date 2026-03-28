@@ -41,6 +41,7 @@ func main() {
 	tokenizerPath := flag.String("tokenizer", "", "Path to tokenizer.json (default: same dir as model)")
 	prompt := flag.String("prompt", "Hello! How are you?", "Input prompt")
 	maxTokens := flag.Int("max-tokens", 64, "Maximum tokens to generate")
+	contextLen := flag.Int("context-len", 2048, "Max context length for KV cache")
 	flag.Parse()
 
 	if *modelPath == "" {
@@ -86,8 +87,8 @@ func main() {
 		log.Fatalf("Failed to copy weights to GPU: %v", err)
 	}
 
-	// Create GPU KV cache (max sequence length 2048)
-	cache := model.CreateGPUKVCache(2048)
+	// Create GPU KV cache
+	cache := model.CreateGPUKVCache(*contextLen)
 	defer cache.Free()
 
 	// --- 5. Load tokenizer ---

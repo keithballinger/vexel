@@ -44,6 +44,7 @@ func main() {
 	tokenizerPath := flag.String("tokenizer", "", "Path to tokenizer.json (default: same dir as model)")
 	port := flag.Int("port", 8080, "HTTP port to listen on")
 	maxTokens := flag.Int("max-tokens", 256, "Max tokens to generate per request")
+	contextLen := flag.Int("context-len", 2048, "Max context length for KV cache")
 	flag.Parse()
 
 	if *modelPath == "" {
@@ -86,7 +87,7 @@ func main() {
 	if err := model.CopyWeightsToDevice(); err != nil {
 		log.Fatalf("Failed to copy weights to GPU: %v", err)
 	}
-	model.CreateGPUKVCache(2048)
+	model.CreateGPUKVCache(*contextLen)
 
 	// --- 5. Load tokenizer ---
 	tokPath := *tokenizerPath
