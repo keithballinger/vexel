@@ -302,7 +302,7 @@ func (m *ModelRuntime) outputHeadMatMul(statePtr, logitsPtr tensor.DevicePtr, ba
 			})
 
 			// For batch operations, process one position at a time
-			if batchSize > 1 && (profile == tensor.Q6_K || profile == tensor.Q4_0 || profile == tensor.Q4_K || profile == tensor.Q5_K) {
+			if batchSize > 1 && (profile == tensor.Q6_K || profile == tensor.Q4_0 || profile == tensor.Q4_K || profile == tensor.Q5_K || profile == tensor.Q8_0) {
 				stateRowBytes := uintptr(hiddenSize * 4)
 				logitsRowBytes := uintptr(vocabSize * 4)
 
@@ -319,6 +319,8 @@ func (m *ModelRuntime) outputHeadMatMul(statePtr, logitsPtr tensor.DevicePtr, ba
 						quantBackend.MatMulQ4_0(rowStatePtr, m.OutputHead.DevicePtr(), rowLogitsPtr, 1, vocabSize, hiddenSize)
 					case tensor.Q4_K:
 						quantBackend.MatMulQ4_K(rowStatePtr, m.OutputHead.DevicePtr(), rowLogitsPtr, 1, vocabSize, hiddenSize)
+					case tensor.Q8_0:
+						quantBackend.MatMulQ8_0(rowStatePtr, m.OutputHead.DevicePtr(), rowLogitsPtr, 1, vocabSize, hiddenSize)
 					}
 				}
 				return
@@ -337,6 +339,9 @@ func (m *ModelRuntime) outputHeadMatMul(statePtr, logitsPtr tensor.DevicePtr, ba
 				return
 			case tensor.Q4_K:
 				quantBackend.MatMulQ4_K(statePtr, m.OutputHead.DevicePtr(), logitsPtr, batchSize, vocabSize, hiddenSize)
+				return
+			case tensor.Q8_0:
+				quantBackend.MatMulQ8_0(statePtr, m.OutputHead.DevicePtr(), logitsPtr, batchSize, vocabSize, hiddenSize)
 				return
 			}
 		}
