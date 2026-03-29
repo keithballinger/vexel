@@ -19,6 +19,9 @@ type Tokenizer struct {
 	addBos        bool     // Whether to add BOS token to prompts (false for Phi-2, GPT-2)
 	specialTokens []string // Special tokens to match before BPE (longest first)
 	useByteLevel  bool     // Whether to use ByteLevel BPE (spaces -> Ġ)
+
+	// BPE merge rules: maps "tokenA tokenB" -> merge priority (lower = higher priority).
+	mergeRanks map[string]int
 }
 
 // Load loads a tokenizer from a file (tokenizer.json).
@@ -31,7 +34,8 @@ func Load(path string) (*Tokenizer, error) {
 
 	var data struct {
 		Model struct {
-			Vocab map[string]int `json:"vocab"`
+			Vocab  map[string]int  `json:"vocab"`
+			Merges json.RawMessage `json:"merges"`
 		} `json:"model"`
 		AddedTokens []struct {
 			ID      int    `json:"id"`
@@ -86,6 +90,28 @@ func Load(path string) (*Tokenizer, error) {
 		return len(specialTokens[i]) > len(specialTokens[j])
 	})
 
+	// Parse BPE merge rules (supports both string "a b" and array ["a","b"] formats)
+	mergeRanks := make(map[string]int)
+	if len(data.Model.Merges) > 0 {
+		// Try array-of-strings first: ["a b", "c d", ...]
+		var stringMerges []string
+		if err := json.Unmarshal(data.Model.Merges, &stringMerges); err == nil {
+			for i, m := range stringMerges {
+				mergeRanks[m] = i
+			}
+		} else {
+			// Try array-of-arrays: [["a","b"], ["c","d"], ...]
+			var arrayMerges [][]string
+			if err := json.Unmarshal(data.Model.Merges, &arrayMerges); err == nil {
+				for i, pair := range arrayMerges {
+					if len(pair) == 2 {
+						mergeRanks[pair[0]+" "+pair[1]] = i
+					}
+				}
+			}
+		}
+	}
+
 	return &Tokenizer{
 		vocab:         data.Model.Vocab,
 		ids:           ids,
@@ -94,6 +120,7 @@ func Load(path string) (*Tokenizer, error) {
 		addBos:        addBos,
 		specialTokens: specialTokens,
 		useByteLevel:  useByteLevel,
+		mergeRanks:    mergeRanks,
 	}, nil
 }
 
@@ -181,6 +208,11 @@ func (t *Tokenizer) encodeSegment(text string, atWordBoundary bool, isAbsoluteSt
 		return []int{id}, nil
 	}
 
+	// If we have BPE merges and SentencePiece mode, use proper BPE encoding
+	if len(t.mergeRanks) > 0 && !t.useByteLevel {
+		return t.encodeBPE(text, atWordBoundary, isAbsoluteStart)
+	}
+
 	// Define space token based on tokenizer type
 	spaceChar := "▁" // SentencePiece default
 	if t.useByteLevel {
@@ -200,14 +232,14 @@ func (t *Tokenizer) encodeSegment(text string, atWordBoundary bool, isAbsoluteSt
 		hasLeadingSpace := len(remaining) > 0 && remaining[0] == ' '
 
 		startsWithSpecialChar := len(remaining) > 0 && (remaining[0] == '<' || remaining[0] == '[' || remaining[0] == '{')
-		
+
 		if t.useByteLevel {
 			// ByteLevel Logic: Treat space as Ġ
 			// If has leading space, prefix with Ġ
 			if hasLeadingSpace {
 				textAfterSpace := remaining[1:]
 				prefixed := spaceChar + textAfterSpace
-				
+
 				// Try finding longest match with Ġ prefix
 				foundPrefixed := false
 				for l := min(len(prefixed), 40); l > spLen; l-- {
@@ -222,7 +254,7 @@ func (t *Tokenizer) encodeSegment(text string, atWordBoundary bool, isAbsoluteSt
 						break
 					}
 				}
-				
+
 				// If no match with suffix, try just Ġ
 				if !foundPrefixed && bestID < 0 {
 					if id, ok := t.vocab[spaceChar]; ok {
@@ -242,7 +274,7 @@ func (t *Tokenizer) encodeSegment(text string, atWordBoundary bool, isAbsoluteSt
 				}
 			}
 		} else {
-			// SentencePiece Logic (Original)
+			// SentencePiece Logic (greedy fallback when no merges available)
 			if isFirstToken && isAbsoluteStart && !hasLeadingSpace && startsWithSpecialChar {
 				for l := min(len(remaining), 20); l > 0; l-- {
 					candidate := remaining[:l]
@@ -341,6 +373,161 @@ func (t *Tokenizer) encodeSegment(text string, atWordBoundary bool, isAbsoluteSt
 	}
 
 	return tokens, nil
+}
+
+// encodeBPE encodes a text segment using proper BPE merge rules (SentencePiece style).
+// It splits text into words at spaces, prepends ▁ for word boundaries, then applies
+// iterative pair merging according to the merge priority table.
+func (t *Tokenizer) encodeBPE(text string, atWordBoundary bool, isAbsoluteStart bool) ([]int, error) {
+	spaceChar := "▁"
+
+	// Split text into words at space boundaries, tracking which get the ▁ prefix.
+	// SentencePiece convention: leading word gets ▁ prefix at word boundary,
+	// spaces in text become ▁ prefixes on the following word.
+	type wordInfo struct {
+		word      string
+		addPrefix bool
+	}
+	var words []wordInfo
+
+	// Split on spaces: each space causes the next word to get ▁ prefix
+	parts := strings.Split(text, " ")
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		addPrefix := false
+		if i == 0 {
+			// First part: add ▁ if at word boundary and not special start
+			startsWithNewline := len(part) > 0 && part[0] == '\n'
+			startsWithSpecialChar := len(part) > 0 && (part[0] == '<' || part[0] == '[' || part[0] == '{')
+			skipPrefix := startsWithNewline || (isAbsoluteStart && startsWithSpecialChar)
+			if atWordBoundary && !skipPrefix {
+				addPrefix = true
+			}
+		} else {
+			// After a space: always add ▁ prefix
+			addPrefix = true
+		}
+		words = append(words, wordInfo{word: part, addPrefix: addPrefix})
+	}
+
+	// Handle text that is just spaces
+	if len(words) == 0 {
+		// Each space becomes a ▁ token
+		var ids []int
+		for i := 0; i < len(text); i++ {
+			if text[i] == ' ' {
+				if id, ok := t.vocab[spaceChar]; ok {
+					ids = append(ids, id)
+				}
+			}
+		}
+		return ids, nil
+	}
+
+	var allTokens []int
+	for _, w := range words {
+		wordTokens := t.bpeEncodeWord(w.word, w.addPrefix, spaceChar)
+		allTokens = append(allTokens, wordTokens...)
+	}
+	return allTokens, nil
+}
+
+// bpeEncodeWord encodes a single word using BPE merge rules.
+func (t *Tokenizer) bpeEncodeWord(word string, addPrefix bool, spaceChar string) []int {
+	// Build initial symbol sequence: split into individual UTF-8 characters,
+	// with optional ▁ prefix.
+	var symbols []string
+	runes := []rune(word)
+
+	if addPrefix {
+		// SentencePiece BPE: ▁ is always its own initial symbol, then each character separately.
+		// The merge table contains rules like "▁ t" -> "▁t", so they get merged during BPE.
+		symbols = append(symbols, spaceChar)
+		for _, r := range runes {
+			symbols = append(symbols, string(r))
+		}
+	} else {
+		for _, r := range runes {
+			symbols = append(symbols, string(r))
+		}
+	}
+
+	if len(symbols) == 0 {
+		return nil
+	}
+
+	// Check if any initial symbols are not in vocab; use byte fallback
+	for i, sym := range symbols {
+		if _, ok := t.vocab[sym]; !ok {
+			// Try byte fallback for each byte in the symbol
+			var byteFallbacks []string
+			valid := true
+			for _, b := range []byte(sym) {
+				byteToken := fmt.Sprintf("<0x%02X>", b)
+				if _, ok := t.vocab[byteToken]; ok {
+					byteFallbacks = append(byteFallbacks, byteToken)
+				} else {
+					valid = false
+					break
+				}
+			}
+			if valid && len(byteFallbacks) > 0 {
+				// Replace symbol with byte fallback tokens
+				newSymbols := make([]string, 0, len(symbols)+len(byteFallbacks)-1)
+				newSymbols = append(newSymbols, symbols[:i]...)
+				newSymbols = append(newSymbols, byteFallbacks...)
+				newSymbols = append(newSymbols, symbols[i+1:]...)
+				symbols = newSymbols
+			}
+		}
+	}
+
+	// Iteratively apply the highest-priority merge
+	for len(symbols) > 1 {
+		// Find the pair with the lowest merge rank (highest priority)
+		bestRank := -1
+		bestIdx := -1
+		for i := 0; i < len(symbols)-1; i++ {
+			key := symbols[i] + " " + symbols[i+1]
+			if rank, ok := t.mergeRanks[key]; ok {
+				if bestIdx == -1 || rank < bestRank {
+					bestRank = rank
+					bestIdx = i
+				}
+			}
+		}
+
+		if bestIdx < 0 {
+			break // No more merges possible
+		}
+
+		// Apply the merge: combine symbols[bestIdx] and symbols[bestIdx+1]
+		merged := symbols[bestIdx] + symbols[bestIdx+1]
+		newSymbols := make([]string, 0, len(symbols)-1)
+		newSymbols = append(newSymbols, symbols[:bestIdx]...)
+		newSymbols = append(newSymbols, merged)
+		newSymbols = append(newSymbols, symbols[bestIdx+2:]...)
+		symbols = newSymbols
+	}
+
+	// Convert symbols to token IDs
+	var ids []int
+	for _, sym := range symbols {
+		if id, ok := t.vocab[sym]; ok {
+			ids = append(ids, id)
+		} else {
+			// Byte fallback for unknown symbols
+			for _, b := range []byte(sym) {
+				byteToken := fmt.Sprintf("<0x%02X>", b)
+				if id, ok := t.vocab[byteToken]; ok {
+					ids = append(ids, id)
+				}
+			}
+		}
+	}
+	return ids
 }
 
 func min(a, b int) int {
