@@ -43,6 +43,17 @@ func (s *GRPCServer) Generate(ctx context.Context, req *pb.GenerateRequest) (*pb
 	// Create and register sequence
 	seqID := scheduler.SequenceID(time.Now().UnixNano())
 	seq := scheduler.NewSequence(seqID, req.Prompt)
+
+	// Apply per-request sampling params if provided
+	if params := req.GetSamplingParams(); params != nil {
+		if params.MaxTokens > 0 {
+			seq.SetMaxTokens(int(params.MaxTokens))
+		}
+		if params.Temperature > 0 {
+			seq.SetSamplingParams(params.Temperature, int(params.TopK), params.TopP)
+		}
+	}
+
 	s.scheduler.AddSequence(seq)
 	defer s.scheduler.RemoveSequence(seqID)
 
@@ -81,6 +92,17 @@ func (s *GRPCServer) StreamGenerate(req *pb.GenerateRequest, stream pb.Inference
 	// Create and register sequence
 	seqID := scheduler.SequenceID(time.Now().UnixNano())
 	seq := scheduler.NewSequence(seqID, req.Prompt)
+
+	// Apply per-request sampling params if provided
+	if params := req.GetSamplingParams(); params != nil {
+		if params.MaxTokens > 0 {
+			seq.SetMaxTokens(int(params.MaxTokens))
+		}
+		if params.Temperature > 0 {
+			seq.SetSamplingParams(params.Temperature, int(params.TopK), params.TopP)
+		}
+	}
+
 	s.scheduler.AddSequence(seq)
 	defer s.scheduler.RemoveSequence(seqID)
 
