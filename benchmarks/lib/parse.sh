@@ -42,16 +42,20 @@ run_vexel_generate() {
     shift 3
     local extra_flags=("$@")
 
-    local output
-    output=$("$VEXEL_BIN" --model "$model" --verbose generate \
+    # Use temp file to avoid bash xrealloc issues with large/binary model output
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    "$VEXEL_BIN" --model "$model" --verbose generate \
         --prompt "$prompt" --max-tokens "$max_tokens" \
-        ${extra_flags[@]+"${extra_flags[@]}"} 2>&1) || true
+        ${extra_flags[@]+"${extra_flags[@]}"} > "$tmpfile" 2>&1 || true
 
     local decode_tok_s prefill_tok_s
     # Parse: [N tokens | prefill: X.X tok/s | decode: Y.Y tok/s]
-    decode_tok_s=$(echo "$output" | grep -oE 'decode: [0-9]+\.?[0-9]* tok/s' | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
-    prefill_tok_s=$(echo "$output" | grep -oE 'prefill: [0-9]+\.?[0-9]* tok/s' | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
+    decode_tok_s=$(grep -oE 'decode: [0-9]+\.?[0-9]* tok/s' "$tmpfile" | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
+    prefill_tok_s=$(grep -oE 'prefill: [0-9]+\.?[0-9]* tok/s' "$tmpfile" | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
 
+    rm -f "$tmpfile"
     echo "${decode_tok_s:-0} ${prefill_tok_s:-0}"
 }
 
@@ -67,18 +71,22 @@ run_vexel_medusa() {
     shift 3
     local extra_flags=("$@")
 
-    local output
-    output=$("$VEXEL_BIN" --model "$model" --verbose --medusa generate \
+    # Use temp file to avoid bash xrealloc issues with large/binary model output
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    "$VEXEL_BIN" --model "$model" --verbose --medusa generate \
         --prompt "$prompt" --max-tokens "$max_tokens" \
-        ${extra_flags[@]+"${extra_flags[@]}"} 2>&1) || true
+        ${extra_flags[@]+"${extra_flags[@]}"} > "$tmpfile" 2>&1 || true
 
     local decode_tok_s prefill_tok_s acceptance_pct speedup
-    decode_tok_s=$(echo "$output" | grep -oE 'decode: [0-9]+\.?[0-9]* tok/s' | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
-    prefill_tok_s=$(echo "$output" | grep -oE 'prefill: [0-9]+\.?[0-9]* tok/s' | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
+    decode_tok_s=$(grep -oE 'decode: [0-9]+\.?[0-9]* tok/s' "$tmpfile" | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
+    prefill_tok_s=$(grep -oE 'prefill: [0-9]+\.?[0-9]* tok/s' "$tmpfile" | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
     # Parse: [speculative: acceptance=Z.Z% speedup=W.Wx generated=G accepted=A]
-    acceptance_pct=$(echo "$output" | grep -oE 'acceptance=[0-9]+\.?[0-9]*%' | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
-    speedup=$(echo "$output" | grep -oE 'speedup=[0-9]+\.?[0-9]*x' | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
+    acceptance_pct=$(grep -oE 'acceptance=[0-9]+\.?[0-9]*%' "$tmpfile" | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
+    speedup=$(grep -oE 'speedup=[0-9]+\.?[0-9]*x' "$tmpfile" | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
 
+    rm -f "$tmpfile"
     echo "${decode_tok_s:-0} ${prefill_tok_s:-0} ${acceptance_pct:-0} ${speedup:-0}"
 }
 
@@ -95,17 +103,21 @@ run_vexel_draft() {
     shift 4
     local extra_flags=("$@")
 
-    local output
-    output=$("$VEXEL_BIN" --model "$model" --draft-model "$draft_model" --verbose generate \
+    # Use temp file to avoid bash xrealloc issues with large/binary model output
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    "$VEXEL_BIN" --model "$model" --draft-model "$draft_model" --verbose generate \
         --prompt "$prompt" --max-tokens "$max_tokens" \
-        ${extra_flags[@]+"${extra_flags[@]}"} 2>&1) || true
+        ${extra_flags[@]+"${extra_flags[@]}"} > "$tmpfile" 2>&1 || true
 
     local decode_tok_s prefill_tok_s acceptance_pct speedup
-    decode_tok_s=$(echo "$output" | grep -oE 'decode: [0-9]+\.?[0-9]* tok/s' | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
-    prefill_tok_s=$(echo "$output" | grep -oE 'prefill: [0-9]+\.?[0-9]* tok/s' | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
-    acceptance_pct=$(echo "$output" | grep -oE 'acceptance=[0-9]+\.?[0-9]*%' | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
-    speedup=$(echo "$output" | grep -oE 'speedup=[0-9]+\.?[0-9]*x' | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
+    decode_tok_s=$(grep -oE 'decode: [0-9]+\.?[0-9]* tok/s' "$tmpfile" | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
+    prefill_tok_s=$(grep -oE 'prefill: [0-9]+\.?[0-9]* tok/s' "$tmpfile" | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
+    acceptance_pct=$(grep -oE 'acceptance=[0-9]+\.?[0-9]*%' "$tmpfile" | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
+    speedup=$(grep -oE 'speedup=[0-9]+\.?[0-9]*x' "$tmpfile" | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
 
+    rm -f "$tmpfile"
     echo "${decode_tok_s:-0} ${prefill_tok_s:-0} ${acceptance_pct:-0} ${speedup:-0}"
 }
 
@@ -146,12 +158,16 @@ run_llama_generate() {
         ${extra_flags[@]+"${extra_flags[@]}"} > "$tmpfile" 2>&1 || true
 
     local decode_tok_s prefill_tok_s
-    # Parse: common_perf_print: eval time = X ms / Y runs (Z ms per token, W tokens per second)
-    # Also matches: llama_perf_context_print: eval time = ...
-    decode_tok_s=$(grep -E '(eval time|eval time)' "$tmpfile" | grep -v 'prompt eval' | \
+    # Parse eval time from various llama.cpp output formats:
+    #   common_perf_print:        eval time =    2499.70 ms /   127 runs   (   19.68 ms per token,    50.81 tokens per second)
+    #   llama_perf_context_print: eval time = ...
+    #   llama_print_timings:      eval time = ...
+    # Exclude lines containing "prompt eval" to get decode-only eval time.
+    decode_tok_s=$(grep -E 'eval time' "$tmpfile" | grep -v 'prompt eval' | \
         grep -oE '[0-9]+\.?[0-9]* tokens per second' | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
-    # Parse: prompt eval time = X ms / Y tokens (Z ms per token, W tokens per second)
-    prefill_tok_s=$(grep 'prompt eval time' "$tmpfile" | \
+    # Parse prompt eval time (prefill):
+    #   common_perf_print: prompt eval time = ...
+    prefill_tok_s=$(grep -E 'prompt eval time' "$tmpfile" | \
         grep -oE '[0-9]+\.?[0-9]* tokens per second' | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
 
     rm -f "$tmpfile"
@@ -186,9 +202,9 @@ run_llama_speculative() {
         --no-display-prompt ${extra_flags[@]+"${extra_flags[@]}"} > "$tmpfile" 2>&1 || true
 
     local decode_tok_s prefill_tok_s acceptance_pct
-    decode_tok_s=$(grep 'eval time' "$tmpfile" | grep -v 'prompt eval' | \
+    decode_tok_s=$(grep -E 'eval time' "$tmpfile" | grep -v 'prompt eval' | \
         grep -oE '[0-9]+\.?[0-9]* tokens per second' | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
-    prefill_tok_s=$(grep 'prompt eval time' "$tmpfile" | \
+    prefill_tok_s=$(grep -E 'prompt eval time' "$tmpfile" | \
         grep -oE '[0-9]+\.?[0-9]* tokens per second' | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)
     # Parse: speculative: accept rate: 0.456
     acceptance_pct=$(grep -oE 'accept rate: [0-9]+\.?[0-9]*' "$tmpfile" | grep -oE '[0-9]+\.?[0-9]*' | head -1 || true)

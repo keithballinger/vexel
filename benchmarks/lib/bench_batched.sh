@@ -58,14 +58,17 @@ run_batched() {
 
     echo "--- Batched decode: $model_name ---"
 
+    local vexel_pid=""
+    local llama_pid=""
+    trap '_kill_server "${vexel_pid:-}" 2>/dev/null; _kill_server "${llama_pid:-}" 2>/dev/null' EXIT
+
     for concurrency in "${concurrency_levels[@]}"; do
         local total_tokens=$((concurrency * tokens_per_request))
 
         echo "  Concurrency=$concurrency (${total_tokens} total tokens)"
 
         # ── Vexel server ──
-        local vexel_pid=""
-        trap '_kill_server "${vexel_pid:-}" 2>/dev/null; _kill_server "${llama_pid:-}" 2>/dev/null' EXIT
+        vexel_pid=""
 
         echo "    Starting Vexel server..."
         "$VEXEL_BIN" --model "$model" serve --port 18080 --max-batch-size "$concurrency" &
@@ -113,7 +116,7 @@ run_batched() {
         sleep 1
 
         # ── llama.cpp server ──
-        local llama_pid=""
+        llama_pid=""
 
         if [[ -n "${LLAMA_SERVER:-}" && "$LLAMA_SERVER" != "[missing]" ]]; then
             echo "    Starting llama.cpp server..."
@@ -164,9 +167,10 @@ run_batched() {
             echo "    [SKIP] llama.cpp server not available"
         fi
 
-        # Reset trap since we cleaned up
-        trap - EXIT
     done
+
+    # Reset trap since we cleaned up
+    trap - EXIT
 
     echo ""
     echo "Batched decode results: $outfile"
