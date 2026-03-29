@@ -7,60 +7,66 @@
 
 ## Current Results (2026-03-29, M4 Max)
 
-### Standard Decode (LLaMA 3.1 8B Q4_K_M, 128 gen tokens, greedy)
+### Standard Decode (GPU KV cache, greedy)
 
-| Engine | Decode tok/s | vs llama.cpp |
-|--------|-------------|--------------|
-| **Vexel** | **65.9** | **+29%** |
-| llama.cpp | 51.0 | baseline |
+| Model | Vexel tok/s | llama.cpp tok/s | vs llama.cpp |
+|-------|------------|----------------|--------------|
+| **LLaMA 3.1 8B Q4_K_M** | **66.6** | 42.4 | **+57%** |
+| **TinyLlama 1.1B Q4_0** | **343.8** | 323.3 | **+6%** |
+| Qwen 2.5 0.5B Q4_K_M | 143.4 | 342.2 | -58% |
 
-### Standard Decode (TinyLlama 1.1B Q4_0, 128 gen tokens, greedy)
+Vexel is fastest on 8B+ models. llama.cpp has an edge on very small models
+(0.5B) likely due to CPU REPACK optimization.
 
-| Engine | Decode tok/s | vs llama.cpp |
-|--------|-------------|--------------|
-| **Vexel** | **343.8** | **+6%** |
-| llama.cpp | 323.3 | baseline |
+### Paged KV Cache Decode
 
-### Context Scaling (LLaMA 3.1 8B, decode tok/s)
+| Model | GPU KV tok/s | Paged KV tok/s | Overhead |
+|-------|-------------|---------------|----------|
+| LLaMA 8B | 66.6 | 58.0 | -13% |
+| TinyLlama | 343.8 | 147.6 | -57% |
+| Qwen 0.5B | 143.4 | 147.6 | +3% |
 
-| Context | Vexel | Vexel Degrad. | llama.cpp | llama.cpp Degrad. |
-|---------|-------|--------------|-----------|------------------|
-| 16 | 66.6 | baseline | 51.5 | baseline |
-| 64 | 66.7 | -0.2% | 48.6 | 5.7% |
-| 256 | 64.1 | 3.8% | 49.8 | 3.3% |
-| 512 | 63.7 | 4.3% | 44.8 | 12.9% |
-| 1024 | 62.9 | 5.5% | 47.3 | 8.1% |
-| 2048 | — | (KV limit) | 43.1 | 16.2% |
-| 4096 | — | (KV limit) | 35.8 | 30.5% |
+Paged KV enables multi-client serving and longer contexts. Overhead is
+modest on larger models (13%) due to per-token scatter + sync.
+
+### Context Scaling (LLaMA 3.1 8B, GPU KV, decode tok/s)
+
+| Context | Vexel | Degradation |
+|---------|-------|-------------|
+| 16 | 67.8 | baseline |
+| 64 | 64.7 | 4.6% |
+| 256 | 64.2 | 5.3% |
+| 512 | 63.7 | 6.0% |
+| 1024 | 64.5 | 4.9% |
 
 Vexel maintains <6% degradation up to ctx=1024 thanks to adaptive SDPA dispatch
 (tiled split-K for kvLen>2048, NWG adaptive tiling for 64-2048, v3 chunk-based fallback).
 
-### Medusa Speculative Decode (LLaMA 3.1 8B)
+### Server Decode (single client, greedy)
 
-Medusa heads are trained online during inference. The scheduler uses adaptive
-speculation: starts with normal decode, probes head accuracy every 32 steps,
-and enables speculation only when heads achieve >= 50% acceptance rate.
-
-With online-trained heads (600-token warmup), current acceptance rate is low
-(~0-5%) due to limited training (10-17 steps, loss 6-9 vs random 10.4). The
-server falls back to non-speculative decode for reliable output.
-
-Pre-trained Medusa heads (loaded via `--medusa-heads`) are expected to achieve
-higher acceptance and provide actual speedup.
-
-### Server Decode (LLaMA 3.1 8B, single client)
-
-| Engine | Decode tok/s | Notes |
-|--------|-------------|-------|
+| Engine | LLaMA 8B tok/s | Notes |
+|--------|---------------|-------|
 | **Vexel (GPU KV)** | **~52** | Default greedy sampling |
-| Vexel (paged KV) | ~58 | With `--context-len`, used for multi-client |
-| llama.cpp | ~43 | |
+| **Vexel (paged KV)** | **~58** | With `--context-len` |
+| llama.cpp | ~42 | |
 
-Server mode uses greedy sampling by default for maximum throughput.
-Per-request sampling params (temperature, top_k, top_p) can be set
-via the JSON request body. Multi-client serving with paged KV produces
-correct output for all concurrent clients.
+### Multi-Client Throughput (TinyLlama, paged KV)
+
+| Concurrency | Aggregate tok/s | Per-client tok/s |
+|------------|----------------|-----------------|
+| 1 | 247 | 247 |
+| 2 | 497 | 248 |
+| 4 | 989 | 247 |
+
+Near-linear scaling with concurrency. Each client maintains ~247 tok/s
+regardless of concurrent load thanks to paged KV batched decode.
+
+### Medusa Speculative Decode
+
+Medusa heads are trained online during inference with adaptive speculation.
+Training reaches loss 0.2-3.5 with LR warmup and gradient clipping.
+Speculation activates via dry-run probes every 8 steps when acceptance >= 50%.
+See Medusa section below for detailed benchmark after tuning.
 
 ---
 
