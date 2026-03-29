@@ -705,9 +705,13 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 		return x, nil
 	}
 
+	// Dimensions from config
+	seqLen := x.Shape().NumElements() / b.HiddenSize
+
 	// Command buffer batching — reduces per-layer sync overhead from ~10 waits
-	// to 1 (via EndBatch). Critical for paged KV decode performance.
-	useBatching := b.batcher != nil && !cachedGPUProfile
+	// to 1 (via EndBatch). Only for decode (seqLen==1) — prefill (seqLen>1) uses
+	// StoreKV which calls ToDevice/Free that conflict with batch encoding.
+	useBatching := b.batcher != nil && !cachedGPUProfile && seqLen == 1
 	if useBatching {
 		b.batcher.BeginBatch()
 		defer b.batcher.EndBatch()
@@ -717,9 +721,6 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 			b.batcher.MemoryBarrier()
 		}
 	}
-
-	// Dimensions from config
-	seqLen := x.Shape().NumElements() / b.HiddenSize
 	hiddenSize := b.HiddenSize
 	numHeads := b.NumAttentionHeads
 	numKVHeads := b.NumKeyValueHeads
@@ -809,12 +810,16 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 			return x, fmt.Errorf("gpu pool attention: %w", err)
 		}
 	} else if gpuPool != nil && seqLen > 1 {
-		// Multi-token with GPU paged KV (prefill only, startPos must be 0):
-		// Store K/V into GPU blocks and use self-attention for prefill.
-		// Verification (startPos > 0) is handled at the caller level by processing
-		// tokens individually through all layers via DecodeWithPagedKV.
-		if err := gpuPool.StoreKV(layerIdx, seqID, startPos, kPtr, vPtr, seqLen); err != nil {
-			return x, fmt.Errorf("gpu pool store: %w", err)
+		// Multi-token with GPU paged KV: store K/V into blocks one token at a
+		// time (the batched ReshapePagedKV kernel hangs with seqLen > blockSize),
+		// then use self-attention over current tokens for prefill.
+		kvStride := numKVHeads * headDim
+		for i := 0; i < seqLen; i++ {
+			tokenK := tensor.DevicePtrOffset(kPtr, uintptr(i*kvStride*4))
+			tokenV := tensor.DevicePtrOffset(vPtr, uintptr(i*kvStride*4))
+			if err := gpuPool.StoreKV(layerIdx, seqID, startPos+i, tokenK, tokenV, 1); err != nil {
+				return x, fmt.Errorf("gpu pool store prefill token %d: %w", i, err)
+			}
 		}
 		if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
 			b.softCapOps.SDPAPrefillSoftCap(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap)

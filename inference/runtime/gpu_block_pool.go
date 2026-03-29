@@ -255,28 +255,44 @@ func (g *GPUBlockPool) StoreKV(layerIdx int, seqID int64, startPos int,
 		g.pagedOps.ReshapePagedKV(vPtr, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
 			1, g.numKVHeads, g.headDim, g.blockSize, true)
 	} else {
-		// Multi-token path (prefill)
-		pageTable := make([]int32, seqLen)
-		blockOffsets := make([]int32, seqLen)
+		// Multi-token path: copy each token's K/V to a temp buffer and scatter.
+		// ReshapePagedKV doesn't handle DevicePtr offsets, so we can't use
+		// DevicePtrOffset directly. Instead, copy per-token data to a temp
+		// buffer and scatter from there.
+		kvElems := g.numKVHeads * g.headDim
+		kvBytes := kvElems * 4
+		tokenBuf := g.allocPerm(kvBytes) // reusable per-token buffer
 		for i := 0; i < seqLen; i++ {
 			pos := startPos + i
 			logicalBlock := pos / g.blockSize
-			pageTable[i] = seq.blockTables[layerIdx][logicalBlock]
-			blockOffsets[i] = int32(pos % g.blockSize)
+			physBlock := seq.blockTables[layerIdx][logicalBlock]
+			offset := int32(pos % g.blockSize)
+
+			ptBytes := [4]byte{byte(uint32(physBlock)), byte(uint32(physBlock) >> 8),
+				byte(uint32(physBlock) >> 16), byte(uint32(physBlock) >> 24)}
+			offBytes := [4]byte{byte(uint32(offset)), byte(uint32(offset) >> 8),
+				byte(uint32(offset) >> 16), byte(uint32(offset) >> 24)}
+
+			g.be.ToDevice(g.ptBuf1, ptBytes[:])
+			g.be.ToDevice(g.offBuf1, offBytes[:])
+
+			// Copy token K from source buffer to temp buffer (handles offset)
+			if copier, ok := g.be.(backend.BufferCopier); ok {
+				copier.CopyBuffer(kPtr, i*kvBytes, tokenBuf, 0, kvBytes)
+			}
+			g.pagedOps.ReshapePagedKV(tokenBuf, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
+				1, g.numKVHeads, g.headDim, g.blockSize, false)
+
+			// Copy token V
+			if copier, ok := g.be.(backend.BufferCopier); ok {
+				copier.CopyBuffer(vPtr, i*kvBytes, tokenBuf, 0, kvBytes)
+			}
+			g.pagedOps.ReshapePagedKV(tokenBuf, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
+				1, g.numKVHeads, g.headDim, g.blockSize, true)
+
+			g.be.Sync() // Ensure scatter completes before reusing tokenBuf
 		}
-
-		ptBuf := g.allocPerm(seqLen * 4)
-		offBuf := g.allocPerm(seqLen * 4)
-		g.be.ToDevice(ptBuf, gpuInt32ToBytes(pageTable))
-		g.be.ToDevice(offBuf, gpuInt32ToBytes(blockOffsets))
-
-		g.pagedOps.ReshapePagedKV(kPtr, g.pools[layerIdx], ptBuf, offBuf,
-			seqLen, g.numKVHeads, g.headDim, g.blockSize, false)
-		g.pagedOps.ReshapePagedKV(vPtr, g.pools[layerIdx], ptBuf, offBuf,
-			seqLen, g.numKVHeads, g.headDim, g.blockSize, true)
-
-		g.be.Free(ptBuf)
-		g.be.Free(offBuf)
+		g.be.Free(tokenBuf)
 	}
 
 	if endPos > seq.seqLen {

@@ -407,10 +407,13 @@ func (m *ModelRuntime) DecodeWithPagedKV(tokens []int, seqID int64, pos int) (te
 	scratch := tensor.NewTensor(tensor.NewShape(int(scratchBytes/4)), m.config.DType, scratchPtr)
 
 	// 5. Layer Loop using ExecuteWithPagedKV
-	// Cross-layer batching: single command buffer for all layers.
-	if batcher, ok := m.backend.(backend.Batcher); ok && os.Getenv("VEXEL_GPU_PROFILE") != "1" {
-		batcher.BeginBatch()
-		defer batcher.EndBatch()
+	// Cross-layer batching only for single-token decode. Prefill (batchSize > 1)
+	// uses StoreKV which does ToDevice/Free calls that conflict with batching.
+	if batchSize == 1 {
+		if batcher, ok := m.backend.(backend.Batcher); ok && os.Getenv("VEXEL_GPU_PROFILE") != "1" {
+			batcher.BeginBatch()
+			defer batcher.EndBatch()
+		}
 	}
 	for i, layer := range m.layers {
 		state, err = layer.ExecuteWithPagedKV(state, scratch, m.pagedCache, m.gpuPool, seqID, i, pos)
@@ -1085,13 +1088,12 @@ func (m *ModelRuntime) PrefillWithPagedKV(tokens []int, seqID int64, startPos in
 	}
 	scratch := tensor.NewTensor(tensor.NewShape(int(scratchBytes/4)), m.config.DType, scratchPtr)
 
-	// 5. Layer Loop
+	// 5. Layer Loop (per-layer batching is handled inside ExecuteWithPagedKV)
 	for i, layer := range m.layers {
 		state, err = layer.ExecuteWithPagedKV(state, scratch, m.pagedCache, m.gpuPool, seqID, i, startPos)
 		if err != nil {
 			return tensor.Tensor{}, fmt.Errorf("layer %d: %w", i, err)
 		}
-		// Debug every layer to compare with GPU path
 		if debugDecode {
 			m.backend.Sync()
 			debugTensor(fmt.Sprintf("[PREFILL] After Layer %d", i), m.backend, state.DevicePtr(), seqLen*hiddenSize)
