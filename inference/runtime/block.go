@@ -795,28 +795,17 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 			return x, fmt.Errorf("gpu pool attention: %w", err)
 		}
 	} else if gpuPool != nil && seqLen > 1 {
-		// Multi-token verification with GPU paged KV: process each token sequentially.
-		// Each token must attend to the full KV history (all prior cached tokens plus
-		// tokens earlier in this batch). We store one token's KV at a time and then
-		// run paged SDPA decode for that single query against the complete cache.
-		//
-		// We use AttentionWithKVLen to pass the exact KV length for THIS layer,
-		// because seq.seqLen is shared across layers and may reflect tokens stored
-		// by a prior layer that haven't been stored yet for the current layer.
-		qStride := numHeads * headDim   // elements per token in Q
-		kvStride := numKVHeads * headDim // elements per token in K/V
-		for i := 0; i < seqLen; i++ {
-			tokenKPtr := tensor.DevicePtrOffset(kPtr, uintptr(i*kvStride*4))
-			tokenVPtr := tensor.DevicePtrOffset(vPtr, uintptr(i*kvStride*4))
-			if err := gpuPool.StoreKV(layerIdx, seqID, startPos+i, tokenKPtr, tokenVPtr, 1); err != nil {
-				return x, fmt.Errorf("gpu pool store verify token %d: %w", i, err)
-			}
-			tokenQPtr := tensor.DevicePtrOffset(qPtr, uintptr(i*qStride*4))
-			tokenOutPtr := tensor.DevicePtrOffset(attnOutPtr, uintptr(i*qStride*4))
-			kvLen := startPos + i + 1 // exact number of KV tokens for this layer
-			if err := gpuPool.AttentionWithKVLen(layerIdx, seqID, tokenQPtr, tokenOutPtr, numHeads, headDim, scale, kvLen); err != nil {
-				return x, fmt.Errorf("gpu pool attention verify token %d: %w", i, err)
-			}
+		// Multi-token with GPU paged KV (prefill only, startPos must be 0):
+		// Store K/V into GPU blocks and use self-attention for prefill.
+		// Verification (startPos > 0) is handled at the caller level by processing
+		// tokens individually through all layers via DecodeWithPagedKV.
+		if err := gpuPool.StoreKV(layerIdx, seqID, startPos, kPtr, vPtr, seqLen); err != nil {
+			return x, fmt.Errorf("gpu pool store: %w", err)
+		}
+		if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
+			b.softCapOps.SDPAPrefillSoftCap(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap)
+		} else {
+			b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
 		}
 	} else if pagedCache != nil {
 		// CPU paged path: GPU→CPU→GPU roundtrip (fallback)

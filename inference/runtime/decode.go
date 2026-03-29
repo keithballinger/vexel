@@ -1483,118 +1483,43 @@ func (m *ModelRuntime) VerifySpeculativeWithPagedKVAndHidden(tokens []int, seqID
 		return tensor.Tensor{}, nil, nil
 	}
 
-	if m.pagedCache == nil && m.gpuPool == nil {
-		return tensor.Tensor{}, nil, fmt.Errorf("paged KV cache not initialized")
-	}
-
-	// Lazily create GPU block pool if backend supports paged KV ops
-	if m.gpuPool == nil {
-		if _, ok := m.backend.(backend.PagedKVOps); ok {
-			blockSize := 16
-			maxSeq := m.config.MaxSeqLen
-			if maxSeq == 0 {
-				maxSeq = 4096
-			}
-			maxBlocksPerLayer := (maxSeq + blockSize - 1) / blockSize
-			m.CreateGPUBlockPool(maxBlocksPerLayer)
-		}
-	}
-	// Ensure GPU pool sequence exists
-	if m.gpuPool != nil && !m.gpuPool.HasSequence(seqID) {
-		m.gpuPool.CreateSequence(seqID)
-	}
-
-	// Reset buffer pool if the backend supports it
-	if pooler, ok := m.backend.(interface{ ResetPool() }); ok {
-		pooler.ResetPool()
-	}
-
-	hiddenSize := m.config.HiddenSize
+	// Process each verification token individually through all layers using
+	// the single-token paged decode path (DecodeWithPagedKVAndHidden), which
+	// correctly handles the full KV history via paged SDPA.
+	// Collect logits and hidden states for all positions.
 	vocabSize := m.config.VocabSize
 
-	if m.ctx == nil {
-		return tensor.Tensor{}, nil, fmt.Errorf("inference context not initialized")
-	}
-
+	// Allocate combined logits buffer
 	arena := m.ctx.GetArena(memory.Scratch)
-	if arena == nil {
-		return tensor.Tensor{}, nil, fmt.Errorf("scratch arena not initialized")
-	}
-
 	m.ctx.ResetScratch()
-
-	allocPtr := func(bytes int) (tensor.DevicePtr, error) {
-		return arena.Alloc(bytes)
-	}
-
-	// 1. Copy token IDs to device
-	tokenBytes := int32ToBytes(tokens)
-	tokenPtr, err := allocPtr(len(tokenBytes))
+	allLogitsPtr, err := arena.Alloc(seqLen * vocabSize * 4)
 	if err != nil {
 		return tensor.Tensor{}, nil, err
 	}
-	m.backend.ToDevice(tokenPtr, tokenBytes)
 
-	// 2. Allocate State [seqLen, Hidden]
-	statePtr, err := allocPtr(seqLen * hiddenSize * 4)
-	if err != nil {
-		return tensor.Tensor{}, nil, err
-	}
-	state := tensor.NewTensor(tensor.NewShape(seqLen, hiddenSize), m.config.DType, statePtr)
-
-	// 3. Embedding Lookup
-	if !m.Embedding.DevicePtr().IsNil() {
-		m.backend.Embedding(tokenPtr, seqLen, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
-	}
-
-	// 4. Allocate scratch tensor
-	scratchBytes := m.config.ScratchBytes(seqLen)
-	// Add extra space for full KV sequences from cache
-	maxKVLen := startPos + seqLen
-	kvHeadDim := m.config.NumKeyValueHeads * (m.config.HiddenSize / m.config.NumAttentionHeads)
-	scratchBytes += int64(maxKVLen * kvHeadDim * 4 * 2) // K and V
-	scratchPtr, err := allocPtr(int(scratchBytes))
-	if err != nil {
-		return tensor.Tensor{}, nil, err
-	}
-	scratch := tensor.NewTensor(tensor.NewShape(seqLen, hiddenSize), m.config.DType, scratchPtr)
-
-	// 5. Run through all layers using paged KV cache
-	for i := 0; i < m.config.NumHiddenLayers; i++ {
-		layer := m.layers[i]
-		state, err = layer.ExecuteWithPagedKV(state, scratch, m.pagedCache, m.gpuPool, seqID, i, startPos)
-		if err != nil {
-			return tensor.Tensor{}, nil, err
-		}
-	}
-
-	// 6. Final Norm - apply to all positions
-	m.applyFinalNorm(statePtr, statePtr, seqLen, hiddenSize)
-
-	// 7. Extract POST-NORM hidden states for training
-	m.backend.Sync()
-	hiddenBytes := make([]byte, seqLen*hiddenSize*4)
-	m.backend.ToHost(hiddenBytes, statePtr)
-
-	// Convert to [][]float32
 	hiddenStates := make([][]float32, seqLen)
-	for i := 0; i < seqLen; i++ {
-		start := i * hiddenSize * 4
-		end := start + hiddenSize*4
-		hiddenStates[i] = bytesToFloat32(hiddenBytes[start:end])
+
+	for i, token := range tokens {
+		pos := startPos + i
+		logits, hidden, err := m.DecodeWithPagedKVAndHidden([]int{token}, seqID, pos)
+		if err != nil {
+			return tensor.Tensor{}, nil, fmt.Errorf("verify token %d: %w", i, err)
+		}
+
+		hiddenStates[i] = hidden
+
+		// Copy this token's logits into the combined buffer
+		logitsBytes := make([]byte, vocabSize*4)
+		m.backend.Sync()
+		m.backend.ToHost(logitsBytes, logits.DevicePtr())
+
+		// Write to combined buffer at the correct offset
+		dstOffset := i * vocabSize * 4
+		m.backend.ToDevice(tensor.DevicePtrOffset(allLogitsPtr, uintptr(dstOffset)), logitsBytes)
 	}
 
-	// 8. Compute Logits for ALL tokens
-	logitsPtr, err := allocPtr(seqLen * vocabSize * 4)
-	if err != nil {
-		return tensor.Tensor{}, nil, err
-	}
-	logits := tensor.NewTensor(tensor.NewShape(seqLen, vocabSize), m.config.DType, logitsPtr)
-
-	// Run output projection for all positions
-	m.outputHeadMatMul(statePtr, logitsPtr, seqLen, vocabSize, hiddenSize)
-
+	allLogits := tensor.NewTensor(tensor.NewShape(seqLen, vocabSize), m.config.DType, allLogitsPtr)
 	m.backend.Sync()
 
-	return logits, hiddenStates, nil
+	return allLogits, hiddenStates, nil
 }

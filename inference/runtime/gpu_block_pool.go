@@ -265,8 +265,8 @@ func (g *GPUBlockPool) StoreKV(layerIdx int, seqID int64, startPos int,
 			blockOffsets[i] = int32(pos % g.blockSize)
 		}
 
-		ptBuf := g.be.Alloc(seqLen * 4)
-		offBuf := g.be.Alloc(seqLen * 4)
+		ptBuf := g.allocPerm(seqLen * 4)
+		offBuf := g.allocPerm(seqLen * 4)
 		g.be.ToDevice(ptBuf, gpuInt32ToBytes(pageTable))
 		g.be.ToDevice(offBuf, gpuInt32ToBytes(blockOffsets))
 
@@ -396,6 +396,57 @@ func (g *GPUBlockPool) AttentionBatched(
 		batchSize, maxBlocks, g.blockSize, numQHeads, g.numKVHeads, headDim, scale, seqLens)
 
 	return nil
+}
+
+// GatherKV reads K/V from scattered blocks into contiguous GPU buffers.
+// Returns pointers to contiguous K [totalTokens, numKVHeads, headDim] and
+// V [totalTokens, numKVHeads, headDim] buffers. Caller must free the returned buffers.
+// This is used for multi-token verification where SDPAPrefill needs contiguous K/V.
+func (g *GPUBlockPool) GatherKV(layerIdx int, seqID int64, totalTokens int) (kOut, vOut tensor.DevicePtr, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	seq, ok := g.seqs[seqID]
+	if !ok {
+		return tensor.DevicePtr{}, tensor.DevicePtr{}, fmt.Errorf("sequence %d not found", seqID)
+	}
+
+	copier, ok := g.be.(backend.BufferCopier)
+	if !ok {
+		return tensor.DevicePtr{}, tensor.DevicePtr{}, fmt.Errorf("backend doesn't support BufferCopier")
+	}
+
+	kvElems := g.numKVHeads * g.headDim           // elements per token
+	blockKVBytes := g.blockSize * kvElems * 4      // bytes for K (or V) in one block
+	poolBlockBytes := 2 * blockKVBytes             // K + V per physical block
+	outBytes := totalTokens * kvElems * 4
+
+	kOut = g.allocPerm(outBytes)
+	vOut = g.allocPerm(outBytes)
+
+	bt := seq.blockTables[layerIdx]
+	remaining := totalTokens
+
+	for logicalBlock := 0; logicalBlock < len(bt) && remaining > 0; logicalBlock++ {
+		physBlock := bt[logicalBlock]
+		tokensInBlock := g.blockSize
+		if tokensInBlock > remaining {
+			tokensInBlock = remaining
+		}
+		copyBytes := tokensInBlock * kvElems * 4
+
+		// Source offset in pool: physBlock * poolBlockBytes
+		srcBase := int(physBlock) * poolBlockBytes
+		// K is at offset 0, V is at offset blockKVBytes within each physical block
+		dstOffset := logicalBlock * g.blockSize * kvElems * 4
+
+		copier.CopyBuffer(g.pools[layerIdx], srcBase, kOut, dstOffset, copyBytes)
+		copier.CopyBuffer(g.pools[layerIdx], srcBase+blockKVBytes, vOut, dstOffset, copyBytes)
+
+		remaining -= tokensInBlock
+	}
+
+	return kOut, vOut, nil
 }
 
 // ShareBlocks shares the first numBlocks logical blocks from srcSeq to dstSeq
