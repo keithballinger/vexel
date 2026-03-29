@@ -62,6 +62,41 @@ type GPUHeads struct {
 	fwdReady  bool
 }
 
+// NewGPUHeadsFromCPU creates GPU-accelerated heads from pre-trained CPU heads.
+func NewGPUHeadsFromCPU(cpuHeads *Heads, b backend.Backend) *GPUHeads {
+	h := &GPUHeads{
+		NumHeads:   cpuHeads.NumHeads,
+		HiddenSize: cpuHeads.HiddenSize,
+		VocabSize:  cpuHeads.VocabSize,
+		heads:      make([]GPUHead, cpuHeads.NumHeads),
+		backend:    b,
+	}
+
+	type permanentAllocator interface {
+		AllocPermanent(bytes int) tensor.DevicePtr
+	}
+	alloc := b.Alloc
+	if pa, ok := b.(permanentAllocator); ok {
+		alloc = pa.AllocPermanent
+	}
+
+	for i := 0; i < cpuHeads.NumHeads; i++ {
+		fc1Size := cpuHeads.HiddenSize * cpuHeads.HiddenSize * 4
+		fc2Size := cpuHeads.HiddenSize * cpuHeads.VocabSize * 4
+
+		h.heads[i].FC1 = alloc(fc1Size)
+		h.heads[i].FC2 = alloc(fc2Size)
+		h.heads[i].FC1CPU = make([]float32, len(cpuHeads.heads[i].FC1))
+		h.heads[i].FC2CPU = make([]float32, len(cpuHeads.heads[i].FC2))
+		copy(h.heads[i].FC1CPU, cpuHeads.heads[i].FC1)
+		copy(h.heads[i].FC2CPU, cpuHeads.heads[i].FC2)
+
+		h.copyWeightsToGPU(i)
+	}
+
+	return h
+}
+
 // NewGPUHeads creates GPU-accelerated Medusa heads.
 func NewGPUHeads(numHeads, hiddenSize, vocabSize int, b backend.Backend) *GPUHeads {
 	return NewGPUHeadsWithInit(numHeads, hiddenSize, vocabSize, b, nil)
@@ -85,13 +120,22 @@ func NewGPUHeadsWithInit(numHeads, hiddenSize, vocabSize int, b backend.Backend,
 	// Check if we have lm_head weights for FC2 initialization
 	hasLMHead := len(lmHeadWeights) == vocabSize*hiddenSize
 
+	// Use permanent allocation so weight buffers survive ResetPool cycles.
+	type permanentAllocator interface {
+		AllocPermanent(bytes int) tensor.DevicePtr
+	}
+	alloc := b.Alloc
+	if pa, ok := b.(permanentAllocator); ok {
+		alloc = pa.AllocPermanent
+	}
+
 	for i := 0; i < numHeads; i++ {
-		// Allocate GPU memory
+		// Allocate GPU memory (permanent to survive ResetPool)
 		fc1Size := hiddenSize * hiddenSize * 4
 		fc2Size := hiddenSize * vocabSize * 4
 
-		h.heads[i].FC1 = b.Alloc(fc1Size)
-		h.heads[i].FC2 = b.Alloc(fc2Size)
+		h.heads[i].FC1 = alloc(fc1Size)
+		h.heads[i].FC2 = alloc(fc2Size)
 
 		// Initialize FC1 on CPU
 		h.heads[i].FC1CPU = make([]float32, hiddenSize*hiddenSize)
@@ -297,14 +341,19 @@ func (h *GPUHeads) allocateScratch(batchSize int) {
 	hiddenSize := h.HiddenSize
 	vocabSize := h.VocabSize
 
-	h.scratchHidden = h.backend.Alloc(batchSize * hiddenSize * 4)
-	h.scratchInter = h.backend.Alloc(batchSize * hiddenSize * 4)
-	h.scratchPreRelu = h.backend.Alloc(batchSize * hiddenSize * 4)
-	h.scratchLogits = h.backend.Alloc(batchSize * vocabSize * 4)
-	h.scratchDLogits = h.backend.Alloc(batchSize * vocabSize * 4)
-	h.scratchDInter = h.backend.Alloc(batchSize * hiddenSize * 4)
-	h.scratchGrad1 = h.backend.Alloc(hiddenSize * hiddenSize * 4)
-	h.scratchGrad2 = h.backend.Alloc(hiddenSize * vocabSize * 4)
+	alloc := h.backend.Alloc
+	type pa interface{ AllocPermanent(int) tensor.DevicePtr }
+	if p, ok := h.backend.(pa); ok {
+		alloc = p.AllocPermanent
+	}
+	h.scratchHidden = alloc(batchSize * hiddenSize * 4)
+	h.scratchInter = alloc(batchSize * hiddenSize * 4)
+	h.scratchPreRelu = alloc(batchSize * hiddenSize * 4)
+	h.scratchLogits = alloc(batchSize * vocabSize * 4)
+	h.scratchDLogits = alloc(batchSize * vocabSize * 4)
+	h.scratchDInter = alloc(batchSize * hiddenSize * 4)
+	h.scratchGrad1 = alloc(hiddenSize * hiddenSize * 4)
+	h.scratchGrad2 = alloc(hiddenSize * vocabSize * 4)
 
 	h.maxBatchSize = batchSize
 	h.scratchAllocated = true
@@ -635,16 +684,21 @@ func (g *GPUHeads) ToCPUHeads() *Heads {
 	hiddenSize := g.HiddenSize
 	vocabSize := g.VocabSize
 
+	g.backend.Sync() // Ensure any pending GPU writes are complete
+
 	for i := range g.heads {
 		head := &g.heads[i]
 
 		// Read FC1 weights from GPU
 		fc1Bytes := make([]byte, hiddenSize*hiddenSize*4)
+		g.backend.Sync()
 		g.backend.ToHost(fc1Bytes, head.FC1)
+		g.backend.Sync()
 
 		// Read FC2 weights from GPU
 		fc2Bytes := make([]byte, hiddenSize*vocabSize*4)
 		g.backend.ToHost(fc2Bytes, head.FC2)
+		g.backend.Sync()
 
 		h.heads[i] = Head{
 			FC1: bytesToFloat32(fc1Bytes),

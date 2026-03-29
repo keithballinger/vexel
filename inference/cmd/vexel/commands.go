@@ -205,6 +205,7 @@ func runServe(globals GlobalFlags, args []string) error {
 
 	var baseSched *scheduler.Scheduler
 	var runFunc func(context.Context) error
+	var medusaSched *scheduler.MedusaScheduler
 
 	// Use speculative scheduling if a draft model is provided
 	if globals.DraftModel != "" {
@@ -221,12 +222,13 @@ func runServe(globals GlobalFlags, args []string) error {
 		baseSched = ss.Scheduler
 		runFunc = ss.Run
 	} else if globals.Medusa {
-		ms, err := createMedusaScheduler(globals, model, tok, schedConfig)
+		var err error
+		medusaSched, err = createMedusaScheduler(globals, model, tok, schedConfig)
 		if err != nil {
 			return err
 		}
-		baseSched = ms.BaseScheduler()
-		runFunc = ms.Run
+		baseSched = medusaSched.BaseScheduler()
+		runFunc = medusaSched.Run
 	} else {
 		sched, err := scheduler.NewScheduler(model, tok, schedConfig)
 		if err != nil {
@@ -245,7 +247,8 @@ func runServe(globals GlobalFlags, args []string) error {
 	// Medusa warmup: generate tokens to collect training samples before serving.
 	// With WarmupSamples=500, we need ~600 tokens for Cold→Warming transition,
 	// then a few seconds for training steps to reach Hot phase.
-	if globals.Medusa {
+	if globals.Medusa && globals.MedusaHeadsPath == "" {
+		// Only warmup when training heads from scratch — pre-trained heads skip this.
 		warmupTarget := 600
 		warmupPrompts := []string{
 			"Once upon a time in a land far away there lived a brave knight who embarked on a quest",
@@ -275,6 +278,15 @@ func runServe(globals GlobalFlags, args []string) error {
 		}
 		log.Printf("Medusa warmup complete (%d tokens generated). Waiting for heads to train...", count)
 		time.Sleep(3 * time.Second)
+
+		// Auto-save trained heads for faster startup next time
+		if medusaSched != nil {
+			headsPath := globals.Model + ".medusa-heads.bin"
+			if err := medusaSched.SaveHeads(headsPath); err == nil {
+				log.Printf("Saved Medusa heads to %s (use --medusa-heads to skip warmup)", headsPath)
+			}
+		}
+
 		log.Printf("Medusa heads ready. Starting server.")
 	}
 

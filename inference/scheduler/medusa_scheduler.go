@@ -113,9 +113,19 @@ func NewMedusaScheduler(
 		if medusaConfig.HeadsPath != "" {
 			heads, err := medusa.Load(medusaConfig.HeadsPath)
 			if err == nil {
-				ms.trainer = medusa.NewOnlineTrainerWithHeads(heads, medusaConfig.TrainingConfig)
-				fmt.Printf("Loaded Medusa heads from %s (phase: %s)\n",
-					medusaConfig.HeadsPath, ms.trainer.Phase())
+				// Use GPU trainer for pre-trained heads (fast Forward)
+				if medusaConfig.UseGPUTraining && gpuTrainingAvailable() {
+					if b := rt.Backend(); b != nil {
+						ms.trainer = medusa.NewGPUOnlineTrainerFromHeads(heads, medusaConfig.TrainingConfig, b)
+						fmt.Printf("Loaded Medusa heads from %s → GPU (phase: Hot)\n", medusaConfig.HeadsPath)
+					}
+				}
+				// Fall back to CPU trainer
+				if ms.trainer == nil {
+					ms.trainer = medusa.NewOnlineTrainerWithHeads(heads, medusaConfig.TrainingConfig)
+					fmt.Printf("Loaded Medusa heads from %s → CPU (phase: %s)\n",
+						medusaConfig.HeadsPath, ms.trainer.Phase())
+				}
 			} else {
 				fmt.Printf("Warning: could not load Medusa heads from %s: %v\n",
 					medusaConfig.HeadsPath, err)
@@ -1148,10 +1158,13 @@ func (ms *MedusaScheduler) MedusaMetrics() MedusaMetrics {
 }
 
 // SaveHeads saves the trained Medusa heads to a file.
+// Acquires GPU lock to ensure consistent read of weight buffers.
 func (ms *MedusaScheduler) SaveHeads(path string) error {
 	if ms.trainer == nil {
 		return fmt.Errorf("no trainer initialized")
 	}
+	ms.trainer.GPULock()
+	defer ms.trainer.GPUUnlock()
 	return ms.trainer.SaveHeads(path)
 }
 

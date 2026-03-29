@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"os"
 	"sync"
+	"unsafe"
 )
 
 // silu computes the SiLU (Sigmoid Linear Unit) activation: x * sigmoid(x).
@@ -243,22 +244,15 @@ func (h *Heads) WriteTo(w io.Writer) error {
 		return fmt.Errorf("write header: %w", err)
 	}
 
-	// Weights
-	buf := make([]byte, 4)
+	// Weights — bulk write via unsafe cast to avoid per-element encoding
 	for i := 0; i < h.NumHeads; i++ {
-		// FC1
-		for _, v := range h.heads[i].FC1 {
-			binary.LittleEndian.PutUint32(buf, math.Float32bits(v))
-			if _, err := w.Write(buf); err != nil {
-				return fmt.Errorf("write FC1: %w", err)
-			}
+		fc1Bytes := unsafe.Slice((*byte)(unsafe.Pointer(&h.heads[i].FC1[0])), len(h.heads[i].FC1)*4)
+		if _, err := w.Write(fc1Bytes); err != nil {
+			return fmt.Errorf("write FC1: %w", err)
 		}
-		// FC2
-		for _, v := range h.heads[i].FC2 {
-			binary.LittleEndian.PutUint32(buf, math.Float32bits(v))
-			if _, err := w.Write(buf); err != nil {
-				return fmt.Errorf("write FC2: %w", err)
-			}
+		fc2Bytes := unsafe.Slice((*byte)(unsafe.Pointer(&h.heads[i].FC2[0])), len(h.heads[i].FC2)*4)
+		if _, err := w.Write(fc2Bytes); err != nil {
+			return fmt.Errorf("write FC2: %w", err)
 		}
 	}
 
@@ -304,27 +298,20 @@ func ReadFrom(r io.Reader) (*Heads, error) {
 		heads:      make([]Head, numHeads),
 	}
 
-	// Weights
-	buf := make([]byte, 4)
+	// Weights — bulk read via unsafe cast
 	for i := 0; i < numHeads; i++ {
 		h.heads[i] = Head{
 			FC1: make([]float32, hiddenSize*hiddenSize),
 			FC2: make([]float32, hiddenSize*vocabSize),
 		}
 
-		// FC1
-		for j := range h.heads[i].FC1 {
-			if _, err := io.ReadFull(r, buf); err != nil {
-				return nil, fmt.Errorf("read FC1: %w", err)
-			}
-			h.heads[i].FC1[j] = math.Float32frombits(binary.LittleEndian.Uint32(buf))
+		fc1Bytes := unsafe.Slice((*byte)(unsafe.Pointer(&h.heads[i].FC1[0])), len(h.heads[i].FC1)*4)
+		if _, err := io.ReadFull(r, fc1Bytes); err != nil {
+			return nil, fmt.Errorf("read FC1: %w", err)
 		}
-		// FC2
-		for j := range h.heads[i].FC2 {
-			if _, err := io.ReadFull(r, buf); err != nil {
-				return nil, fmt.Errorf("read FC2: %w", err)
-			}
-			h.heads[i].FC2[j] = math.Float32frombits(binary.LittleEndian.Uint32(buf))
+		fc2Bytes := unsafe.Slice((*byte)(unsafe.Pointer(&h.heads[i].FC2[0])), len(h.heads[i].FC2)*4)
+		if _, err := io.ReadFull(r, fc2Bytes); err != nil {
+			return nil, fmt.Errorf("read FC2: %w", err)
 		}
 	}
 

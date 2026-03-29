@@ -67,6 +67,25 @@ func NewGPUOnlineTrainerWithInit(hiddenSize, vocabSize int, config OnlineConfig,
 	return t
 }
 
+// NewGPUOnlineTrainerFromHeads creates a GPU trainer from pre-trained CPU heads.
+// The trainer starts in Hot phase, ready for immediate speculation.
+func NewGPUOnlineTrainerFromHeads(cpuHeads *Heads, config OnlineConfig, b backend.Backend) *GPUOnlineTrainer {
+	t := &GPUOnlineTrainer{
+		gpuHeads: NewGPUHeadsFromCPU(cpuHeads, b),
+		buffer:   NewRingBuffer(config.BufferCapacity),
+		config:   config,
+		rng:      rand.New(rand.NewSource(time.Now().UnixNano())),
+		backend:  b,
+		stopCh:   make(chan struct{}),
+		doneCh:   make(chan struct{}),
+		metrics: TrainingMetrics{
+			HeadAccuracies: make([]float32, config.NumHeads),
+		},
+	}
+	t.phase.Store(int32(PhaseHot))
+	return t
+}
+
 // Start begins the background training loop.
 func (t *GPUOnlineTrainer) Start(ctx context.Context) {
 	if t.isRunning.Swap(true) {
