@@ -67,7 +67,8 @@ type Scheduler struct {
 	config    Config
 	sequences map[SequenceID]*Sequence
 	metrics   SchedulerMetrics
-	cond *sync.Cond // Condition variable for reliable concurrent wakeup
+	cond     *sync.Cond     // Condition variable for reliable concurrent wakeup
+	readyBuf []*Sequence    // Reused buffer for collectReady to avoid per-step allocation
 }
 
 // NewScheduler creates a new Scheduler instance.
@@ -170,22 +171,26 @@ func (s *Scheduler) step(ctx context.Context) error {
 }
 
 // collectReady identifies sequences that are eligible for execution.
+// Reuses a pre-allocated buffer to avoid per-step allocation.
 func (s *Scheduler) collectReady() []*Sequence {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	if len(s.sequences) == 0 {
 		return nil
 	}
 
-	ready := make([]*Sequence, 0, len(s.sequences))
+	s.readyBuf = s.readyBuf[:0]
 	for _, seq := range s.sequences {
 		switch seq.State() {
 		case StatePending, StatePrefill, StateDecoding:
-			ready = append(ready, seq)
+			s.readyBuf = append(s.readyBuf, seq)
 		}
 	}
-	return ready
+	if len(s.readyBuf) == 0 {
+		return nil
+	}
+	return s.readyBuf
 }
 
 // formBatches selects a subset of ready sequences to run in the next step.
