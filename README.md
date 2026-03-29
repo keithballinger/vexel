@@ -65,6 +65,13 @@ Serve flags:
 - `--max-tokens`: Max tokens per request (default: 256).
 - `--max-batch-size`: Max concurrent sequences for batched decode (default: 1). Set higher (e.g., 4-8) for multi-client serving throughput.
 
+**Paged KV cache:** Use `--context-len` to set the maximum context length for the KV cache. With `--max-batch-size > 1`, the scheduler uses paged KV cache allocation to efficiently share GPU memory across concurrent sequences, enabling multi-client serving without pre-allocating full context buffers per sequence. Paged KV is also used in Medusa mode to support speculation alongside multi-client serving.
+
+```bash
+# Multi-client serving with paged KV cache (4 concurrent sequences, 4096 context)
+./vexel --model model.gguf --context-len 4096 serve --port 8080 --max-batch-size 4
+```
+
 ### Text Generation
 
 ```bash
@@ -99,6 +106,24 @@ Serve flags:
 ```
 
 Note: `--draft-model` and `--medusa` are mutually exclusive.
+
+#### Medusa Details
+
+Medusa speculative decoding uses lightweight output heads that predict multiple future tokens in parallel, eliminating the need for a separate draft model.
+
+**Online training:** When `--medusa` is enabled without `--medusa-heads`, Medusa heads are trained online during inference. The heads learn from the model's own predictions, starting with a brief auto-warmup phase (600 tokens + 3s training) to reach the Hot phase before serving begins.
+
+**Adaptive speculation:** The number of speculated tokens adjusts based on acceptance rates observed during decoding. This maximizes throughput without wasting computation on low-confidence predictions.
+
+**Pre-trained heads:** Save and load trained Medusa heads for instant speculation on subsequent runs:
+
+```bash
+# Heads are auto-saved to <model-path>.medusa-heads.bin after training
+./vexel --model model.gguf --medusa serve --port 8080
+
+# Load pre-trained heads on next run (skips warmup, instant speculation)
+./vexel --model model.gguf --medusa-heads model.gguf.medusa-heads.bin serve --port 8080
+```
 
 ### Tokenization
 
@@ -199,6 +224,16 @@ curl -N -X POST http://localhost:8080/stream \
   -H "Content-Type: application/json" \
   -d '{"prompt": "Tell me a joke"}'
 ```
+
+**Per-request `max_tokens`:** Both `/generate` and `/stream` accept an optional `max_tokens` field to override the server's default `--max-tokens` on a per-request basis:
+
+```bash
+curl -X POST http://localhost:8080/generate \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Summarize this in one sentence.", "max_tokens": 50}'
+```
+
+The Go client library supports this via `GenerateOptions.MaxTokens` (see [`examples/client/main.go`](examples/client/main.go)).
 
 ## Examples
 
