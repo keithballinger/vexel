@@ -592,6 +592,17 @@ func (g *GPUBlockPool) BlockStats() (totalBlocks, freeBlocks, sharedBlocks int) 
 	return
 }
 
+// MemoryStats returns GPU memory usage in megabytes based on block pool allocations.
+func (g *GPUBlockPool) MemoryStats() (totalMB, usedMB, freeMB float64) {
+	total, free, _ := g.BlockStats()
+	used := total - free
+	bytesPerBlock := 2 * g.blockSize * g.numKVHeads * g.headDim * 4 // K+V, float32
+	totalMB = float64(total*bytesPerBlock) / (1024 * 1024)
+	usedMB = float64(used*bytesPerBlock) / (1024 * 1024)
+	freeMB = float64(free*bytesPerBlock) / (1024 * 1024)
+	return
+}
+
 // Close releases all GPU resources.
 func (g *GPUBlockPool) Close() {
 	for _, pool := range g.pools {
