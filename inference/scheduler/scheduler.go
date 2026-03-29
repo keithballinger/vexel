@@ -229,11 +229,16 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 				if err := s.runGPUPrefill(seq); err != nil {
 					return err
 				}
+				// Sync GPU after prefill to flush command queue before decode.
+				// Without this, the transition from many prefill dispatches (~300+)
+				// to decode can deadlock the Metal command queue.
+				s.runtime.Backend().Sync()
 				continue
 			} else if usePagedCache {
 				if err := s.runBatchedPrefill(seq); err != nil {
 					return err
 				}
+				s.runtime.Backend().Sync()
 				continue
 			}
 		}

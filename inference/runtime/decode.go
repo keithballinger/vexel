@@ -191,6 +191,17 @@ func bytesToFloat32(data []byte) []float32 {
 	return result
 }
 
+// applyEmbeddingScale scales the embedding output in-place if the model requires it.
+// Gemma models multiply embeddings by sqrt(hiddenSize) after the embedding lookup.
+func (m *ModelRuntime) applyEmbeddingScale(statePtr tensor.DevicePtr, numElements int) {
+	if m.config.EmbeddingScale <= 0 {
+		return
+	}
+	if scaler, ok := m.backend.(backend.ScaleOps); ok {
+		scaler.ScaleBuffer(statePtr, m.config.EmbeddingScale, numElements)
+	}
+}
+
 // DecodeStep performs a single decoding step using DevicePtr operations.
 // All tensors are allocated on the backend device.
 func (m *ModelRuntime) DecodeStep(inputs BatchRuntimeInputs) (tensor.Tensor, error) {
@@ -247,6 +258,7 @@ func (m *ModelRuntime) DecodeStep(inputs BatchRuntimeInputs) (tensor.Tensor, err
 	if !m.Embedding.DevicePtr().IsNil() {
 		m.backend.Embedding(tokenPtr, batchSize, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
 	}
+	m.applyEmbeddingScale(statePtr, batchSize*hiddenSize)
 	// No sync needed - next operation depends on same data
 	if debugDecode {
 		m.backend.Sync()
@@ -392,6 +404,7 @@ func (m *ModelRuntime) DecodeWithPagedKV(tokens []int, seqID int64, pos int) (te
 	if !m.Embedding.DevicePtr().IsNil() {
 		m.backend.Embedding(tokenPtr, batchSize, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
 	}
+	m.applyEmbeddingScale(statePtr, batchSize*hiddenSize)
 	m.backend.Sync() // Wait for embedding before layers read state
 
 	// 4. Allocate Scratch for Layers
@@ -518,6 +531,7 @@ func (m *ModelRuntime) DecodeWithPagedKVAndHidden(tokens []int, seqID int64, pos
 	if !m.Embedding.DevicePtr().IsNil() {
 		m.backend.Embedding(tokenPtr, batchSize, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
 	}
+	m.applyEmbeddingScale(statePtr, batchSize*hiddenSize)
 	m.backend.Sync() // Wait for embedding before layers read state
 
 	// 4. Allocate Scratch for Layers
@@ -705,6 +719,7 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 	if !m.Embedding.DevicePtr().IsNil() {
 		m.backend.Embedding(tokenPtr, batchSize, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
 	}
+	m.applyEmbeddingScale(statePtr, batchSize*hiddenSize)
 	if debugDecode {
 		m.backend.Sync()
 		debugTensor("[GPU] After Embedding", m.backend, statePtr, batchSize*hiddenSize)
@@ -867,6 +882,7 @@ func (m *ModelRuntime) DecodeEarlyExit(tokens []int, pos int, maxLayers int) (te
 	if !m.Embedding.DevicePtr().IsNil() {
 		m.backend.Embedding(tokenPtr, batchSize, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
 	}
+	m.applyEmbeddingScale(statePtr, batchSize*hiddenSize)
 
 	// 2. Scratch
 	scratchBytes := m.config.ScratchBytes(batchSize)
@@ -990,6 +1006,7 @@ func (m *ModelRuntime) PrefillWithPagedKV(tokens []int, seqID int64, startPos in
 	if !m.Embedding.DevicePtr().IsNil() {
 		m.backend.Embedding(tokenPtr, seqLen, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
 	}
+	m.applyEmbeddingScale(statePtr, seqLen*hiddenSize)
 	m.backend.Sync() // CRITICAL: Wait for embedding before layers read state
 
 	debugTensor("[PREFILL] After Embedding", m.backend, statePtr, seqLen*hiddenSize)
@@ -1113,6 +1130,7 @@ func (m *ModelRuntime) DecodeWithGPUKVAndHidden(tokens []int, pos int) (logits t
 	if !m.Embedding.DevicePtr().IsNil() {
 		m.backend.Embedding(tokenPtr, batchSize, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
 	}
+	m.applyEmbeddingScale(statePtr, batchSize*hiddenSize)
 
 	// 4. Allocate Scratch for Layers
 	scratchBytes := m.config.ScratchBytes(batchSize)
@@ -1240,6 +1258,7 @@ func (m *ModelRuntime) VerifySpeculative(tokens []int, pos int) (tensor.Tensor, 
 	if !m.Embedding.DevicePtr().IsNil() {
 		m.backend.Embedding(tokenPtr, seqLen, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
 	}
+	m.applyEmbeddingScale(statePtr, seqLen*hiddenSize)
 
 	// 4. Allocate scratch tensor
 	scratchPtr, err := allocPtr(int(m.config.ScratchBytes(seqLen)))
@@ -1340,6 +1359,7 @@ func (m *ModelRuntime) VerifySpeculativeWithHidden(tokens []int, pos int) (tenso
 	if !m.Embedding.DevicePtr().IsNil() {
 		m.backend.Embedding(tokenPtr, seqLen, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
 	}
+	m.applyEmbeddingScale(statePtr, seqLen*hiddenSize)
 
 	// 4. Allocate scratch tensor
 	scratchPtr, err := allocPtr(int(m.config.ScratchBytes(seqLen)))
@@ -1471,6 +1491,7 @@ func (m *ModelRuntime) VerifySpeculativeWithPagedKVAndHidden(tokens []int, seqID
 	if !m.Embedding.DevicePtr().IsNil() {
 		m.backend.Embedding(tokenPtr, seqLen, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
 	}
+	m.applyEmbeddingScale(statePtr, seqLen*hiddenSize)
 	m.backend.Sync() // Wait for embedding before layers read state
 
 	// 4. Allocate Scratch for Layers

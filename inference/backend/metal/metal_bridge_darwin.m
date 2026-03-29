@@ -11364,7 +11364,6 @@ static inline void finish_encode(id<MTLComputeCommandEncoder> encoder, id<MTLCom
         [encoder endEncoding];
         [cmdBuf commit];
         [cmdBuf waitUntilCompleted];
-
         g_gpuTotalTime += mach_to_ns(mach_absolute_time() - start);
         g_gpuBatchCount++;
     }
@@ -14491,6 +14490,14 @@ void metal_embedding_f32(void* queuePtr,
         if (token >= 0 && token < vocabSize) {
             memcpy(outData + t * dim, tableData + token * dim, dim * sizeof(float));
         }
+    }
+}
+
+void metal_scale_inplace_f32(void* bufPtr, float scale, int n) {
+    id<MTLBuffer> buf = (__bridge id<MTLBuffer>)bufPtr;
+    float* data = (float*)[buf contents];
+    for (int i = 0; i < n; i++) {
+        data[i] *= scale;
     }
 }
 
