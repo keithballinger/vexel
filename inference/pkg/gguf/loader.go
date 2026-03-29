@@ -36,12 +36,14 @@ func (l *TensorLoader) Architecture() string {
 
 // SupportedArchitectures lists architectures that Vexel fully supports.
 var SupportedArchitectures = map[string]bool{
-	"llama":   true, // LLaMA 2/3, TinyLlama, Mistral, Codestral
-	"mistral": true, // Some Mistral models use this
-	"qwen2":   true, // Qwen 2 is LLaMA-compatible
-	"phi":     true, // Phi-2/3 (LayerNorm, GELU MLP, combined QKV)
-	"phi2":    true, // Some Phi-2 models use this identifier
-	"phi3":    true, // Phi-3 identifier
+	"llama":     true, // LLaMA 2/3, TinyLlama, Mistral, Codestral
+	"mistral":   true, // Some Mistral models use this
+	"qwen2":     true, // Qwen 2 is LLaMA-compatible
+	"phi":       true, // Phi-2/3 (LayerNorm, GELU MLP, combined QKV)
+	"phi2":      true, // Some Phi-2 models use this identifier
+	"phi3":      true, // Phi-3 identifier
+	"deepseek":  true, // DeepSeek MoE models
+	"deepseek2": true, // DeepSeek V2/V3 MoE models
 }
 
 // ValidateArchitecture checks if the architecture is supported and returns a warning if not.
@@ -187,6 +189,16 @@ func GetLayerTensorName(hfName string) string {
 		ggufSuffix = "ffn_down.weight"
 	case "mlp.fc2.bias":
 		ggufSuffix = "ffn_down.bias"
+
+	// MoE (Mixture of Experts) tensors
+	case "mlp.gate.weight":
+		ggufSuffix = "ffn_gate_inp.weight" // Router/gate layer that selects experts
+	case "mlp.experts.gate_proj.weight":
+		ggufSuffix = "ffn_gate_exps.weight" // Concatenated expert gate projections
+	case "mlp.experts.up_proj.weight":
+		ggufSuffix = "ffn_up_exps.weight" // Concatenated expert up projections
+	case "mlp.experts.down_proj.weight":
+		ggufSuffix = "ffn_down_exps.weight" // Concatenated expert down projections
 
 	// Normalization layers
 	case "input_layernorm.weight":

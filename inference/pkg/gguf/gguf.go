@@ -231,7 +231,9 @@ type File struct {
 	RoPETheta       float32
 	RoPEDimCount    int // Dimensions for RoPE (0 = full headDim). For partial RoPE like Phi-2.
 	SlidingWindow   int // Sliding window size
-	file *os.File // Underlying file for mmap access
+	ExpertCount     int // Total number of routed experts (MoE models, e.g., 64 or 256)
+	ExpertUsedCount int // Number of experts selected per token (MoE models, e.g., 6 or 8)
+	file            *os.File // Underlying file for mmap access
 }
 
 // Open opens and parses a GGUF file.
@@ -538,6 +540,14 @@ func (f *File) extractModelConfig() {
 		f.SlidingWindow = int(v.AsUint32())
 	}
 
+	// MoE (Mixture of Experts) parameters
+	if v, ok := f.Metadata[prefix+"expert_count"]; ok {
+		f.ExpertCount = int(v.AsUint32())
+	}
+	if v, ok := f.Metadata[prefix+"expert_used_count"]; ok {
+		f.ExpertUsedCount = int(v.AsUint32())
+	}
+
 	// Vocab size from tokenizer
 	if v, ok := f.Metadata["tokenizer.ggml.tokens"]; ok && v.Type == MetaTypeArray {
 		f.VocabSize = len(v.Array)
@@ -611,6 +621,8 @@ type ModelConfigValues struct {
 	RoPETheta        float32
 	RoPEDimCount     int // Dimensions for RoPE (0 = full headDim)
 	SlidingWindow    int // Sliding window size
+	ExpertCount      int // Total number of routed experts (MoE models)
+	ExpertUsedCount  int // Number of experts selected per token (MoE models)
 }
 
 // GetModelConfig returns the extracted model configuration.
@@ -627,5 +639,7 @@ func (f *File) GetModelConfig() ModelConfigValues {
 		RoPETheta:        f.RoPETheta,
 		RoPEDimCount:     f.RoPEDimCount,
 		SlidingWindow:    f.SlidingWindow,
+		ExpertCount:      f.ExpertCount,
+		ExpertUsedCount:  f.ExpertUsedCount,
 	}
 }

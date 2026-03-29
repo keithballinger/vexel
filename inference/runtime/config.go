@@ -45,6 +45,10 @@ const (
 	// Structure: down(silu(gate_up[:half](x)) * gate_up[half:](x))
 	// The GGUF stores gate and up as a single [hidden, 2*intermediate] tensor.
 	MLPSwiGLUFused
+	// MLPMoE uses a Mixture of Experts feed-forward network (DeepSeek).
+	// A router/gate selects a subset of experts per token, each expert is a SwiGLU MLP.
+	// Structure: router(x) -> top-k experts -> weighted sum of expert outputs
+	MLPMoE
 )
 
 func (m MLPType) String() string {
@@ -57,6 +61,8 @@ func (m MLPType) String() string {
 		return "GeGLU"
 	case MLPSwiGLUFused:
 		return "SwiGLU(Fused)"
+	case MLPMoE:
+		return "MoE"
 	default:
 		return "Unknown"
 	}
@@ -117,6 +123,10 @@ type ModelConfig struct {
 	AttentionLogitSoftCap float32   // Logit soft-capping value (0 = disabled, typically 30.0 for Gemma 2)
 	HasPostNorms          bool      // Apply RMSNorm after attention and MLP (before residual). Gemma 2 only.
 	RoPEFreqScales        []float32 // Per-dimension inverse frequency values for learned RoPE (nil = use theta-based)
+
+	// MoE (Mixture of Experts) settings
+	NumMoEExperts  int // Total number of routed experts (e.g., 64 or 256 for DeepSeek)
+	NumMoESelected int // Number of experts selected per token (e.g., 6 or 8 for DeepSeek)
 }
 
 // MemoryPlan holds the estimated memory usage breakdown.
@@ -408,6 +418,11 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		attnWindowType = WindowAlternating // Even layers=global, odd layers=sliding window
 		hasPostNorms = true                // Gemma 2 applies RMSNorm after attn and MLP
 		// Gemma 2 uses LLaMA-style RoPE (interleaved pairs)
+	case "deepseek", "deepseek2":
+		normType = NormRMSNorm
+		mlpType = MLPMoE // MoE layers; dense layers within the model also use SwiGLU
+		hasBias = false
+		// DeepSeek uses LLaMA-style RoPE (interleaved pairs)
 	case "llama", "mistral", "qwen2":
 		// Default LLaMA-family settings
 		normType = NormRMSNorm
@@ -440,5 +455,7 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		AttentionWindowType:   attnWindowType,
 		AttentionLogitSoftCap: attnLogitSoftCap,
 		HasPostNorms:          hasPostNorms,
+		NumMoEExperts:         g.ExpertCount,
+		NumMoESelected:        g.ExpertUsedCount,
 	}
 }
