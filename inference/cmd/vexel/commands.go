@@ -267,7 +267,8 @@ func runServe(globals GlobalFlags, args []string) error {
 			if count >= warmupTarget {
 				break
 			}
-			warmupSeq := scheduler.NewSequence(scheduler.SequenceID(999990+i), prompt)
+			seqID := scheduler.SequenceID(999990 + i)
+			warmupSeq := scheduler.NewSequence(seqID, prompt)
 			baseSched.AddSequence(warmupSeq)
 			for range warmupSeq.TokenChan() {
 				count++
@@ -275,6 +276,7 @@ func runServe(globals GlobalFlags, args []string) error {
 					break
 				}
 			}
+			baseSched.RemoveSequence(seqID)
 		}
 		log.Printf("Medusa warmup complete (%d tokens generated). Waiting for heads to train...", count)
 		time.Sleep(3 * time.Second)
