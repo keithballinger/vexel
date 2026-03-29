@@ -705,6 +705,19 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 		return x, nil
 	}
 
+	// Command buffer batching — reduces per-layer sync overhead from ~10 waits
+	// to 1 (via EndBatch). Critical for paged KV decode performance.
+	useBatching := b.batcher != nil && !cachedGPUProfile
+	if useBatching {
+		b.batcher.BeginBatch()
+		defer b.batcher.EndBatch()
+	}
+	barrier := func() {
+		if useBatching {
+			b.batcher.MemoryBarrier()
+		}
+	}
+
 	// Dimensions from config
 	seqLen := x.Shape().NumElements() / b.HiddenSize
 	hiddenSize := b.HiddenSize
@@ -758,14 +771,13 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 	if !b.AttnNorm.DevicePtr().IsNil() {
 		b.applyNorm(xPtr, b.AttnNorm.DevicePtr(), b.AttnNormBias.DevicePtr(), normOutPtr, seqLen, hiddenSize)
 	}
-	// No sync - operations serialized in Metal command queue
+	barrier() // normOut written → QKV projections read normOut
 
 	// 2. Q/K/V Projections (with bias support for Phi)
 	if !b.Wq.DevicePtr().IsNil() {
 		qDim := b.Wq.Shape().Dims()[0]
 		b.matMulTransposedWithBias(normOutPtr, b.Wq, b.WqBias, qPtr, seqLen, qDim, hiddenSize)
 	}
-	// No sync - operations serialized in Metal command queue
 
 	if !b.Wk.DevicePtr().IsNil() {
 		kDim := b.Wk.Shape().Dims()[0]
@@ -776,9 +788,11 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 		vDim := b.Wv.Shape().Dims()[0]
 		b.matMulTransposedWithBias(normOutPtr, b.Wv, b.WvBias, vPtr, seqLen, vDim, hiddenSize)
 	}
+	barrier() // Q/K/V written → RoPE reads Q/K
 
 	// 3. RoPE - Apply to Q and K
 	b.applyRoPE(qPtr, kPtr, headDim, numHeads, numKVHeads, seqLen, startPos)
+	barrier() // RoPE done → KV store/attention reads K/V
 
 	// 4. Store current K/V in cache and compute attention
 	scale := float32(1.0 / sqrt(float64(headDim)))
@@ -880,7 +894,7 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 			b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
 		}
 	}
-	// No sync - SDPA must complete before Wo can read attnOut (serialized in queue)
+	barrier() // SDPA done → Wo reads attnOut
 
 	// Save normOut for parallel residual (Phi needs same normOut for both attn and MLP)
 	// For parallel residual, we write Wo output to upPtr (unused in GELU path) to preserve normOut
@@ -904,16 +918,13 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 			b.backend.Add(xPtr, attnResidualPtr, xPtr, seqLen*hiddenSize)
 		}
 	}
-	// No sync - operations serialized in command queue
+	barrier() // Wo + residual done → FFN norm reads x
 
 	// 7. FFN normalization (RMSNorm or LayerNorm depending on architecture)
-	// For parallel residual architectures (like Phi), FFN uses the same normOut as attention (no separate FFN norm)
 	if !b.ParallelResidual && !b.FFNNorm.DevicePtr().IsNil() {
-		// Serial residual: apply separate FFN norm
 		b.applyNorm(xPtr, b.FFNNorm.DevicePtr(), b.FFNNormBias.DevicePtr(), normOutPtr, seqLen, hiddenSize)
 	}
-	// For parallel residual, normOutPtr already contains the shared attention normalization
-	// No sync - normalization must complete before MLP can read normOut (serialized in queue)
+	barrier() // FFN norm done → MLP reads normOut
 
 	// 8. MLP (SwiGLU for LLaMA-style, GELU for Phi-style)
 	// Debug all layers for decode (seqLen==1) to find NaN source
@@ -977,25 +988,22 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 			b.matMulTransposed(gatePtr, b.W2, normOutPtr, seqLen, w2Dim, intermediateSize)
 		}
 	}
-	// No sync - operations serialized in command queue
+	barrier() // MLP done → post-norm/residual reads normOut
 
 	// 9. Post-FFN norm (Gemma 2): norm after MLP, before residual
 	if b.HasPostNorms && !b.PostFFNNorm.DevicePtr().IsNil() {
 		b.backend.RMSNorm(normOutPtr, b.PostFFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
+		barrier()
 	}
 
 	// 10. Add residuals
 	if b.ParallelResidual {
-		// Parallel residual: x = x + attn(norm(x)) + mlp(norm(x))
-		b.backend.Add(xPtr, attnResidualPtr, xPtr, seqLen*hiddenSize) // Add attention
-		// Sync required: second Add reads x which was just written by first Add
-		b.backend.Sync()
-		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)      // Add MLP
+		b.backend.Add(xPtr, attnResidualPtr, xPtr, seqLen*hiddenSize)
+		barrier() // first Add done → second Add reads x
+		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
 	} else {
-		// Serial residual: x is already updated with attention, just add MLP
 		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
 	}
-	// No sync - next layer's normalization is serialized in queue
 
 	return x, nil
 }

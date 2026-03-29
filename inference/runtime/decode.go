@@ -407,6 +407,11 @@ func (m *ModelRuntime) DecodeWithPagedKV(tokens []int, seqID int64, pos int) (te
 	scratch := tensor.NewTensor(tensor.NewShape(int(scratchBytes/4)), m.config.DType, scratchPtr)
 
 	// 5. Layer Loop using ExecuteWithPagedKV
+	// Cross-layer batching: single command buffer for all layers.
+	if batcher, ok := m.backend.(backend.Batcher); ok && os.Getenv("VEXEL_GPU_PROFILE") != "1" {
+		batcher.BeginBatch()
+		defer batcher.EndBatch()
+	}
 	for i, layer := range m.layers {
 		state, err = layer.ExecuteWithPagedKV(state, scratch, m.pagedCache, m.gpuPool, seqID, i, pos)
 		if err != nil {
@@ -525,6 +530,10 @@ func (m *ModelRuntime) DecodeWithPagedKVAndHidden(tokens []int, seqID int64, pos
 	scratch := tensor.NewTensor(tensor.NewShape(int(scratchBytes/4)), m.config.DType, scratchPtr)
 
 	// 5. Layer Loop using ExecuteWithPagedKV
+	if batcher, ok := m.backend.(backend.Batcher); ok && os.Getenv("VEXEL_GPU_PROFILE") != "1" {
+		batcher.BeginBatch()
+		defer batcher.EndBatch()
+	}
 	for i, layer := range m.layers {
 		state, err = layer.ExecuteWithPagedKV(state, scratch, m.pagedCache, m.gpuPool, seqID, i, pos)
 		if err != nil {

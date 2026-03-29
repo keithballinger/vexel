@@ -329,7 +329,8 @@ func runGenerate(globals GlobalFlags, args []string) error {
 		return fmt.Errorf("--draft-model and --medusa are mutually exclusive")
 	}
 
-	model, tok, gpuBackend, err := initModel(globals.Model, gf.MaxTokens, globals.ContextLen, globals.Verbose, false)
+	usePaged := globals.ContextLen > 0 || globals.Medusa
+	model, tok, gpuBackend, err := initModel(globals.Model, gf.MaxTokens, globals.ContextLen, globals.Verbose, usePaged)
 	if err != nil {
 		return err
 	}
