@@ -75,11 +75,12 @@ type MedusaScheduler struct {
 	// Speculative decoding metrics
 	specMetrics SpeculativeMetrics
 
-	// Adaptive speculation: disable when acceptance rate is too low.
+	// Adaptive speculation: starts OFF, enables when acceptance proves positive.
 	// Tracks the last N verification steps' acceptance counts.
 	recentAccepted []int // ring buffer of accepted counts per step
 	recentIdx      int   // write position in ring buffer
 	recentFull     bool  // true once the buffer has wrapped
+	probeCounter   int   // counts normal decode steps since last probe
 }
 
 // NewMedusaScheduler creates a Medusa-enabled scheduler.
@@ -240,20 +241,32 @@ func (ms *MedusaScheduler) step(ctx context.Context) error {
 		defer ms.trainer.GPUUnlock()
 	}
 
-	// Check if we should use Medusa speculation.
-	// Disable when heads are hot but acceptance rate is too low — speculation
-	// with 0% acceptance is 5x slower than normal decode due to per-token
-	// verification overhead.
-	useMedusa := ms.trainer != nil && ms.trainer.IsHot() && !ms.speculationDisabled()
+	// Adaptive speculation: starts OFF, turns ON once heads prove useful.
+	// Every 32 normal decode steps, run one speculation probe to test acceptance.
+	// Once the probe window shows avg acceptance >= 0.5, speculation stays on.
+	headsReady := ms.trainer != nil && ms.trainer.IsHot()
 
-	if useMedusa && ms.medusaConfig.UseTreeVerification {
-		return ms.runTreeMedusaDecodeStep(ctx, batch)
-	}
-	if useMedusa {
+	if headsReady && ms.speculationEnabled() {
+		// Speculation has proven useful — use it
+		if ms.medusaConfig.UseTreeVerification {
+			return ms.runTreeMedusaDecodeStep(ctx, batch)
+		}
 		return ms.runMedusaDecodeStep(ctx, batch)
 	}
 
-	// Fall back to standard decode with sample collection
+	if headsReady && ms.lastHidden != nil {
+		// Heads are ready but speculation not yet proven — probe periodically.
+		// The probe runs the heads' Forward to check if their top predictions
+		// match the base model's output, without running verification or
+		// committing any tokens. This avoids injecting bad tokens from probes.
+		ms.probeCounter++
+		if ms.probeCounter >= 32 {
+			ms.probeCounter = 0
+			ms.probeSpeculation(batch)
+		}
+	}
+
+	// Normal decode with training data collection
 	return ms.runDecodeStepWithTraining(ctx, batch)
 }
 
@@ -1025,21 +1038,58 @@ func (ms *MedusaScheduler) recordAcceptance(accepted int) {
 	}
 }
 
-// speculationDisabled returns true if recent speculation acceptance rate is
-// too low to justify the verification overhead. With N draft tokens, speculation
-// needs to accept at least 1 token per step on average to break even (since
-// verification costs N+1 decode calls). We disable when average acceptance
-// is below 0.5, meaning speculation is a net loss.
-func (ms *MedusaScheduler) speculationDisabled() bool {
+// probeSpeculation checks if Medusa heads can predict the next token correctly
+// without running full verification. It compares head 0's top prediction against
+// the last generated token (which the base model already produced).
+func (ms *MedusaScheduler) probeSpeculation(batch []*Sequence) {
+	if len(batch) == 0 || ms.lastHidden == nil || ms.trainer == nil {
+		return
+	}
+
+	seq := batch[0]
+	genTokens := seq.GeneratedTokens()
+	if len(genTokens) < 2 {
+		return
+	}
+
+	// Head 0 predicts the NEXT token from lastHidden.
+	// lastHidden was set after the previous decode step.
+	// The token that was actually generated is genTokens[len-1].
+	// But head 0 from that hidden state would predict the token AFTER the previous step,
+	// which IS genTokens[len-1] (the most recent token).
+	heads := ms.trainer.Heads()
+	logits := heads.Forward(0, ms.lastHidden)
+	if logits == nil {
+		return
+	}
+
+	predicted := argmaxFloat32(logits)
+	actual := genTokens[len(genTokens)-1]
+
+	accepted := 0
+	if predicted == actual {
+		accepted = 1
+	}
+	ms.recordAcceptance(accepted)
+}
+
+// speculationEnabled returns true if recent speculation acceptance rate is
+// high enough to justify the verification overhead. Speculation starts OFF
+// and only activates after the rolling window shows average acceptance >= 0.5
+// tokens per step. This prevents garbage output from barely-trained heads.
+//
+// The window is populated by periodic probe steps (see step()) that run
+// speculation once every probeInterval steps to check if heads have improved.
+func (ms *MedusaScheduler) speculationEnabled() bool {
 	if !ms.recentFull {
-		return false // not enough data yet
+		return false // not enough probe data yet
 	}
 	total := 0
 	for _, a := range ms.recentAccepted {
 		total += a
 	}
 	avg := float64(total) / float64(len(ms.recentAccepted))
-	return avg < 0.5
+	return avg >= 0.5
 }
 
 // argmaxFloat32 returns the index of the maximum value in the slice.
