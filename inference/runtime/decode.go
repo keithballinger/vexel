@@ -605,124 +605,37 @@ func (m *ModelRuntime) DecodeWithPagedKVBatched(tokens []int, seqIDs []int64, po
 		return tensor.Tensor{}, nil
 	}
 
-	// For batchSize==1, delegate to optimized single-sequence path
+	// Process each sequence individually through the single-sequence path.
+	// The batched path (ExecuteWithPagedKVBatched) has pool buffer conflicts
+	// when processing multiple offset sub-tensors. Sequential single-sequence
+	// decode is correct and still fast with command buffer batching.
 	if batchSize == 1 {
 		return m.DecodeWithPagedKV(tokens, seqIDs[0], positions[0])
 	}
-
-	if debugDecode {
-		fmt.Printf("[DECODE-PAGED-BATCH] tokens=%v seqIDs=%v positions=%v\n", tokens, seqIDs, positions)
-	}
-
-	// Lazily create GPU block pool if backend supports paged KV ops
-	if m.gpuPool == nil {
-		if _, ok := m.backend.(backend.PagedKVOps); ok {
-			blockSize := 16
-			maxSeq := m.config.MaxSeqLen
-			if maxSeq == 0 {
-				maxSeq = 4096
-			}
-			maxBlocksPerLayer := (maxSeq + blockSize - 1) / blockSize
-			m.CreateGPUBlockPool(maxBlocksPerLayer)
-		}
-	}
-	// Ensure GPU pool sequences exist
-	for _, seqID := range seqIDs {
-		if m.gpuPool != nil && !m.gpuPool.HasSequence(seqID) {
-			m.gpuPool.CreateSequence(seqID)
-		}
-	}
-
-	// Reset buffer pool if the backend supports it
-	if pooler, ok := m.backend.(interface{ ResetPool() }); ok {
-		pooler.ResetPool()
-	}
-
-	hiddenSize := m.config.HiddenSize
+	// Multi-sequence: decode each individually, combine logits.
+	// Use permanent allocation for combined logits since DecodeWithPagedKV
+	// resets scratch on each call.
 	vocabSize := m.config.VocabSize
-
-	if m.ctx == nil {
-		return tensor.Tensor{}, fmt.Errorf("inference context not initialized")
+	type pa interface{ AllocPermanent(int) tensor.DevicePtr }
+	var allLogitsPtr tensor.DevicePtr
+	if p, ok := m.backend.(pa); ok {
+		allLogitsPtr = p.AllocPermanent(batchSize * vocabSize * 4)
+	} else {
+		allLogitsPtr = m.backend.Alloc(batchSize * vocabSize * 4)
 	}
-
-	arena := m.ctx.GetArena(memory.Scratch)
-	if arena == nil {
-		return tensor.Tensor{}, fmt.Errorf("scratch arena not initialized")
-	}
-
-	m.ctx.ResetScratch()
-
-	allocPtr := func(bytes int) (tensor.DevicePtr, error) {
-		return arena.Alloc(bytes)
-	}
-
-	// 1. Copy token IDs to device
-	tokenBytes := int32ToBytes(tokens)
-	tokenPtr, err := allocPtr(len(tokenBytes))
-	if err != nil {
-		return tensor.Tensor{}, err
-	}
-	m.backend.ToDevice(tokenPtr, tokenBytes)
-
-	// 2. Allocate State [batchSize, hiddenSize]
-	statePtr, err := allocPtr(batchSize * hiddenSize * 4)
-	if err != nil {
-		return tensor.Tensor{}, err
-	}
-	state := tensor.NewTensor(tensor.NewShape(batchSize, hiddenSize), m.config.DType, statePtr)
-
-	// 3. Embedding Lookup — handles multiple tokens in one call
-	if !m.Embedding.DevicePtr().IsNil() {
-		m.backend.Embedding(tokenPtr, batchSize, m.Embedding.DevicePtr(), statePtr, vocabSize, hiddenSize)
-	}
-	m.backend.Sync()
-
-	// 4. Allocate Scratch for Layers
-	// Use max position for KV scratch sizing
-	maxPos := positions[0]
-	for _, p := range positions[1:] {
-		if p > maxPos {
-			maxPos = p
-		}
-	}
-	scratchBytes := m.config.ScratchBytes(batchSize)
-	maxKVLen := maxPos + batchSize
-	kvHeadDim := m.config.NumKeyValueHeads * (m.config.HiddenSize / m.config.NumAttentionHeads)
-	scratchBytes += int64(maxKVLen * kvHeadDim * 4 * 2)
-	scratchPtr, err := allocPtr(int(scratchBytes))
-	if err != nil {
-		return tensor.Tensor{}, err
-	}
-	scratch := tensor.NewTensor(tensor.NewShape(int(scratchBytes/4)), m.config.DType, scratchPtr)
-
-	// 5. Layer Loop using ExecuteWithPagedKVBatched
-	for i, layer := range m.layers {
-		state, err = layer.ExecuteWithPagedKVBatched(state, scratch, m.pagedCache, m.gpuPool, seqIDs, i, positions)
+	copier, hasCopier := m.backend.(backend.BufferCopier)
+	for i := 0; i < batchSize; i++ {
+		logits, err := m.DecodeWithPagedKV(tokens[i:i+1], seqIDs[i], positions[i])
 		if err != nil {
-			return tensor.Tensor{}, fmt.Errorf("layer %d: %w", i, err)
+			return tensor.Tensor{}, fmt.Errorf("seq %d: %w", i, err)
+		}
+		if hasCopier {
+			copier.CopyBuffer(logits.DevicePtr(), 0, allLogitsPtr, i*vocabSize*4, vocabSize*4)
 		}
 	}
 	m.backend.Sync()
-
-	// 6. Final Norm (in-place on state)
-	m.applyFinalNorm(statePtr, statePtr, batchSize, hiddenSize)
-
-	// 7. Compute Logits: state @ OutputHead^T → [batchSize, vocabSize]
-	logitsPtr, err := allocPtr(batchSize * vocabSize * 4)
-	if err != nil {
-		return tensor.Tensor{}, err
-	}
-	logits := tensor.NewTensor(tensor.NewShape(batchSize, vocabSize), m.config.DType, logitsPtr)
-
-	m.outputHeadMatMul(statePtr, logitsPtr, batchSize, vocabSize, hiddenSize)
-
-	m.backend.Sync()
-
-	if debugDecode {
-		debugLogits(m.backend, logitsPtr, vocabSize)
-	}
-
-	return logits, nil
+	allLogits := tensor.NewTensor(tensor.NewShape(batchSize, vocabSize), m.config.DType, allLogitsPtr)
+	return allLogits, nil
 }
 
 // DecodeWithGPUKV performs a forward pass using GPU-resident KV cache.
