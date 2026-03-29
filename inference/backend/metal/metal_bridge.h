@@ -772,6 +772,16 @@ void metal_sdpa_paged_decode_f32(void* queue, void* pipeline,
                                   float scale, int tokensInLastBlock);
 
 
+// Multi-query paged SDPA decode: handles querySeqLen query positions in one dispatch.
+// Q: [querySeqLen, numQHeads, headDim], out: [querySeqLen, numQHeads, headDim]
+// kvLens: [querySeqLen] int32 per-query KV lengths for causal masking
+void metal_sdpa_paged_decode_multiquery_f32(void* queue, void* pipeline,
+                                            void* Q, void* kvPool, void* blockTable, void* out,
+                                            void* kvLens,
+                                            int numBlocks, int blockSize,
+                                            int numQHeads, int numKVHeads, int headDim,
+                                            float scale, int querySeqLen);
+
 // =============================================================================
 // Q8_0 Quantization for KV Cache
 // Q8_0 format: 34 bytes per 32 elements (2-byte f16 scale + 32 int8 values)

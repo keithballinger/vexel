@@ -184,8 +184,9 @@ type Backend struct {
 	memcpyComputePipeline      unsafe.Pointer // Compute-based memory copy (avoids blit encoder)
 	deinterleaveQKVPipeline    unsafe.Pointer // Deinterleave fused QKV output into separate Q, K, V
 	deinterleave2WayPipeline   unsafe.Pointer // Deinterleave fused gate_up output into separate gate, up
-	reshapePagedKVPipeline     unsafe.Pointer
-	sdpaPagedDecodePipeline    unsafe.Pointer
+	reshapePagedKVPipeline              unsafe.Pointer
+	sdpaPagedDecodePipeline             unsafe.Pointer
+	sdpaPagedDecodeMultiqueryPipeline   unsafe.Pointer
 
 	// NWG SDPA scratch buffers (lazy-allocated, reused across calls)
 	nwgPartialsBuf  unsafe.Pointer // partials buffer for multi-TG merge
@@ -368,6 +369,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.deinterleave2WayPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("deinterleave_2way_f32"))
 	b.reshapePagedKVPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("reshape_paged_kv_f32"))
 	b.sdpaPagedDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_paged_decode_f32"))
+	b.sdpaPagedDecodeMultiqueryPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_paged_decode_multiquery_f32"))
 
 	return b, nil
 }
@@ -2381,6 +2383,24 @@ func (b *Backend) SDPAPagedDecodeBatched(q, kvPool tensor.DevicePtr, blockTables
 		b.SDPAPagedDecode(seqQ, kvPool, blockTables[i], seqOut,
 			numBlocks, blockSize, numQHeads, numKVHeads, headDim, scale, tokensInLastBlock)
 	}
+}
+
+// SDPAPagedDecodeMultiquery handles multiple query positions against paged KV in one dispatch.
+// Q: [querySeqLen, numQHeads, headDim], out: [querySeqLen, numQHeads, headDim]
+// kvLens: GPU buffer of [querySeqLen] int32 per-query KV lengths for causal masking.
+func (b *Backend) SDPAPagedDecodeMultiquery(q, kvPool, blockTable, out, kvLens tensor.DevicePtr,
+	numBlocks, blockSize, numQHeads, numKVHeads, headDim int, scale float32, querySeqLen int) {
+	b.profiler.RecordDispatch("SDPAPagedDecodeMultiquery")
+	if b.sdpaPagedDecodeMultiqueryPipeline == nil {
+		panic("SDPAPagedDecodeMultiquery called but pipeline unavailable")
+	}
+	C.metal_sdpa_paged_decode_multiquery_f32(b.queue, b.sdpaPagedDecodeMultiqueryPipeline,
+		unsafe.Pointer(q.Addr()), unsafe.Pointer(kvPool.Addr()),
+		unsafe.Pointer(blockTable.Addr()), unsafe.Pointer(out.Addr()),
+		unsafe.Pointer(kvLens.Addr()),
+		C.int(numBlocks), C.int(blockSize),
+		C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale), C.int(querySeqLen))
 }
 
 // bytesToFloat32Slice reinterprets bytes as a float32 slice.

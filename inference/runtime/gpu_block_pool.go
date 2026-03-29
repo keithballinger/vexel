@@ -362,6 +362,75 @@ func (g *GPUBlockPool) AttentionWithKVLen(layerIdx int, seqID int64,
 	return nil
 }
 
+// AttentionMultiquery performs multi-query paged SDPA in a single dispatch.
+// qPtr: [querySeqLen, numQHeads, headDim], outPtr: [querySeqLen, numQHeads, headDim]
+// kvLens: per-query KV lengths for causal masking (query i attends to 0..kvLens[i]-1).
+func (g *GPUBlockPool) AttentionMultiquery(layerIdx int, seqID int64,
+	qPtr, outPtr tensor.DevicePtr, numQHeads, headDim int, scale float32,
+	querySeqLen int, kvLens []int) error {
+
+	g.mu.Lock()
+	seq, ok := g.seqs[seqID]
+	if !ok {
+		g.mu.Unlock()
+		return fmt.Errorf("sequence %d not found", seqID)
+	}
+
+	bt := seq.blockTables[layerIdx]
+	numBlocks := len(bt)
+	if numBlocks == 0 {
+		g.mu.Unlock()
+		return fmt.Errorf("no blocks for seq %d layer %d", seqID, layerIdx)
+	}
+
+	// Sync block table to GPU if dirty
+	if seq.btDirty[layerIdx] || seq.btGPU[layerIdx].IsNil() {
+		if !seq.btGPU[layerIdx].IsNil() {
+			g.be.Free(seq.btGPU[layerIdx])
+		}
+		seq.btGPU[layerIdx] = g.allocPerm(numBlocks * 4)
+		g.be.ToDevice(seq.btGPU[layerIdx], gpuInt32ToBytes(bt))
+		seq.btDirty[layerIdx] = false
+	}
+
+	btGPU := seq.btGPU[layerIdx]
+	g.mu.Unlock()
+
+	// Upload kvLens to GPU
+	kvLens32 := make([]int32, querySeqLen)
+	for i, l := range kvLens {
+		kvLens32[i] = int32(l)
+	}
+	kvLensBuf := g.allocPerm(querySeqLen * 4)
+	g.be.ToDevice(kvLensBuf, gpuInt32ToBytes(kvLens32))
+
+	// Check if backend supports multi-query paged SDPA
+	type multiqueryOps interface {
+		SDPAPagedDecodeMultiquery(q, kvPool, blockTable, out, kvLens tensor.DevicePtr,
+			numBlocks, blockSize, numQHeads, numKVHeads, headDim int,
+			scale float32, querySeqLen int)
+	}
+	if mq, ok := g.be.(multiqueryOps); ok {
+		mq.SDPAPagedDecodeMultiquery(qPtr, g.pools[layerIdx], btGPU, outPtr, kvLensBuf,
+			numBlocks, g.blockSize, numQHeads, g.numKVHeads, g.headDim, scale, querySeqLen)
+	} else {
+		// Fallback: per-query sequential decode
+		qStride := numQHeads * headDim
+		for i := 0; i < querySeqLen; i++ {
+			tokenQ := tensor.DevicePtrOffset(qPtr, uintptr(i*qStride*4))
+			tokenOut := tensor.DevicePtrOffset(outPtr, uintptr(i*qStride*4))
+			tokensInLastBlock := kvLens[i] - ((kvLens[i]-1)/g.blockSize)*g.blockSize
+			nBlocks := (kvLens[i] + g.blockSize - 1) / g.blockSize
+			g.pagedOps.SDPAPagedDecode(tokenQ, g.pools[layerIdx], btGPU, tokenOut,
+				nBlocks, g.blockSize, numQHeads, g.numKVHeads, g.headDim, scale, tokensInLastBlock)
+		}
+	}
+
+	g.be.Sync()
+	g.be.Free(kvLensBuf)
+	return nil
+}
+
 // AttentionBatched performs batched SDPA across multiple sequences using paged KV.
 func (g *GPUBlockPool) AttentionBatched(
 	layerIdx int,

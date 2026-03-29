@@ -428,4 +428,12 @@ type PagedKVOps interface {
 		scale float32,
 		seqLens []int,
 	)
+
+	// SDPAPagedDecodeMultiquery handles multiple query positions against paged KV
+	// in a single dispatch. Used for speculative decoding verification.
+	// q: [querySeqLen, numQHeads, headDim], out: [querySeqLen, numQHeads, headDim]
+	// kvLens: GPU buffer [querySeqLen] int32 per-query KV lengths for causal masking.
+	SDPAPagedDecodeMultiquery(q, kvPool, blockTable, out, kvLens tensor.DevicePtr,
+		numBlocks, blockSize, numQHeads, numKVHeads, headDim int,
+		scale float32, querySeqLen int)
 }

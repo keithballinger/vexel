@@ -9811,6 +9811,119 @@ kernel void sdpa_paged_decode_f32(
     }
 }
 
+// Multi-query paged SDPA decode: handles multiple query positions against paged KV.
+// Used for speculative decoding verification where multiple draft tokens need
+// attention against the full KV cache. Each query position has its own kvLen
+// for causal masking (query i attends to positions 0..kvLens[i]-1).
+// Q: [querySeqLen, numQHeads, headDim], out: [querySeqLen, numQHeads, headDim]
+kernel void sdpa_paged_decode_multiquery_f32(
+    device const float* Q [[buffer(0)]],
+    device const float* kvPool [[buffer(1)]],
+    device const int* blockTable [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    device const int* kvLens [[buffer(4)]],     // [querySeqLen] per-query KV lengths
+    constant int& numBlocks [[buffer(5)]],
+    constant int& blockSize [[buffer(6)]],
+    constant int& numQHeads [[buffer(7)]],
+    constant int& numKVHeads [[buffer(8)]],
+    constant int& headDim [[buffer(9)]],
+    constant float& scale [[buffer(10)]],
+    constant int& querySeqLen [[buffer(11)]],
+    threadgroup float* shared [[threadgroup(0)]],
+    uint2 gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int qPos = gid.x;
+    int qHead = gid.y;
+    if (qPos >= querySeqLen || qHead >= numQHeads) return;
+
+    int headsPerKV = numQHeads / numKVHeads;
+    int kvHead = qHead / headsPerKV;
+
+    int qOffset = qPos * numQHeads * headDim + qHead * headDim;
+
+    int elementsPerBlockPart = blockSize * numKVHeads * headDim;
+    int elementsPerBlock = 2 * elementsPerBlockPart;
+
+    // Per-query KV length (causal)
+    int kvLen = kvLens[qPos];
+
+    threadgroup float* weights = shared;
+    threadgroup float* warpVals = shared + kvLen;
+
+    // Phase 1a: Q·K scores
+    float localMax = -INFINITY;
+    for (int pos = (int)tid; pos < kvLen; pos += PAGED_DECODE_THREADS) {
+        int logicalBlock = pos / blockSize;
+        int tokenInBlock = pos % blockSize;
+        int physicalBlock = blockTable[logicalBlock];
+
+        long kBase = (long)physicalBlock * elementsPerBlock +
+                     tokenInBlock * numKVHeads * headDim +
+                     kvHead * headDim;
+
+        float dot = 0.0f;
+        for (int d = 0; d < headDim; d++) {
+            dot += Q[qOffset + d] * kvPool[kBase + d];
+        }
+        float score = dot * scale;
+        weights[pos] = score;
+        localMax = max(localMax, score);
+    }
+
+    localMax = simd_max(localMax);
+    if (simd_lane == 0) warpVals[simd_group] = localMax;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 8) {
+        localMax = simd_max(warpVals[tid]);
+        if (tid == 0) warpVals[0] = localMax;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float gMax = warpVals[0];
+
+    // Phase 1b: softmax
+    float localSum = 0.0f;
+    for (int pos = (int)tid; pos < kvLen; pos += PAGED_DECODE_THREADS) {
+        float expScore = exp(weights[pos] - gMax);
+        weights[pos] = expScore;
+        localSum += expScore;
+    }
+
+    localSum = simd_sum(localSum);
+    if (simd_lane == 0) warpVals[simd_group] = localSum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 8) {
+        localSum = simd_sum(warpVals[tid]);
+        if (tid == 0) warpVals[0] = localSum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float invSum = 1.0f / warpVals[0];
+
+    for (int pos = (int)tid; pos < kvLen; pos += PAGED_DECODE_THREADS) {
+        weights[pos] *= invSum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 2: weighted V accumulation
+    int outOffset = qPos * numQHeads * headDim + qHead * headDim;
+    for (int d = (int)tid; d < headDim; d += PAGED_DECODE_THREADS) {
+        float sum = 0.0f;
+        for (int pos = 0; pos < kvLen; pos++) {
+            int logicalBlock = pos / blockSize;
+            int tokenInBlock = pos % blockSize;
+            int physicalBlock = blockTable[logicalBlock];
+            long vBase = (long)physicalBlock * elementsPerBlock +
+                         elementsPerBlockPart +
+                         tokenInBlock * numKVHeads * headDim +
+                         kvHead * headDim;
+            sum += weights[pos] * kvPool[vBase + d];
+        }
+        out[outOffset + d] = sum;
+    }
+}
+
 // Tiled SDPA for prefill with causal masking (Flash Attention style)
 // Uses online softmax to compute attention in a single pass with tiling
 // Each threadgroup handles one (qPos, qHead) pair with threads parallelizing over headDim
@@ -13577,6 +13690,51 @@ void metal_sdpa_paged_decode_f32(void* queuePtr, void* pipelinePtr,
 
     // One threadgroup per Q head
     MTLSize threadgroups = MTLSizeMake(numQHeads, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Multi-query paged SDPA decode dispatch.
+// Q: [querySeqLen, numQHeads, headDim], out: [querySeqLen, numQHeads, headDim]
+// kvLens: [querySeqLen] per-query KV lengths for causal masking.
+void metal_sdpa_paged_decode_multiquery_f32(void* queuePtr, void* pipelinePtr,
+                                            void* Q, void* kvPool, void* blockTable, void* out,
+                                            void* kvLens,
+                                            int numBlocks, int blockSize,
+                                            int numQHeads, int numKVHeads, int headDim,
+                                            float scale, int querySeqLen) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)kvPool offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)blockTable offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)kvLens offset:0 atIndex:4];
+    [encoder setBytes:&numBlocks length:sizeof(numBlocks) atIndex:5];
+    [encoder setBytes:&blockSize length:sizeof(blockSize) atIndex:6];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:7];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:8];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:9];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:10];
+    [encoder setBytes:&querySeqLen length:sizeof(querySeqLen) atIndex:11];
+
+    // Shared memory: max kvLen across all queries + warpVals[8]
+    // Use the max possible: numBlocks * blockSize
+    int maxKVLen = numBlocks * blockSize;
+    int sharedMemSize = (maxKVLen + 8) * sizeof(float);
+
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    // 2D grid: [querySeqLen, numQHeads]
+    MTLSize threadgroups = MTLSizeMake(querySeqLen, numQHeads, 1);
     MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
