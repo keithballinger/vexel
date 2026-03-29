@@ -74,6 +74,12 @@ type MedusaScheduler struct {
 
 	// Speculative decoding metrics
 	specMetrics SpeculativeMetrics
+
+	// Adaptive speculation: disable when acceptance rate is too low.
+	// Tracks the last N verification steps' acceptance counts.
+	recentAccepted []int // ring buffer of accepted counts per step
+	recentIdx      int   // write position in ring buffer
+	recentFull     bool  // true once the buffer has wrapped
 }
 
 // NewMedusaScheduler creates a Medusa-enabled scheduler.
@@ -89,11 +95,12 @@ func NewMedusaScheduler(
 	}
 
 	ms := &MedusaScheduler{
-		Scheduler:     base,
-		medusaConfig:  medusaConfig,
-		recentTokens:  make([]int, 0, medusaConfig.NumHeads+1),
-		recentHiddens: make([][]float32, 0, medusaConfig.NumHeads+1),
-		maxRecent:     medusaConfig.NumHeads + 1,
+		Scheduler:      base,
+		medusaConfig:   medusaConfig,
+		recentTokens:   make([]int, 0, medusaConfig.NumHeads+1),
+		recentHiddens:  make([][]float32, 0, medusaConfig.NumHeads+1),
+		maxRecent:      medusaConfig.NumHeads + 1,
+		recentAccepted: make([]int, 4), // track last 4 speculation steps
 	}
 
 	// Initialize trainer
@@ -233,8 +240,11 @@ func (ms *MedusaScheduler) step(ctx context.Context) error {
 		defer ms.trainer.GPUUnlock()
 	}
 
-	// Check if we should use Medusa speculation
-	useMedusa := ms.trainer != nil && ms.trainer.IsHot()
+	// Check if we should use Medusa speculation.
+	// Disable when heads are hot but acceptance rate is too low — speculation
+	// with 0% acceptance is 5x slower than normal decode due to per-token
+	// verification overhead.
+	useMedusa := ms.trainer != nil && ms.trainer.IsHot() && !ms.speculationDisabled()
 
 	if useMedusa && ms.medusaConfig.UseTreeVerification {
 		return ms.runTreeMedusaDecodeStep(ctx, batch)
@@ -427,6 +437,11 @@ func (ms *MedusaScheduler) runMedusaDecodeStep(ctx context.Context, batch []*Seq
 
 	// Handle prefill first
 	if seq.State() == StatePending && len(seq.PromptTokens()) > 0 && !seq.IsPrefillComplete() {
+		// Reset acceptance window for new sequence — give speculation a fresh chance
+		// Reset acceptance window for the new sequence.
+		ms.recentIdx = 0
+		ms.recentFull = false
+
 		if useGPUCache {
 			if err := ms.runGPUPrefill(seq); err != nil {
 				return err
@@ -591,6 +606,8 @@ func (ms *MedusaScheduler) runMedusaDecodeStep(ctx context.Context, batch []*Seq
 	}
 
 
+	ms.recordAcceptance(numAccepted)
+
 	// Step 6: Truncate KV cache to only keep accepted tokens
 	// The verification added (1 + numHeads) tokens to cache
 	// We want to keep (1 + numAccepted) tokens (input + accepted drafts)
@@ -712,6 +729,10 @@ func (ms *MedusaScheduler) runTreeMedusaDecodeStep(ctx context.Context, batch []
 
 	// Handle prefill first
 	if seq.State() == StatePending && len(seq.PromptTokens()) > 0 && !seq.IsPrefillComplete() {
+		// Reset acceptance window for the new sequence.
+		ms.recentIdx = 0
+		ms.recentFull = false
+
 		if useGPUCache {
 			if err := ms.runGPUPrefill(seq); err != nil {
 				return err
@@ -802,6 +823,7 @@ func (ms *MedusaScheduler) runTreeMedusaDecodeStep(ctx context.Context, batch []
 	bestIdx, numAccepted, finalToken := selectBestTreePath(paths, allLogitsData, vocabSize)
 
 	ms.specMetrics.DraftTokensAccepted += numAccepted
+	ms.recordAcceptance(numAccepted)
 
 	debugSpec := os.Getenv("MEDUSA_DEBUG") != ""
 	if debugSpec {
@@ -998,6 +1020,32 @@ func selectBestTreePath(paths []medusa.CandidatePath, verifyLogits []float32, vo
 	}
 
 	return bestIdx, accepted, finalToken
+}
+
+// recordAcceptance records how many draft tokens were accepted in a speculation step.
+func (ms *MedusaScheduler) recordAcceptance(accepted int) {
+	ms.recentAccepted[ms.recentIdx] = accepted
+	ms.recentIdx = (ms.recentIdx + 1) % len(ms.recentAccepted)
+	if ms.recentIdx == 0 {
+		ms.recentFull = true
+	}
+}
+
+// speculationDisabled returns true if recent speculation acceptance rate is
+// too low to justify the verification overhead. With N draft tokens, speculation
+// needs to accept at least 1 token per step on average to break even (since
+// verification costs N+1 decode calls). We disable when average acceptance
+// is below 0.5, meaning speculation is a net loss.
+func (ms *MedusaScheduler) speculationDisabled() bool {
+	if !ms.recentFull {
+		return false // not enough data yet
+	}
+	total := 0
+	for _, a := range ms.recentAccepted {
+		total += a
+	}
+	avg := float64(total) / float64(len(ms.recentAccepted))
+	return avg < 0.5
 }
 
 // argmaxFloat32 returns the index of the maximum value in the slice.
