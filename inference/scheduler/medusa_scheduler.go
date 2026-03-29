@@ -955,11 +955,7 @@ func selectBestTreePath(paths []medusa.CandidatePath, verifyLogits []float32, vo
 			// The logits at position i are conditioned on the best path's tokens
 			// at positions 0..i-1. So the alternate path must share the same prefix.
 			if i > 0 && i-1 < len(paths[0].Tokens) && i-1 < len(altPath.Tokens) {
-				// The verification logits at position i were generated with
-				// paths[0].Tokens[i-1] as input. For the alternate path to use
-				// these logits, it must have the same token at position i-1.
 				if altPath.Tokens[i-1] != paths[0].Tokens[i-1] {
-					// Prefix diverged - logits no longer valid for this path
 					break
 				}
 			}
@@ -976,6 +972,13 @@ func selectBestTreePath(paths []medusa.CandidatePath, verifyLogits []float32, vo
 
 		// If all tokens accepted, sample bonus token
 		if altAccepted == len(altPath.Tokens) && altAccepted < numPositions {
+			posLogits := verifyLogits[altAccepted*vocabSize : (altAccepted+1)*vocabSize]
+			altFinal = argmaxFloat32(posLogits)
+		}
+
+		// If the loop ended without setting altFinal (e.g., prefix diverged),
+		// compute it from the next valid position's logits.
+		if altFinal == 0 && altAccepted > 0 && altAccepted < numPositions {
 			posLogits := verifyLogits[altAccepted*vocabSize : (altAccepted+1)*vocabSize]
 			altFinal = argmaxFloat32(posLogits)
 		}

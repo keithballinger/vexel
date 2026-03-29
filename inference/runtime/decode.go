@@ -1486,18 +1486,12 @@ func (m *ModelRuntime) VerifySpeculativeWithPagedKVAndHidden(tokens []int, seqID
 	// Process each verification token individually through all layers using
 	// the single-token paged decode path (DecodeWithPagedKVAndHidden), which
 	// correctly handles the full KV history via paged SDPA.
-	// Collect logits and hidden states for all positions.
 	vocabSize := m.config.VocabSize
-
-	// Allocate combined logits buffer
-	arena := m.ctx.GetArena(memory.Scratch)
-	m.ctx.ResetScratch()
-	allLogitsPtr, err := arena.Alloc(seqLen * vocabSize * 4)
-	if err != nil {
-		return tensor.Tensor{}, nil, err
-	}
-
 	hiddenStates := make([][]float32, seqLen)
+
+	// Collect logits on CPU since DecodeWithPagedKVAndHidden resets the scratch
+	// arena on each call, invalidating any GPU-side accumulation buffer.
+	allLogitsBytes := make([]byte, seqLen*vocabSize*4)
 
 	for i, token := range tokens {
 		pos := startPos + i
@@ -1508,18 +1502,21 @@ func (m *ModelRuntime) VerifySpeculativeWithPagedKVAndHidden(tokens []int, seqID
 
 		hiddenStates[i] = hidden
 
-		// Copy this token's logits into the combined buffer
-		logitsBytes := make([]byte, vocabSize*4)
+		// Copy this token's logits to CPU
 		m.backend.Sync()
-		m.backend.ToHost(logitsBytes, logits.DevicePtr())
-
-		// Write to combined buffer at the correct offset
-		dstOffset := i * vocabSize * 4
-		m.backend.ToDevice(tensor.DevicePtrOffset(allLogitsPtr, uintptr(dstOffset)), logitsBytes)
+		m.backend.ToHost(allLogitsBytes[i*vocabSize*4:(i+1)*vocabSize*4], logits.DevicePtr())
 	}
 
-	allLogits := tensor.NewTensor(tensor.NewShape(seqLen, vocabSize), m.config.DType, allLogitsPtr)
+	// Upload combined logits to GPU scratch for the caller.
+	m.ctx.ResetScratch()
+	arena := m.ctx.GetArena(memory.Scratch)
+	allLogitsPtr, err := arena.Alloc(seqLen * vocabSize * 4)
+	if err != nil {
+		return tensor.Tensor{}, nil, err
+	}
+	m.backend.ToDevice(allLogitsPtr, allLogitsBytes)
 	m.backend.Sync()
 
+	allLogits := tensor.NewTensor(tensor.NewShape(seqLen, vocabSize), m.config.DType, allLogitsPtr)
 	return allLogits, hiddenStates, nil
 }
