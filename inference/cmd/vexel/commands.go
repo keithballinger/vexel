@@ -413,6 +413,10 @@ func runGenerate(globals GlobalFlags, args []string) error {
 			log.Printf("[speculative: acceptance=%.1f%% speedup=%.1fx generated=%d accepted=%d]",
 				sm.AcceptanceRate()*100, sm.Speedup(), sm.DraftTokensGenerated, sm.DraftTokensAccepted)
 		}
+		if totalMB, usedMB, freeMB := baseSched.GPUMemoryStats(); totalMB > 0 {
+			log.Printf("[gpu memory: %.1f MB used / %.1f MB total (%.1f MB free)]",
+				usedMB, totalMB, freeMB)
+		}
 	}
 
 	// Save Medusa heads after generation (enables offline training via generate)
@@ -434,7 +438,10 @@ func runChat(globals GlobalFlags, args []string) error {
 		return err
 	}
 
-	model, tok, gpuBackend, err := initModel(globals.Model, 256, globals.ContextLen, globals.Verbose, false)
+	samplerCfg := sampler.DefaultConfig()
+	samplerCfg.Temperature = float32(cf.Temperature)
+
+	model, tok, gpuBackend, err := initModel(globals.Model, cf.MaxTokens, globals.ContextLen, globals.Verbose, false)
 	if err != nil {
 		return err
 	}
@@ -443,8 +450,8 @@ func runChat(globals GlobalFlags, args []string) error {
 	schedConfig := scheduler.Config{
 		MaxBatchSize:  1,
 		MaxSequences:  1,
-		MaxTokens:     256,
-		SamplerConfig: sampler.DefaultConfig(),
+		MaxTokens:     cf.MaxTokens,
+		SamplerConfig: samplerCfg,
 	}
 
 	var sched *scheduler.Scheduler

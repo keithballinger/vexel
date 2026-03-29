@@ -158,6 +158,8 @@ func parseGenerateFlags(args []string) (GenerateFlags, error) {
 type ChatFlags struct {
 	SystemPrompt   string
 	NoChatTemplate bool
+	MaxTokens      int
+	Temperature    float64
 }
 
 // parseChatFlags parses chat-specific flags.
@@ -166,6 +168,8 @@ func parseChatFlags(args []string) (ChatFlags, error) {
 	cf := ChatFlags{}
 	fs.StringVar(&cf.SystemPrompt, "system-prompt", "You are a helpful assistant.", "System prompt for chat mode")
 	fs.BoolVar(&cf.NoChatTemplate, "no-chat-template", false, "Disable chat template formatting")
+	fs.IntVar(&cf.MaxTokens, "max-tokens", 256, "Maximum tokens to generate per turn")
+	fs.Float64Var(&cf.Temperature, "temperature", 0.7, "Sampling temperature (0=greedy)")
 	if err := fs.Parse(args); err != nil {
 		return ChatFlags{}, err
 	}

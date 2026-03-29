@@ -23,8 +23,8 @@ func TestChatLoop(t *testing.T) {
 	err := internal.RunChatLoop(r, &w, nil) // nil scheduler
 	
 	output := w.String()
-	if !strings.Contains(output, ">>") {
-		t.Error("Expected prompt '>>' in output")
+	if !strings.Contains(output, ">>>") {
+		t.Error("Expected prompt '>>>' in output")
 	}
 	
 	// If it fails on nil scheduler, that's expected behavior we can assert on, 

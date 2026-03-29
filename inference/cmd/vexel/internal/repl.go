@@ -45,13 +45,16 @@ func RunChatLoopWithConfig(r io.Reader, w io.Writer, sched SchedulerInterface, c
 	}
 
 	for {
-		fmt.Fprint(w, ">> ")
+		fmt.Fprint(w, ">>> ")
 		if !scanner.Scan() {
 			return nil
 		}
 
 		text := strings.TrimSpace(scanner.Text())
-		if text == "Exit" || text == "exit" || text == "" {
+		if text == "" {
+			continue
+		}
+		if text == "exit" || text == "quit" {
 			return nil
 		}
 
