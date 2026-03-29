@@ -107,7 +107,7 @@ func DefaultOnlineConfig() OnlineConfig {
 		WarmupSamples:  200,     // Start training after 200 samples
 		MinAccuracy:    0.3,     // 30% top-1 accuracy to go hot
 		BatchSize:      64,      // Train on 64 samples at a time
-		LearningRate:   0.01,    // Aggressive LR for fast convergence from lm_head init
+		LearningRate:   0.005,   // Conservative LR for stable convergence with warmup
 		TrainInterval:  1 * time.Second, // Balance training vs inference GPU time
 		EvalInterval:   1 * time.Second,
 	}

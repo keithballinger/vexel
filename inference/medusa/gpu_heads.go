@@ -400,6 +400,14 @@ func (h *GPUHeads) TrainStep(samples []TrainingSample, lr float32) float32 {
 		return 0
 	}
 
+	// Learning rate warmup: linearly ramp up over first 50 steps
+	// to prevent large initial updates that cause instability
+	h.trainSteps++
+	const warmupSteps = 50
+	if h.trainSteps <= warmupSteps {
+		lr = lr * float32(h.trainSteps) / float32(warmupSteps)
+	}
+
 	// Check if backend supports training operations
 	trainOps, hasTrainOps := h.backend.(backend.TrainingOps)
 	if !hasTrainOps {
