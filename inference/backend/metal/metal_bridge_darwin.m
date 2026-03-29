@@ -5345,16 +5345,17 @@ kernel void matvec_q8_0_nr2_f32(
         {
             device const uchar* p = b_row0 + block * Q8_0_BYTES_PER_BLOCK;
             float d = float(as_type<half>(*((device const ushort*)p)));
+            device const char* w = (device const char*)(p + 2);
             float s = 0.0f;
             for (int i = 0; i < elems4; i += 4) {
-                uint32_t q = *((device const uint32_t*)(p + 2 + i));
-                s += a_vals[i+0] * float((char)(q & 0xFF));
-                s += a_vals[i+1] * float((char)((q >> 8) & 0xFF));
-                s += a_vals[i+2] * float((char)((q >> 16) & 0xFF));
-                s += a_vals[i+3] * float((char)((q >> 24) & 0xFF));
+                char4 v = *((device const char4*)(w + i));
+                s += a_vals[i+0] * float(v.x);
+                s += a_vals[i+1] * float(v.y);
+                s += a_vals[i+2] * float(v.z);
+                s += a_vals[i+3] * float(v.w);
             }
             for (int i = elems4; i < elems; i++) {
-                s += a_vals[i] * float((char)p[2 + i]);
+                s += a_vals[i] * float(w[i]);
             }
             sum0 += d * s;
         }
@@ -5363,16 +5364,17 @@ kernel void matvec_q8_0_nr2_f32(
         if (row1 < N) {
             device const uchar* p = b_row1 + block * Q8_0_BYTES_PER_BLOCK;
             float d = float(as_type<half>(*((device const ushort*)p)));
+            device const char* w = (device const char*)(p + 2);
             float s = 0.0f;
             for (int i = 0; i < elems4; i += 4) {
-                uint32_t q = *((device const uint32_t*)(p + 2 + i));
-                s += a_vals[i+0] * float((char)(q & 0xFF));
-                s += a_vals[i+1] * float((char)((q >> 8) & 0xFF));
-                s += a_vals[i+2] * float((char)((q >> 16) & 0xFF));
-                s += a_vals[i+3] * float((char)((q >> 24) & 0xFF));
+                char4 v = *((device const char4*)(w + i));
+                s += a_vals[i+0] * float(v.x);
+                s += a_vals[i+1] * float(v.y);
+                s += a_vals[i+2] * float(v.z);
+                s += a_vals[i+3] * float(v.w);
             }
             for (int i = elems4; i < elems; i++) {
-                s += a_vals[i] * float((char)p[2 + i]);
+                s += a_vals[i] * float(w[i]);
             }
             sum1 += d * s;
         }
@@ -5427,16 +5429,17 @@ kernel void matmul_q8_0_batched_f32(
         {
             device const uchar* p = b_row0 + block * Q8_0_BYTES_PER_BLOCK;
             float d = float(as_type<half>(*((device const ushort*)p)));
+            device const char* w = (device const char*)(p + 2);
             float s = 0.0f;
             for (int i = 0; i < elems4; i += 4) {
-                uint32_t q = *((device const uint32_t*)(p + 2 + i));
-                s += a_vals[i+0] * float((char)(q & 0xFF));
-                s += a_vals[i+1] * float((char)((q >> 8) & 0xFF));
-                s += a_vals[i+2] * float((char)((q >> 16) & 0xFF));
-                s += a_vals[i+3] * float((char)((q >> 24) & 0xFF));
+                char4 v = *((device const char4*)(w + i));
+                s += a_vals[i+0] * float(v.x);
+                s += a_vals[i+1] * float(v.y);
+                s += a_vals[i+2] * float(v.z);
+                s += a_vals[i+3] * float(v.w);
             }
             for (int i = elems4; i < elems; i++) {
-                s += a_vals[i] * float((char)p[2 + i]);
+                s += a_vals[i] * float(w[i]);
             }
             sum0 += d * s;
         }
@@ -5444,16 +5447,17 @@ kernel void matmul_q8_0_batched_f32(
         if (row1 < N) {
             device const uchar* p = b_row1 + block * Q8_0_BYTES_PER_BLOCK;
             float d = float(as_type<half>(*((device const ushort*)p)));
+            device const char* w = (device const char*)(p + 2);
             float s = 0.0f;
             for (int i = 0; i < elems4; i += 4) {
-                uint32_t q = *((device const uint32_t*)(p + 2 + i));
-                s += a_vals[i+0] * float((char)(q & 0xFF));
-                s += a_vals[i+1] * float((char)((q >> 8) & 0xFF));
-                s += a_vals[i+2] * float((char)((q >> 16) & 0xFF));
-                s += a_vals[i+3] * float((char)((q >> 24) & 0xFF));
+                char4 v = *((device const char4*)(w + i));
+                s += a_vals[i+0] * float(v.x);
+                s += a_vals[i+1] * float(v.y);
+                s += a_vals[i+2] * float(v.z);
+                s += a_vals[i+3] * float(v.w);
             }
             for (int i = elems4; i < elems; i++) {
-                s += a_vals[i] * float((char)p[2 + i]);
+                s += a_vals[i] * float(w[i]);
             }
             sum1 += d * s;
         }
