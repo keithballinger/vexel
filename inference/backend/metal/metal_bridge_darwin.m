@@ -10939,7 +10939,7 @@ void metal_copy_buffer(void* queue, void* srcBuffer, size_t srcOffset,
     [blit endEncoding];
 
     [commandBuffer commit];
-    // [commandBuffer waitUntilCompleted]; // Make async to avoid CPU blocking
+    [commandBuffer waitUntilCompleted];
 }
 
 // Global batch state (thread-local would be better for multi-threading)

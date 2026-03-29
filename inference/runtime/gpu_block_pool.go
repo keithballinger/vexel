@@ -255,13 +255,15 @@ func (g *GPUBlockPool) StoreKV(layerIdx int, seqID int64, startPos int,
 		g.pagedOps.ReshapePagedKV(vPtr, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
 			1, g.numKVHeads, g.headDim, g.blockSize, true)
 	} else {
-		// Multi-token path: copy each token's K/V to a temp buffer and scatter.
-		// ReshapePagedKV doesn't handle DevicePtr offsets, so we can't use
-		// DevicePtrOffset directly. Instead, copy per-token data to a temp
-		// buffer and scatter from there.
+		// Multi-token path: scatter each token with CopyBuffer + ReshapePagedKV.
+		// Per-iteration sync required because blit (CopyBuffer) and compute
+		// (ReshapePagedKV) use different Metal encoder queues. The tokenBuf is
+		// reused across iterations; ptBuf1/offBuf1 cannot be shared because
+		// ToDevice + ReshapePagedKV must complete before rewrite.
 		kvElems := g.numKVHeads * g.headDim
 		kvBytes := kvElems * 4
-		tokenBuf := g.allocPerm(kvBytes) // reusable per-token buffer
+		tokenBuf := g.allocPerm(kvBytes)
+		copier, _ := g.be.(backend.BufferCopier)
 		for i := 0; i < seqLen; i++ {
 			pos := startPos + i
 			logicalBlock := pos / g.blockSize
@@ -272,25 +274,20 @@ func (g *GPUBlockPool) StoreKV(layerIdx int, seqID int64, startPos int,
 				byte(uint32(physBlock) >> 16), byte(uint32(physBlock) >> 24)}
 			offBytes := [4]byte{byte(uint32(offset)), byte(uint32(offset) >> 8),
 				byte(uint32(offset) >> 16), byte(uint32(offset) >> 24)}
-
 			g.be.ToDevice(g.ptBuf1, ptBytes[:])
 			g.be.ToDevice(g.offBuf1, offBytes[:])
 
-			// Copy token K from source buffer to temp buffer (handles offset)
-			if copier, ok := g.be.(backend.BufferCopier); ok {
+			if copier != nil {
 				copier.CopyBuffer(kPtr, i*kvBytes, tokenBuf, 0, kvBytes)
 			}
 			g.pagedOps.ReshapePagedKV(tokenBuf, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
 				1, g.numKVHeads, g.headDim, g.blockSize, false)
-
-			// Copy token V
-			if copier, ok := g.be.(backend.BufferCopier); ok {
+			if copier != nil {
 				copier.CopyBuffer(vPtr, i*kvBytes, tokenBuf, 0, kvBytes)
 			}
 			g.pagedOps.ReshapePagedKV(tokenBuf, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
 				1, g.numKVHeads, g.headDim, g.blockSize, true)
-
-			g.be.Sync() // Ensure scatter completes before reusing tokenBuf
+			g.be.Sync() // Wait for scatter before reusing tokenBuf and ptBuf1/offBuf1
 		}
 		g.be.Free(tokenBuf)
 	}
