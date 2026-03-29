@@ -538,6 +538,11 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 	if err := copyToDevice(&m.OutputHead); err != nil {
 		return fmt.Errorf("output_head: %w", err)
 	}
+	// Weight tying: if output head is missing, use the embedding weights
+	if m.OutputHead.DevicePtr().IsNil() && !m.Embedding.DevicePtr().IsNil() {
+		m.OutputHead = m.Embedding
+		fmt.Println("Using tied embedding weights for output head")
+	}
 
 	// Copy layer weights
 	for i, layer := range m.layers {
