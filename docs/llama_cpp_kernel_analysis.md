@@ -1,5 +1,7 @@
 # llama.cpp Q4_0 Metal Kernel Analysis
 
+> **Historical reference** (December 2025). Documents kernel analysis and optimization experiments performed when Vexel's Q4_0 decode was ~167 tok/s vs llama.cpp's ~258 tok/s. Since then, significant kernel optimizations have been implemented and Vexel now outperforms llama.cpp on decode throughput with Q4_K_M (65 tok/s vs 51 tok/s on M4 Max).
+
 **Date:** 2025-12-13
 **Goal:** Understand why llama.cpp achieves 258 tok/s decode vs Vexel's 167 tok/s (1.5x gap)
 

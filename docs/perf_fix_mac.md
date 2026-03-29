@@ -1,5 +1,6 @@
-```markdown
 # Fixing matvec_q4_0_multi_output_f32 Performance on Apple GPUs
+
+> **Historical reference** (early 2025). Documents the threadgroup memory staging optimization for Q4_0 matvec kernels. The optimization described here has been implemented.
 
 ## Goal
 
@@ -42,7 +43,7 @@ into:
 
 A loads per block = 1
 
-````
+```
 
 ---
 
@@ -227,7 +228,3 @@ Once this is implemented and benchmarked, come back with:
 * whether barriers showed up as significant
 
 We’ll decide the next move based on real data.
-
-```
-```
-
