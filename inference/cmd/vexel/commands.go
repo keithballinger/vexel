@@ -197,7 +197,7 @@ func runServe(globals GlobalFlags, args []string) error {
 		MaxBatchSize:  sf.MaxBatchSize,
 		MaxSequences:  64,
 		MaxTokens:     maxTokens,
-		SamplerConfig: sampler.DefaultConfig(),
+		SamplerConfig: sampler.GreedyConfig(), // Greedy by default; per-request params can override
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
