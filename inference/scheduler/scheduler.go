@@ -345,8 +345,10 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 		// Sample and Decode
 		vocabSize := s.runtime.Config().VocabSize
 
-		// Single-sequence greedy: use GPU argmax to avoid 128KB transfer
-		if len(decodeSeqs) == 1 && s.config.SamplerConfig.Temperature == 0 {
+		// Single-sequence greedy: use GPU argmax to avoid 128KB transfer.
+		// Skip greedy path if the sequence has per-request temperature > 0.
+		seqHasTemp := len(decodeSeqs) == 1 && decodeSeqs[0].HasSamplingParams() && decodeSeqs[0].SamplingTemperature() > 0
+		if len(decodeSeqs) == 1 && s.config.SamplerConfig.Temperature == 0 && !seqHasTemp {
 			seq := decodeSeqs[0]
 			seq.AdvancePosition()
 			if seq.State() == StatePending {
@@ -397,8 +399,18 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 
 				seqLogits := logitsData[start:end]
 
-				// Sample
-				tokenID := s.sampler.Sample(seqLogits)
+				// Sample — use per-sequence sampler if custom params set
+				var tokenID int
+				if seq.HasSamplingParams() {
+					seqSampler := sampler.New(sampler.Config{
+						Temperature: seq.SamplingTemperature(),
+						TopK:        seq.SamplingTopK(),
+						TopP:        seq.SamplingTopP(),
+					}, int64(seq.ID()))
+					tokenID = seqSampler.Sample(seqLogits)
+				} else {
+					tokenID = s.sampler.Sample(seqLogits)
+				}
 				seq.AddGeneratedToken(tokenID)
 
 				// Check for EOS

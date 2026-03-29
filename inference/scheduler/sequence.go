@@ -56,6 +56,11 @@ type Sequence struct {
 	// maxTokens is the per-request generation limit (0 = use global config).
 	maxTokens int
 
+	// Per-request sampling parameters (zero values = use global config).
+	temperature float32
+	topK        int
+	topP        float32
+
 	// tokenChan creates a stream of generated tokens back to the caller.
 	tokenChan chan string
 }
@@ -149,6 +154,42 @@ func (s *Sequence) SetMaxTokens(n int) {
 // MaxTokens returns the per-request limit, or 0 for global default.
 func (s *Sequence) MaxTokens() int {
 	return s.maxTokens
+}
+
+// SetSamplingParams sets per-request sampling parameters.
+func (s *Sequence) SetSamplingParams(temperature float32, topK int, topP float32) {
+	s.temperature = temperature
+	s.topK = topK
+	s.topP = topP
+}
+
+// HasSamplingParams returns true if per-request sampling was configured.
+func (s *Sequence) HasSamplingParams() bool {
+	return s.temperature > 0 || s.topK > 0 || s.topP > 0
+}
+
+// SamplingTemperature returns per-request temperature, or -1 if not set.
+func (s *Sequence) SamplingTemperature() float32 {
+	if s.temperature > 0 {
+		return s.temperature
+	}
+	return -1
+}
+
+// SamplingTopK returns per-request top_k, or -1 if not set.
+func (s *Sequence) SamplingTopK() int {
+	if s.topK > 0 {
+		return s.topK
+	}
+	return -1
+}
+
+// SamplingTopP returns per-request top_p, or -1 if not set.
+func (s *Sequence) SamplingTopP() float32 {
+	if s.topP > 0 {
+		return s.topP
+	}
+	return -1
 }
 
 // ReachedMaxTokens returns true if this sequence has generated enough tokens.

@@ -84,8 +84,11 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Prompt    string `json:"prompt"`
-		MaxTokens int    `json:"max_tokens,omitempty"`
+		Prompt      string  `json:"prompt"`
+		MaxTokens   int     `json:"max_tokens,omitempty"`
+		Temperature float64 `json:"temperature,omitempty"`
+		TopK        int     `json:"top_k,omitempty"`
+		TopP        float64 `json:"top_p,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -110,6 +113,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	if req.MaxTokens > 0 {
 		seq.SetMaxTokens(req.MaxTokens)
 	}
+	if req.Temperature > 0 || req.TopK > 0 || req.TopP > 0 {
+		seq.SetSamplingParams(float32(req.Temperature), req.TopK, float32(req.TopP))
+	}
 
 	// 2. Add to Scheduler
 	s.scheduler.AddSequence(seq)
@@ -133,8 +139,11 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Prompt    string `json:"prompt"`
-		MaxTokens int    `json:"max_tokens,omitempty"`
+		Prompt      string  `json:"prompt"`
+		MaxTokens   int     `json:"max_tokens,omitempty"`
+		Temperature float64 `json:"temperature,omitempty"`
+		TopK        int     `json:"top_k,omitempty"`
+		TopP        float64 `json:"top_p,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -147,6 +156,9 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	seq := scheduler.NewSequence(seqID, req.Prompt)
 	if req.MaxTokens > 0 {
 		seq.SetMaxTokens(req.MaxTokens)
+	}
+	if req.Temperature > 0 || req.TopK > 0 || req.TopP > 0 {
+		seq.SetSamplingParams(float32(req.Temperature), req.TopK, float32(req.TopP))
 	}
 
 	// 2. Add to Scheduler
