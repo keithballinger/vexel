@@ -54,12 +54,16 @@ type GPUHeads struct {
 	// Track whether GPU weights have been modified since last CPU sync
 	weightsDirty bool
 
+	// Training step counter for LR warmup
+	trainSteps int
+
 	// Permanent buffers for GPU-accelerated inference forward pass.
 	// Allocated once and never recycled (survive ResetPool).
-	fwdHidden tensor.DevicePtr // [1, hiddenSize]
-	fwdInter  tensor.DevicePtr // [1, hiddenSize]
-	fwdLogits tensor.DevicePtr // [1, vocabSize]
-	fwdReady  bool
+	fwdHidden      tensor.DevicePtr // [1, hiddenSize]
+	fwdInter       tensor.DevicePtr // [1, hiddenSize]
+	fwdLogits      tensor.DevicePtr // [1, vocabSize]
+	fwdReady       bool
+	fwdHiddenReady bool // true when fwdHidden already contains the current hidden state (set by ForwardAll)
 }
 
 // NewGPUHeadsFromCPU creates GPU-accelerated heads from pre-trained CPU heads.
@@ -258,8 +262,10 @@ func (h *GPUHeads) Forward(headIdx int, hidden []float32) []float32 {
 
 	h.ensureFwdBuffers()
 
-	// Upload hidden state to GPU
-	h.backend.ToDevice(h.fwdHidden, float32ToBytes(hidden))
+	// Upload hidden state to GPU (skip if ForwardAll already uploaded it)
+	if !h.fwdHiddenReady {
+		h.backend.ToDevice(h.fwdHidden, float32ToBytes(hidden))
+	}
 
 	// Always use FC1+SiLU+FC2 to match the training path.
 	// FC1 starts as identity (or near-identity), so initial behavior matches
@@ -280,11 +286,21 @@ func (h *GPUHeads) Forward(headIdx int, hidden []float32) []float32 {
 }
 
 // ForwardAll computes logits for all heads on GPU.
+// Uploads the hidden state once and reuses it across all head Forward calls,
+// avoiding redundant CPU-to-GPU transfers (4x fewer for the default 4 heads).
 func (h *GPUHeads) ForwardAll(hidden []float32) [][]float32 {
+	h.ensureFwdBuffers()
+
+	// Upload hidden state once for all heads
+	h.backend.ToDevice(h.fwdHidden, float32ToBytes(hidden))
+	h.fwdHiddenReady = true
+
 	results := make([][]float32, h.NumHeads)
 	for i := 0; i < h.NumHeads; i++ {
 		results[i] = h.Forward(i, hidden)
 	}
+
+	h.fwdHiddenReady = false
 	return results
 }
 
