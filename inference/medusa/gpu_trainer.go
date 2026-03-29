@@ -21,6 +21,12 @@ var gpuTrainerDebug = os.Getenv("MEDUSA_DEBUG") != ""
 type GPUOnlineTrainer struct {
 	mu sync.RWMutex
 
+	// gpuMu serializes GPU access between the background training goroutine
+	// and the inference decode goroutine. Metal command encoding is not
+	// thread-safe, so concurrent GPU operations from training and inference
+	// can cause SIGSEGV. The inference scheduler holds this via GPULock/GPUUnlock.
+	gpuMu sync.Mutex
+
 	gpuHeads *GPUHeads
 	buffer   *RingBuffer
 	config   OnlineConfig
@@ -255,8 +261,10 @@ func (t *GPUOnlineTrainer) trainStep() {
 		fmt.Printf("[GPU Trainer] trainStep: training with batch size %d\n", len(batch))
 	}
 
-	// Train using GPU heads
+	// Train using GPU heads (hold gpuMu to prevent concurrent Metal access with inference)
+	t.gpuMu.Lock()
 	loss := t.gpuHeads.TrainStep(batch, t.config.LearningRate)
+	t.gpuMu.Unlock()
 
 	elapsed := time.Since(start)
 	if gpuTrainerDebug {
@@ -281,7 +289,9 @@ func (t *GPUOnlineTrainer) evaluate() {
 		return
 	}
 
+	t.gpuMu.Lock()
 	accuracies := t.gpuHeads.Evaluate(evalBatch)
+	t.gpuMu.Unlock()
 
 	t.mu.Lock()
 	copy(t.metrics.HeadAccuracies, accuracies)
@@ -308,4 +318,16 @@ func (t *GPUOnlineTrainer) SaveHeads(path string) error {
 
 	cpuHeads := t.gpuHeads.ToCPUHeads()
 	return cpuHeads.Save(path)
+}
+
+// GPULock acquires the GPU mutex. The inference scheduler must call this
+// before GPU-intensive decode operations to prevent concurrent Metal
+// command encoding with the background training goroutine.
+func (t *GPUOnlineTrainer) GPULock() {
+	t.gpuMu.Lock()
+}
+
+// GPUUnlock releases the GPU mutex.
+func (t *GPUOnlineTrainer) GPUUnlock() {
+	t.gpuMu.Unlock()
 }

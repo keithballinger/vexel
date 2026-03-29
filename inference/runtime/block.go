@@ -795,15 +795,23 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 			return x, fmt.Errorf("gpu pool attention: %w", err)
 		}
 	} else if gpuPool != nil && seqLen > 1 {
-		// Prefill with GPU pool: store K/V for future decode, use contiguous for attention
-		if err := gpuPool.StoreKV(layerIdx, seqID, startPos, kPtr, vPtr, seqLen); err != nil {
-			return x, fmt.Errorf("gpu pool store prefill: %w", err)
-		}
-		// Self-attention over current tokens (contiguous, no cache needed)
-		if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
-			b.softCapOps.SDPAPrefillSoftCap(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap)
-		} else {
-			b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
+		// Multi-token verification with GPU paged KV: process each token sequentially.
+		// Each token must attend to the full KV history (all prior cached tokens plus
+		// tokens earlier in this batch). We store one token's KV at a time and then
+		// run paged SDPA decode for that single query against the complete cache.
+		qStride := numHeads * headDim   // elements per token in Q
+		kvStride := numKVHeads * headDim // elements per token in K/V
+		for i := 0; i < seqLen; i++ {
+			tokenKPtr := tensor.DevicePtrOffset(kPtr, uintptr(i*kvStride*4))
+			tokenVPtr := tensor.DevicePtrOffset(vPtr, uintptr(i*kvStride*4))
+			if err := gpuPool.StoreKV(layerIdx, seqID, startPos+i, tokenKPtr, tokenVPtr, 1); err != nil {
+				return x, fmt.Errorf("gpu pool store verify token %d: %w", i, err)
+			}
+			tokenQPtr := tensor.DevicePtrOffset(qPtr, uintptr(i*qStride*4))
+			tokenOutPtr := tensor.DevicePtrOffset(attnOutPtr, uintptr(i*qStride*4))
+			if err := gpuPool.Attention(layerIdx, seqID, tokenQPtr, tokenOutPtr, numHeads, headDim, scale); err != nil {
+				return x, fmt.Errorf("gpu pool attention verify token %d: %w", i, err)
+			}
 		}
 	} else if pagedCache != nil {
 		// CPU paged path: GPU→CPU→GPU roundtrip (fallback)

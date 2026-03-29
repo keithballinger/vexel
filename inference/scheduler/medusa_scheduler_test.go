@@ -75,6 +75,8 @@ func (m *mockTrainer) Metrics() medusa.TrainingMetrics {
 func (m *mockTrainer) SaveHeads(path string) error {
 	return nil
 }
+func (m *mockTrainer) GPULock()   {}
+func (m *mockTrainer) GPUUnlock() {}
 
 func (m *mockTrainer) getSamples() []mockSample {
 	m.mu.Lock()

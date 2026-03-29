@@ -21,6 +21,10 @@ type GPUBlockPool struct {
 	be       backend.Backend
 	pagedOps backend.PagedKVOps
 
+	// allocPerm allocates GPU memory that survives ResetPool cycles.
+	// All GPUBlockPool buffers must use this instead of be.Alloc.
+	allocPerm func(bytes int) tensor.DevicePtr
+
 	numLayers  int
 	numKVHeads int
 	headDim    int
@@ -60,9 +64,24 @@ type gpuSeqState struct {
 func NewGPUBlockPool(be backend.Backend, pagedOps backend.PagedKVOps,
 	numLayers, numKVHeads, headDim, blockSize, maxBlocks int) *GPUBlockPool {
 
+	// All GPUBlockPool allocations must be permanent (survive ResetPool cycles).
+	// The pool allocator's ResetPool() recycles all Alloc'd buffers, but GPUBlockPool
+	// retains buffers across forward passes. Using recyclable Alloc causes SIGSEGV
+	// when buffers get repurposed by a later forward pass.
+	type permanentAllocator interface {
+		AllocPermanent(bytes int) tensor.DevicePtr
+	}
+	var allocPerm func(int) tensor.DevicePtr
+	if pa, ok := be.(permanentAllocator); ok {
+		allocPerm = pa.AllocPermanent
+	} else {
+		allocPerm = be.Alloc
+	}
+
 	g := &GPUBlockPool{
-		be:         be,
-		pagedOps:   pagedOps,
+		be:        be,
+		pagedOps:  pagedOps,
+		allocPerm: allocPerm,
 		numLayers:  numLayers,
 		numKVHeads: numKVHeads,
 		headDim:    headDim,
@@ -74,11 +93,13 @@ func NewGPUBlockPool(be backend.Backend, pagedOps backend.PagedKVOps,
 		seqs:       make(map[int64]*gpuSeqState),
 	}
 
+	alloc := allocPerm
+
 	elementsPerBlock := 2 * blockSize * numKVHeads * headDim
 	poolBytes := maxBlocks * elementsPerBlock * 4
 
 	for i := 0; i < numLayers; i++ {
-		g.pools[i] = be.Alloc(poolBytes)
+		g.pools[i] = alloc(poolBytes)
 		g.freeLists[i] = make([]int32, maxBlocks)
 		g.refCounts[i] = make(map[int32]int)
 		for j := 0; j < maxBlocks; j++ {
@@ -86,9 +107,8 @@ func NewGPUBlockPool(be backend.Backend, pagedOps backend.PagedKVOps,
 		}
 	}
 
-	// Pre-allocate single-token buffers for decode path
-	g.ptBuf1 = be.Alloc(4)
-	g.offBuf1 = be.Alloc(4)
+	g.ptBuf1 = alloc(4)
+	g.offBuf1 = alloc(4)
 
 	return g
 }
@@ -125,6 +145,39 @@ func (g *GPUBlockPool) DeleteSequence(seqID int64) {
 	}
 
 	delete(g.seqs, seqID)
+}
+
+// TruncateSequence reduces a sequence's length, releasing any blocks that are
+// no longer needed. This is used after speculative verification to discard
+// KV entries for rejected draft tokens.
+func (g *GPUBlockPool) TruncateSequence(seqID int64, newSeqLen int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	seq, ok := g.seqs[seqID]
+	if !ok || newSeqLen >= seq.seqLen {
+		return
+	}
+
+	// Number of blocks needed after truncation
+	newNumBlocks := 0
+	if newSeqLen > 0 {
+		newNumBlocks = (newSeqLen-1)/g.blockSize + 1
+	}
+
+	for layer := 0; layer < g.numLayers; layer++ {
+		bt := seq.blockTables[layer]
+		// Release blocks beyond what's needed
+		for i := newNumBlocks; i < len(bt); i++ {
+			g.releaseBlock(layer, bt[i])
+		}
+		if newNumBlocks < len(bt) {
+			seq.blockTables[layer] = bt[:newNumBlocks]
+			seq.btDirty[layer] = true
+		}
+	}
+
+	seq.seqLen = newSeqLen
 }
 
 // HasSequence returns true if the sequence is tracked.
@@ -258,7 +311,7 @@ func (g *GPUBlockPool) Attention(layerIdx int, seqID int64,
 		if !seq.btGPU[layerIdx].IsNil() {
 			g.be.Free(seq.btGPU[layerIdx])
 		}
-		seq.btGPU[layerIdx] = g.be.Alloc(numBlocks * 4)
+		seq.btGPU[layerIdx] = g.allocPerm(numBlocks * 4)
 		g.be.ToDevice(seq.btGPU[layerIdx], gpuInt32ToBytes(bt))
 		seq.btDirty[layerIdx] = false
 	}
@@ -306,7 +359,7 @@ func (g *GPUBlockPool) AttentionBatched(
 			if !seq.btGPU[layerIdx].IsNil() {
 				g.be.Free(seq.btGPU[layerIdx])
 			}
-			seq.btGPU[layerIdx] = g.be.Alloc(numBlocks * 4)
+			seq.btGPU[layerIdx] = g.allocPerm(numBlocks * 4)
 			g.be.ToDevice(seq.btGPU[layerIdx], gpuInt32ToBytes(bt))
 			seq.btDirty[layerIdx] = false
 		}

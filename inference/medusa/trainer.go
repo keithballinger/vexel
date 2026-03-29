@@ -30,6 +30,12 @@ type Trainer interface {
 	Metrics() TrainingMetrics
 	// SaveHeads saves heads to file.
 	SaveHeads(path string) error
+	// GPULock/GPUUnlock serialize GPU access between training and inference.
+	// The inference scheduler must hold this lock during GPU-intensive decode
+	// operations to prevent concurrent Metal command encoding with the
+	// background training goroutine.
+	GPULock()
+	GPUUnlock()
 }
 
 // HeadsInterface is the interface for Medusa prediction heads.
@@ -499,3 +505,9 @@ func argmax(values []float32) int {
 func (t *OnlineTrainer) SaveHeads(path string) error {
 	return t.heads.Save(path)
 }
+
+// GPULock is a no-op for the CPU trainer (no GPU contention).
+func (t *OnlineTrainer) GPULock() {}
+
+// GPUUnlock is a no-op for the CPU trainer.
+func (t *OnlineTrainer) GPUUnlock() {}

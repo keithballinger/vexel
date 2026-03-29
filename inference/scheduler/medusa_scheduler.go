@@ -226,6 +226,13 @@ func (ms *MedusaScheduler) step(ctx context.Context) error {
 		return nil
 	}
 
+	// Hold GPU lock for the entire step to prevent concurrent Metal access
+	// with the background training goroutine.
+	if ms.trainer != nil {
+		ms.trainer.GPULock()
+		defer ms.trainer.GPUUnlock()
+	}
+
 	// Check if we should use Medusa speculation
 	useMedusa := ms.trainer != nil && ms.trainer.IsHot()
 
@@ -595,6 +602,9 @@ func (ms *MedusaScheduler) runMedusaDecodeStep(ctx context.Context, batch []*Seq
 	if pagedCache != nil && seq.KVSeqID() != 0 {
 		pagedCache.TruncateSequence(seq.KVSeqID(), newCacheLen)
 	}
+	if gpuPool := ms.runtime.GetGPUBlockPool(); gpuPool != nil {
+		gpuPool.TruncateSequence(seq.KVSeqID(), newCacheLen)
+	}
 
 	// Step 7: Output all accepted tokens + final token
 	acceptedTokens := make([]int, 0, numAccepted+1)
@@ -806,6 +816,9 @@ func (ms *MedusaScheduler) runTreeMedusaDecodeStep(ctx context.Context, batch []
 	}
 	if pagedCache != nil && seq.KVSeqID() != 0 {
 		pagedCache.TruncateSequence(seq.KVSeqID(), newCacheLen)
+	}
+	if gpuPool := ms.runtime.GetGPUBlockPool(); gpuPool != nil {
+		gpuPool.TruncateSequence(seq.KVSeqID(), newCacheLen)
 	}
 
 	// Step 9: Output accepted tokens + final token
