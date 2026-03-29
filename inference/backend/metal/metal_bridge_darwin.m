@@ -11330,6 +11330,7 @@ static inline void finish_encode(id<MTLComputeCommandEncoder> encoder, id<MTLCom
         [encoder endEncoding];
         [cmdBuf commit];
         [cmdBuf waitUntilCompleted];
+
         g_gpuTotalTime += mach_to_ns(mach_absolute_time() - start);
         g_gpuBatchCount++;
     }

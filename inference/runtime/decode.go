@@ -719,12 +719,13 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 	scratch := tensor.NewTensor(tensor.NewShape(int(scratchBytes/4)), m.config.DType, scratchPtr)
 
 	// 5. Layer Loop using ExecuteWithGPUKV
-	// Cross-layer batching: wrap all layers in a single command buffer.
-	// Per-layer BeginBatch/EndBatch calls become nested (refcounted) no-ops,
-	// and the entire forward pass uses one CB with memory barriers between layers.
-	if batcher, ok := m.backend.(backend.Batcher); ok && !cachedGPUProfile {
-		batcher.BeginBatch()
-		defer batcher.EndBatch()
+	// Cross-layer batching for decode (batchSize==1). For prefill (batchSize>1),
+	// the large number of dispatches per command buffer can hit Metal GPU timeouts.
+	if batchSize == 1 {
+		if batcher, ok := m.backend.(backend.Batcher); ok && !cachedGPUProfile {
+			batcher.BeginBatch()
+			defer batcher.EndBatch()
+		}
 	}
 
 	// Timing: mark end of setup, start of layer loop
