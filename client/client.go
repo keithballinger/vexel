@@ -54,7 +54,9 @@ func (c *Client) Timeout() time.Duration {
 
 // GenerateOptions defines options for text generation.
 type GenerateOptions struct {
-	Temperature float32
+	Temperature float64
+	TopK        int
+	TopP        float64
 	MaxTokens   int
 }
 
@@ -75,6 +77,12 @@ func (c *Client) Generate(ctx context.Context, prompt string, opts *GenerateOpti
 	if opts != nil {
 		if opts.Temperature != 0 {
 			reqBody["temperature"] = opts.Temperature
+		}
+		if opts.TopK != 0 {
+			reqBody["top_k"] = opts.TopK
+		}
+		if opts.TopP != 0 {
+			reqBody["top_p"] = opts.TopP
 		}
 		if opts.MaxTokens != 0 {
 			reqBody["max_tokens"] = opts.MaxTokens
@@ -133,6 +141,12 @@ func (c *Client) Stream(ctx context.Context, prompt string, opts *GenerateOption
 	if opts != nil {
 		if opts.Temperature != 0 {
 			reqBody["temperature"] = opts.Temperature
+		}
+		if opts.TopK != 0 {
+			reqBody["top_k"] = opts.TopK
+		}
+		if opts.TopP != 0 {
+			reqBody["top_p"] = opts.TopP
 		}
 		if opts.MaxTokens != 0 {
 			reqBody["max_tokens"] = opts.MaxTokens

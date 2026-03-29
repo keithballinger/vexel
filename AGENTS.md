@@ -42,7 +42,7 @@ CLI (cmd/vexel)  →  Scheduler  →  Runtime  →  Backend (Metal/CPU/CUDA)
   (HTTP/gRPC)
 ```
 
-- **`inference/cmd/vexel/`** — Unified CLI: `serve`, `generate`, `chat`, `bench`, `tokenize` subcommands
+- **`inference/cmd/vexel/`** — Unified CLI: `serve`, `generate`, `chat` (interactive multi-turn conversation), `bench`, `tokenize` subcommands
 - **`inference/serve/`** — HTTP (`/generate`, `/stream`, `/health`) + gRPC server with TLS
 - **`inference/scheduler/`** — Event-driven continuous batching scheduler. Manages sequence state transitions: Pending → Prefill → Decoding → Finished. Includes speculative decoding via draft models and Medusa heads, and batched decode with paged KV cache.
 - **`inference/runtime/`** — Model loading, forward pass execution
@@ -65,6 +65,8 @@ CLI (cmd/vexel)  →  Scheduler  →  Runtime  →  Backend (Metal/CPU/CUDA)
 
 **Inference flow:** Prefill (batch of prompt tokens → logits) → Decode loop (single token + KV cache → next logits) → Sampling (temperature → top-k → top-p → sample).
 
+**Adaptive Medusa speculation:** Starts off, probes every 8 decode steps, enables when acceptance >= 0.5.
+
 ## Environment Variables
 
 | Variable | Purpose |
@@ -81,6 +83,7 @@ CLI (cmd/vexel)  →  Scheduler  →  Runtime  →  Backend (Metal/CPU/CUDA)
 | `DEBUG_DECODE=1` | Verbose decode loop output |
 | `DEBUG_MATMUL=1` | Debug matrix multiplication |
 | `DEBUG_PROFILE=1` | Enable runtime profiling |
+| `VEXEL_REGRESSION_THRESHOLD` | Override regression threshold % for benchmark comparison (default: 5) |
 
 ## CLI Flags
 
@@ -92,6 +95,7 @@ CLI (cmd/vexel)  →  Scheduler  →  Runtime  →  Backend (Metal/CPU/CUDA)
 | `--medusa` | Enable Medusa-style speculative decoding |
 | `--medusa-heads` | Path to pre-trained Medusa heads file |
 | `--verbose` | Enable verbose logging |
+| `--max-batch-size` | Max batch size for scheduler (serve only, default 1) |
 
 ## Commit Convention
 
