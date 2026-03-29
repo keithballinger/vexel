@@ -20,6 +20,7 @@ type SchedulerInterface interface {
 type REPLConfig struct {
 	ChatMode     bool   // Use chat template formatting
 	SystemPrompt string // System prompt for chat mode
+	ModelPath    string // Model file path for template detection
 }
 
 // DefaultREPLConfig returns default configuration.
@@ -38,10 +39,23 @@ func RunChatLoop(r io.Reader, w io.Writer, sched SchedulerInterface) error {
 // RunChatLoopWithConfig starts the REPL with custom config.
 func RunChatLoopWithConfig(r io.Reader, w io.Writer, sched SchedulerInterface, config REPLConfig) error {
 	scanner := bufio.NewScanner(r)
-	template := tokenizer.TinyLlamaChatTemplate()
+
+	// Select chat template based on model path, or use default
+	var template tokenizer.ChatTemplate
+	if config.ModelPath != "" {
+		template = tokenizer.DetectChatTemplate(config.ModelPath)
+	} else {
+		template = tokenizer.DefaultChatTemplate()
+	}
+
+	// Initialize conversation history
+	var history []tokenizer.ChatMessage
+	if config.SystemPrompt != "" && config.ChatMode {
+		history = append(history, tokenizer.ChatMessage{Role: "system", Content: config.SystemPrompt})
+	}
 
 	if config.ChatMode {
-		fmt.Fprintln(w, "Chat mode enabled. Type 'exit' to quit.")
+		fmt.Fprintf(w, "Chat mode enabled (template: %s). Type /clear to reset, exit to quit.\n", template.Name)
 	}
 
 	for {
@@ -58,10 +72,23 @@ func RunChatLoopWithConfig(r io.Reader, w io.Writer, sched SchedulerInterface, c
 			return nil
 		}
 
+		// Handle /clear command
+		if text == "/clear" {
+			history = nil
+			if config.SystemPrompt != "" && config.ChatMode {
+				history = append(history, tokenizer.ChatMessage{Role: "system", Content: config.SystemPrompt})
+			}
+			fmt.Fprintln(w, "Conversation history cleared.")
+			continue
+		}
+
 		// Format prompt based on mode
 		var prompt string
 		if config.ChatMode {
-			prompt = template.FormatChat(config.SystemPrompt, text)
+			// Append user message to history
+			history = append(history, tokenizer.ChatMessage{Role: "user", Content: text})
+			// Format full conversation
+			prompt = template.FormatConversation(history)
 		} else {
 			prompt = text
 		}
@@ -75,13 +102,21 @@ func RunChatLoopWithConfig(r io.Reader, w io.Writer, sched SchedulerInterface, c
 			seq := scheduler.NewSequence(seqID, prompt)
 			sched.AddSequence(seq)
 
-			// Stream response
+			// Stream response and collect full text
+			var responseBuf strings.Builder
 			tokenCount := 0
 			for token := range seq.TokenChan() {
 				fmt.Fprint(w, token)
+				responseBuf.WriteString(token)
 				tokenCount++
 			}
 			fmt.Fprintln(w)
+
+			// Append assistant response to history
+			if config.ChatMode {
+				response := strings.TrimSpace(responseBuf.String())
+				history = append(history, tokenizer.ChatMessage{Role: "assistant", Content: response})
+			}
 
 			// Get metrics after and compute tok/s for this generation
 			metricsAfter := sched.Metrics()

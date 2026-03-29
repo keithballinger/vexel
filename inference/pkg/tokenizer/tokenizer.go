@@ -382,17 +382,33 @@ func (t *Tokenizer) EOS() int { return t.eos }
 func (t *Tokenizer) AddBOS() bool { return t.addBos }
 func (t *Tokenizer) VocabSize() int { return len(t.vocab) }
 
+// ChatMessage represents a single message in a conversation.
+type ChatMessage struct {
+	Role    string // "system", "user", or "assistant"
+	Content string
+}
+
+// ChatTemplate defines prefix/suffix tokens for formatting chat conversations.
 type ChatTemplate struct {
+	Name            string // Template name for identification
 	SystemPrefix    string
 	SystemSuffix    string
 	UserPrefix      string
 	UserSuffix      string
 	AssistantPrefix string
 	AssistantSuffix string
+	BOS             string // Optional beginning-of-sequence token
 }
 
+// DefaultChatTemplate returns the default template (TinyLlama/Zephyr style).
+func DefaultChatTemplate() ChatTemplate {
+	return TinyLlamaChatTemplate()
+}
+
+// TinyLlamaChatTemplate returns the TinyLlama/Zephyr chat template.
 func TinyLlamaChatTemplate() ChatTemplate {
 	return ChatTemplate{
+		Name:            "tinyllama",
 		SystemPrefix:    "<|system|>\n",
 		SystemSuffix:    "</s>\n",
 		UserPrefix:      "<|user|>\n",
@@ -402,8 +418,10 @@ func TinyLlamaChatTemplate() ChatTemplate {
 	}
 }
 
+// Llama2ChatTemplate returns the Llama 2 chat template.
 func Llama2ChatTemplate() ChatTemplate {
 	return ChatTemplate{
+		Name:            "llama2",
 		SystemPrefix:    "[INST] <<SYS>>\n",
 		SystemSuffix:    "\n<</SYS>>\n\n",
 		UserPrefix:      "",
@@ -413,16 +431,101 @@ func Llama2ChatTemplate() ChatTemplate {
 	}
 }
 
-func (ct ChatTemplate) FormatChat(systemPrompt string, userMessage string) string {
-	var sb strings.Builder
-	if systemPrompt != "" {
-		sb.WriteString(ct.SystemPrefix)
-		sb.WriteString(systemPrompt)
-		sb.WriteString(ct.SystemSuffix)
+// Llama3ChatTemplate returns the Llama 3 / Llama 3.1 chat template.
+func Llama3ChatTemplate() ChatTemplate {
+	return ChatTemplate{
+		Name:            "llama3",
+		BOS:             "<|begin_of_text|>",
+		SystemPrefix:    "<|start_header_id|>system<|end_header_id|>\n\n",
+		SystemSuffix:    "<|eot_id|>",
+		UserPrefix:      "<|start_header_id|>user<|end_header_id|>\n\n",
+		UserSuffix:      "<|eot_id|>",
+		AssistantPrefix: "<|start_header_id|>assistant<|end_header_id|>\n\n",
+		AssistantSuffix: "<|eot_id|>",
 	}
-	sb.WriteString(ct.UserPrefix)
-	sb.WriteString(userMessage)
-	sb.WriteString(ct.UserSuffix)
+}
+
+// ChatMLTemplate returns the ChatML template (used by Mistral, Phi-3, Qwen, etc.).
+func ChatMLTemplate() ChatTemplate {
+	return ChatTemplate{
+		Name:            "chatml",
+		SystemPrefix:    "<|im_start|>system\n",
+		SystemSuffix:    "<|im_end|>\n",
+		UserPrefix:      "<|im_start|>user\n",
+		UserSuffix:      "<|im_end|>\n",
+		AssistantPrefix: "<|im_start|>assistant\n",
+		AssistantSuffix: "<|im_end|>\n",
+	}
+}
+
+// DetectChatTemplate picks a chat template based on the model file path.
+// It inspects the filename for known model family patterns.
+func DetectChatTemplate(modelPath string) ChatTemplate {
+	lower := strings.ToLower(modelPath)
+
+	switch {
+	case strings.Contains(lower, "llama-3") ||
+		strings.Contains(lower, "llama3") ||
+		strings.Contains(lower, "llama_3"):
+		return Llama3ChatTemplate()
+
+	case strings.Contains(lower, "llama-2") ||
+		strings.Contains(lower, "llama2") ||
+		strings.Contains(lower, "llama_2"):
+		return Llama2ChatTemplate()
+
+	case strings.Contains(lower, "mistral") ||
+		strings.Contains(lower, "phi-3") ||
+		strings.Contains(lower, "phi3") ||
+		strings.Contains(lower, "qwen") ||
+		strings.Contains(lower, "chatml"):
+		return ChatMLTemplate()
+
+	case strings.Contains(lower, "tinyllama") ||
+		strings.Contains(lower, "zephyr"):
+		return TinyLlamaChatTemplate()
+
+	default:
+		return DefaultChatTemplate()
+	}
+}
+
+// FormatChat formats a single user message with an optional system prompt.
+// Kept for backward compatibility.
+func (ct ChatTemplate) FormatChat(systemPrompt string, userMessage string) string {
+	msgs := []ChatMessage{{Role: "user", Content: userMessage}}
+	if systemPrompt != "" {
+		msgs = append([]ChatMessage{{Role: "system", Content: systemPrompt}}, msgs...)
+	}
+	return ct.FormatConversation(msgs)
+}
+
+// FormatConversation formats a full multi-turn conversation into a single prompt string.
+func (ct ChatTemplate) FormatConversation(messages []ChatMessage) string {
+	var sb strings.Builder
+
+	if ct.BOS != "" {
+		sb.WriteString(ct.BOS)
+	}
+
+	for _, msg := range messages {
+		switch msg.Role {
+		case "system":
+			sb.WriteString(ct.SystemPrefix)
+			sb.WriteString(msg.Content)
+			sb.WriteString(ct.SystemSuffix)
+		case "user":
+			sb.WriteString(ct.UserPrefix)
+			sb.WriteString(msg.Content)
+			sb.WriteString(ct.UserSuffix)
+		case "assistant":
+			sb.WriteString(ct.AssistantPrefix)
+			sb.WriteString(msg.Content)
+			sb.WriteString(ct.AssistantSuffix)
+		}
+	}
+
+	// End with assistant prefix to prompt the model to generate
 	sb.WriteString(ct.AssistantPrefix)
 	return sb.String()
 }

@@ -485,6 +485,7 @@ func runChat(globals GlobalFlags, args []string) error {
 	config := internal.REPLConfig{
 		ChatMode:     !cf.NoChatTemplate,
 		SystemPrompt: cf.SystemPrompt,
+		ModelPath:    globals.Model,
 	}
 	return internal.RunChatLoopWithConfig(os.Stdin, os.Stdout, sched, config)
 }
