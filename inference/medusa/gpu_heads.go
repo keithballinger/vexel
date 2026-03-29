@@ -140,12 +140,15 @@ func NewGPUHeadsWithInit(numHeads, hiddenSize, vocabSize int, b backend.Backend,
 		// Initialize FC1 on CPU
 		h.heads[i].FC1CPU = make([]float32, hiddenSize*hiddenSize)
 		if hasLMHead {
-			// When initializing from lm_head, bypass FC1 entirely
-			// This allows hidden state to pass directly to FC2 (which is lm_head)
-			h.heads[i].BypassFC1 = true
-			// Still need identity FC1 for GPU training path
+			// Near-identity FC1 with per-head noise to break symmetry.
+			// Heads predict different future positions, so each needs to learn
+			// a different transformation. Noise scale increases with head index.
+			noiseScale := float32(0.01) * float32(i+1)
+			for j := range h.heads[i].FC1CPU {
+				h.heads[i].FC1CPU[j] = (rand.Float32()*2 - 1) * noiseScale
+			}
 			for j := 0; j < hiddenSize; j++ {
-				h.heads[i].FC1CPU[j*hiddenSize+j] = 1.0
+				h.heads[i].FC1CPU[j*hiddenSize+j] += 1.0 // Identity on diagonal
 			}
 		} else {
 			// Random initialization with near-identity for normal training
@@ -258,19 +261,15 @@ func (h *GPUHeads) Forward(headIdx int, hidden []float32) []float32 {
 	// Upload hidden state to GPU
 	h.backend.ToDevice(h.fwdHidden, float32ToBytes(hidden))
 
-	if head.BypassFC1 {
-		// FC2 only: logits = hidden @ FC2  [1, hidden] @ [hidden, vocab] -> [1, vocab]
-		h.backend.MatMul(h.fwdHidden, head.FC2, h.fwdLogits, 1, vocabSize, hiddenSize)
-	} else {
-		// FC1: intermediate = hidden @ FC1  [1, hidden] @ [hidden, hidden] -> [1, hidden]
-		h.backend.MatMul(h.fwdHidden, head.FC1, h.fwdInter, 1, hiddenSize, hiddenSize)
-		// SiLU in-place
-		if trainOps, ok := h.backend.(backend.TrainingOps); ok {
-			trainOps.SiLUInplace(h.fwdInter, hiddenSize)
-		}
-		// FC2: logits = intermediate @ FC2  [1, hidden] @ [hidden, vocab] -> [1, vocab]
-		h.backend.MatMul(h.fwdInter, head.FC2, h.fwdLogits, 1, vocabSize, hiddenSize)
+	// Always use FC1+SiLU+FC2 to match the training path.
+	// FC1 starts as identity (or near-identity), so initial behavior matches
+	// the lm_head initialization. As training proceeds, FC1 learns head-specific
+	// transformations that differentiate the heads.
+	h.backend.MatMul(h.fwdHidden, head.FC1, h.fwdInter, 1, hiddenSize, hiddenSize)
+	if trainOps, ok := h.backend.(backend.TrainingOps); ok {
+		trainOps.SiLUInplace(h.fwdInter, hiddenSize)
 	}
+	h.backend.MatMul(h.fwdInter, head.FC2, h.fwdLogits, 1, vocabSize, hiddenSize)
 
 	// Download logits to CPU
 	logitsBytes := make([]byte, vocabSize*4)

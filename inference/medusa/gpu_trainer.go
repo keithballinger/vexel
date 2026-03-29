@@ -228,7 +228,7 @@ func (t *GPUOnlineTrainer) trainingLoop(ctx context.Context) {
 			if gpuTrainerDebug && tickCount <= 5 {
 				fmt.Printf("[GPU Trainer] Train tick %d, phase=%v\n", tickCount, phase)
 			}
-			if phase == PhaseWarming {
+			if phase >= PhaseWarming {
 				t.trainStep()
 			}
 
@@ -250,7 +250,7 @@ func (t *GPUOnlineTrainer) trainingLoop(ctx context.Context) {
 			// 2. Loss has decreased below initial random loss (~10.4 for 32k vocab)
 			//    Use 10.2 threshold - slightly below random to verify learning started
 			minStepsForHot := int64(10)
-			maxLossForHot := float32(10.2) // Just below random 10.4
+			maxLossForHot := float32(10.2) // Just below random — actual quality is gated by adaptive probes
 
 			if phase == PhaseWarming && steps >= minStepsForHot {
 				if currentLoss > 0 && currentLoss < maxLossForHot {

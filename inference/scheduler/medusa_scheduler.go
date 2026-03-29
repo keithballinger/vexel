@@ -270,7 +270,7 @@ func (ms *MedusaScheduler) step(ctx context.Context) error {
 		// match the base model's output, without running verification or
 		// committing any tokens. This avoids injecting bad tokens from probes.
 		ms.probeCounter++
-		if ms.probeCounter >= 32 {
+		if ms.probeCounter >= 8 {
 			ms.probeCounter = 0
 			ms.probeSpeculation(batch)
 		}
