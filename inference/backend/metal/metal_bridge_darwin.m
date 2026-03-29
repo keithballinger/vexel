@@ -7698,6 +7698,12 @@ kernel void reshape_paged_kv_f16(
     dstBase[dstIdx] = (half)src[gid]; // F32 → F16 conversion
 }
 
+// Thread count for paged decode kernels (both F32 and F16)
+#ifndef PAGED_DECODE_THREADS_DEFINED
+#define PAGED_DECODE_THREADS_DEFINED
+constant int PAGED_DECODE_THREADS_F16 = 256;
+#endif
+
 // FP16 paged SDPA decode: reads F16 K/V from paged block pool.
 // Q: [numQHeads, headDim] in F32 (converted to F16 internally)
 // kvPool: base of FP16 block pool
@@ -7737,7 +7743,7 @@ kernel void sdpa_paged_decode_f16(
 
     // Phase 1a: Q·K scores (Q in F32, K in F16)
     float localMax = -INFINITY;
-    for (int pos = (int)tid; pos < kvLen; pos += PAGED_DECODE_THREADS) {
+    for (int pos = (int)tid; pos < kvLen; pos += PAGED_DECODE_THREADS_F16) {
         int logicalBlock = pos / blockSize;
         int tokenInBlock = pos % blockSize;
         int physicalBlock = blockTable[logicalBlock];
@@ -7768,7 +7774,7 @@ kernel void sdpa_paged_decode_f16(
 
     // Phase 1b: softmax
     float localSum = 0.0f;
-    for (int pos = (int)tid; pos < kvLen; pos += PAGED_DECODE_THREADS) {
+    for (int pos = (int)tid; pos < kvLen; pos += PAGED_DECODE_THREADS_F16) {
         float expScore = exp(weights[pos] - gMax);
         weights[pos] = expScore;
         localSum += expScore;
@@ -7782,14 +7788,14 @@ kernel void sdpa_paged_decode_f16(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float invSum = 1.0f / warpVals[0];
-    for (int pos = (int)tid; pos < kvLen; pos += PAGED_DECODE_THREADS) {
+    for (int pos = (int)tid; pos < kvLen; pos += PAGED_DECODE_THREADS_F16) {
         weights[pos] *= invSum;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Phase 2: weighted V accumulation (V in F16)
     int outOffset = qHead * headDim;
-    for (int d = (int)tid; d < headDim; d += PAGED_DECODE_THREADS) {
+    for (int d = (int)tid; d < headDim; d += PAGED_DECODE_THREADS_F16) {
         float sum = 0.0f;
         for (int pos = 0; pos < kvLen; pos++) {
             int logicalBlock = pos / blockSize;
