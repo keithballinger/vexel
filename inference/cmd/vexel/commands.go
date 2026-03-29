@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -296,6 +297,14 @@ func runServe(globals GlobalFlags, args []string) error {
 		RequestTimeout: time.Duration(sf.RequestTimeout) * time.Second,
 	}
 	srv := serve.NewServerWithConfig(baseSched, srvCfg)
+
+	// Apply chat template for instruct models unless disabled
+	if !globals.NoChatTemplate && isInstructModel(globals.Model) {
+		template := tokenizer.DetectChatTemplate(globals.Model)
+		srv.SetChatTemplate(template)
+		log.Printf("Auto-detected instruct model, using %s chat template (use --no-chat-template to disable)", template.Name)
+	}
+
 	addr := fmt.Sprintf(":%d", sf.Port)
 	httpServer := &http.Server{Addr: addr, Handler: srv}
 
@@ -393,8 +402,19 @@ func runGenerate(globals GlobalFlags, args []string) error {
 		}
 	}()
 
+	// Apply chat template for instruct models unless disabled
+	prompt := gf.Prompt
+	if !globals.NoChatTemplate && isInstructModel(globals.Model) {
+		template := tokenizer.DetectChatTemplate(globals.Model)
+		messages := []tokenizer.ChatMessage{{Role: "user", Content: prompt}}
+		prompt = template.FormatConversation(messages)
+		if globals.Verbose {
+			log.Printf("Applied %s chat template (use --no-chat-template to disable)", template.Name)
+		}
+	}
+
 	seqID := scheduler.SequenceID(1)
-	seq := scheduler.NewSequence(seqID, gf.Prompt)
+	seq := scheduler.NewSequence(seqID, prompt)
 	baseSched.AddSequence(seq)
 
 	tokenCount := 0
@@ -538,6 +558,19 @@ func runBench(globals GlobalFlags, args []string) error {
 
 func toGB(bytes int64) float64 {
 	return float64(bytes) / 1024 / 1024 / 1024
+}
+
+// isInstructModel checks if the model filename indicates an instruction-tuned model
+// by looking for common suffixes like "instruct", "chat", or "it" (instruction-tuned).
+func isInstructModel(modelPath string) bool {
+	lower := strings.ToLower(filepath.Base(modelPath))
+	// Check for common instruct model indicators in the filename
+	for _, keyword := range []string{"instruct", "-chat", "_chat", ".chat", "-it-", "_it_", "-it."} {
+		if strings.Contains(lower, keyword) {
+			return true
+		}
+	}
+	return false
 }
 
 // runTokenize tokenizes input text. Implemented in Phase 3.

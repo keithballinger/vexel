@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"vexel/inference/pkg/tokenizer"
 	"vexel/inference/scheduler"
 )
 
@@ -38,9 +39,10 @@ func init() {
 
 // Server handles HTTP/gRPC requests for inference.
 type Server struct {
-	scheduler *scheduler.Scheduler
-	config    Config
-	mux       *http.ServeMux
+	scheduler    *scheduler.Scheduler
+	config       Config
+	chatTemplate *tokenizer.ChatTemplate // nil = no auto-wrapping
+	mux          *http.ServeMux
 }
 
 // NewServer creates a new inference server with default configuration.
@@ -57,6 +59,21 @@ func NewServerWithConfig(sched *scheduler.Scheduler, cfg Config) *Server {
 	}
 	s.routes()
 	return s
+}
+
+// SetChatTemplate configures automatic chat template wrapping for incoming prompts.
+// When set, all prompts are wrapped as a single-turn user message using the template.
+func (s *Server) SetChatTemplate(ct tokenizer.ChatTemplate) {
+	s.chatTemplate = &ct
+}
+
+// wrapPrompt applies the chat template to a raw prompt if one is configured.
+func (s *Server) wrapPrompt(prompt string) string {
+	if s.chatTemplate == nil {
+		return prompt
+	}
+	messages := []tokenizer.ChatMessage{{Role: "user", Content: prompt}}
+	return s.chatTemplate.FormatConversation(messages)
 }
 
 func (s *Server) routes() {
@@ -107,9 +124,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Create Sequence
+	// 1. Create Sequence (apply chat template if configured)
+	prompt := s.wrapPrompt(req.Prompt)
 	seqID := nextSeqID()
-	seq := scheduler.NewSequence(seqID, req.Prompt)
+	seq := scheduler.NewSequence(seqID, prompt)
 	if req.MaxTokens > 0 {
 		seq.SetMaxTokens(req.MaxTokens)
 	}
@@ -151,9 +169,10 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Create Sequence
+	// 1. Create Sequence (apply chat template if configured)
+	prompt := s.wrapPrompt(req.Prompt)
 	seqID := nextSeqID()
-	seq := scheduler.NewSequence(seqID, req.Prompt)
+	seq := scheduler.NewSequence(seqID, prompt)
 	if req.MaxTokens > 0 {
 		seq.SetMaxTokens(req.MaxTokens)
 	}

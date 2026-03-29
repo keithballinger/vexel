@@ -9,12 +9,13 @@ import (
 
 // GlobalFlags holds flags shared across all subcommands.
 type GlobalFlags struct {
-	Model          string
-	DraftModel     string // Optional: path to draft model for speculative decoding
-	Verbose        bool
+	Model           string
+	DraftModel      string // Optional: path to draft model for speculative decoding
+	Verbose         bool
 	Medusa          bool   // Enable Medusa-style speculative decoding
 	MedusaHeadsPath string // Path to Medusa heads weights file (implies --medusa)
 	ContextLen      int    // Maximum context length for KV cache (0 = default 2048)
+	NoChatTemplate  bool   // Disable automatic chat template wrapping for instruct models
 }
 
 // validSubcommands lists the recognized subcommand names.
@@ -77,6 +78,9 @@ func parseArgs(args []string) (string, GlobalFlags, error) {
 			}
 			globals.ContextLen = v
 			i += 2
+		case "--no-chat-template":
+			globals.NoChatTemplate = true
+			i++
 		default:
 			// Not a global flag — must be the subcommand
 			goto foundCmd
@@ -226,12 +230,13 @@ Subcommands:
   tokenize   Tokenize text to token IDs
 
 Global flags:
-  --model        Path to GGUF model file (required for serve/generate/chat)
-  --draft-model  Path to draft model for speculative decoding (optional)
-  --verbose      Enable verbose logging
-  --medusa       Enable Medusa-style speculative decoding
-  --medusa-heads Path to Medusa heads weights file (implies --medusa)
-  --context-len  Maximum context length for KV cache (default 2048)
+  --model             Path to GGUF model file (required for serve/generate/chat)
+  --draft-model       Path to draft model for speculative decoding (optional)
+  --verbose           Enable verbose logging
+  --medusa            Enable Medusa-style speculative decoding
+  --medusa-heads      Path to Medusa heads weights file (implies --medusa)
+  --context-len       Maximum context length for KV cache (default 2048)
+  --no-chat-template  Disable automatic chat template wrapping for instruct models
 
 Examples:
   vexel --model model.gguf serve --port 8080 --grpc-port 9090
