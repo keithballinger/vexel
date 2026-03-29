@@ -294,3 +294,19 @@ Run the full comparison suite:
 ```bash
 cd benchmarks && ./full_comparison.sh all
 ```
+
+### Medusa Benchmark (TinyLlama 1.1B, M4 Max)
+
+| Mode | tok/s | vs Baseline |
+|------|-------|-------------|
+| Baseline (no Medusa) | 339.1 | — |
+| Medusa generate (GPU KV) | 349.9 | +3% (no overhead) |
+| Medusa serve (adaptive) | 97.2 | normal decode (speculation off) |
+
+Head 0 probe accuracy: **100%** (correctly predicts next token using lm_head weights).
+Heads 1-3 predict identical tokens (same FC2 initialization).
+Speculation activates but accepts 0 drafts due to non-diverse head predictions.
+
+Training status: 30+ steps, LR warmup + gradient clipping, loss ~2.0.
+Heads need more training data diversity or per-head weight divergence
+for multi-position prediction and actual speculation speedup.
