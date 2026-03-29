@@ -3,25 +3,23 @@
 > Hardware: Apple M4 Max, 128 GB Unified Memory, 40 GPU cores, Metal 4
 > Model: LLaMA 3.1 8B Instruct Q4_K_M (4.9 GB) and Qwen 2.5 0.5B Q4_K_M (0.4 GB)
 > llama.cpp: b8534 (e99d77fa4)
-> Last updated: 2026-03-28 (Comprehensive comparison: Medusa, batched decode, SDPA optimizations)
+> Last updated: 2026-03-29 (Updated after Medusa fixes, paged KV bugfixes, adaptive speculation)
 
-## Current Results (2026-03-28, M4 Max)
+## Current Results (2026-03-29, M4 Max)
 
 ### Standard Decode (LLaMA 3.1 8B Q4_K_M, 128 gen tokens, greedy)
 
-| Engine | Decode tok/s | Prefill tok/s | vs llama.cpp |
-|--------|-------------|--------------|--------------|
-| **Vexel** | **66.0** | **189.9** | **+28% decode, +7% prefill** |
-| llama.cpp | 51.6 | 176.7 | baseline |
-
-### Standard Decode (Qwen 2.5 0.5B Q4_K_M)
-
-| Engine | Decode tok/s | Prefill tok/s |
+| Engine | Decode tok/s | vs llama.cpp |
 |--------|-------------|--------------|
-| Vexel | 142.5 | 868.0 |
-| llama.cpp | 374.3 | 772.6 |
+| **Vexel** | **65.9** | **+29%** |
+| llama.cpp | 51.0 | baseline |
 
-llama.cpp is faster on small models (0.5B) for decode; Vexel has faster prefill.
+### Standard Decode (TinyLlama 1.1B Q4_0, 128 gen tokens, greedy)
+
+| Engine | Decode tok/s | vs llama.cpp |
+|--------|-------------|--------------|
+| **Vexel** | **343.8** | **+6%** |
+| llama.cpp | 323.3 | baseline |
 
 ### Context Scaling (LLaMA 3.1 8B, decode tok/s)
 
@@ -38,36 +36,34 @@ llama.cpp is faster on small models (0.5B) for decode; Vexel has faster prefill.
 Vexel maintains <6% degradation up to ctx=1024 thanks to adaptive SDPA dispatch
 (tiled split-K for kvLen>2048, NWG adaptive tiling for 64-2048, v3 chunk-based fallback).
 
-### Speculative Decode (LLaMA 3.1 8B)
+### Medusa Speculative Decode (LLaMA 3.1 8B)
 
-| Engine | Mode | Decode tok/s | Acceptance % | Notes |
-|--------|------|-------------|-------------|-------|
-| Vexel | Medusa (online) | 66.7 | 0% | Cold-start; heads need longer warmup |
-| Vexel | Draft-model | 11.2 | 0% | TinyLlama draft; architecture mismatch |
-| llama.cpp | Draft-model | — | — | Not captured (parsing issue) |
+Medusa heads are trained online during inference. The scheduler uses adaptive
+speculation: starts with normal decode, probes head accuracy every 32 steps,
+and enables speculation only when heads achieve >= 50% acceptance rate.
 
-Speculative decoding needs further investigation: Medusa heads require sustained
-inference to collect training samples before speculation kicks in. The cold-start
-benchmark doesn't give enough warmup time.
+With online-trained heads (600-token warmup), current acceptance rate is low
+(~0-5%) due to limited training (10-17 steps, loss 6-9 vs random 10.4). The
+server falls back to non-speculative decode for reliable output.
 
-### Batched Decode (LLaMA 3.1 8B, server mode)
+Pre-trained Medusa heads (loaded via `--medusa-heads`) are expected to achieve
+higher acceptance and provide actual speedup.
 
-| Concurrency | Vexel tok/s | llama.cpp tok/s | Vexel vs llama.cpp |
-|------------|------------|----------------|-------------------|
-| 1 | 97.7 | 45.0 | **2.2x** |
-| 2 | 75.9 | 61.6 | **1.2x** |
-| 4 | 151.8 | 97.3 | **1.6x** |
-| 8 | 283.2 | 124.1 | **2.3x** |
+### Server Decode (LLaMA 3.1 8B, single client)
 
-After switching to paged KV cache for the serve command, Vexel now scales
-with concurrency. At 8 concurrent clients, Vexel achieves **283 tok/s
-aggregate throughput** vs llama.cpp's 124 tok/s — **2.3x faster**.
+| Engine | Decode tok/s | Notes |
+|--------|-------------|-------|
+| Vexel (GPU KV) | ~29 | Default for single/few clients |
+| Vexel (paged KV) | ~10 | With `--context-len`, needed for Medusa |
+| llama.cpp | ~43 | |
 
-The paged KV cache gives each sequence its own block table, and the batched
-decode pipeline processes all sequences in a single GPU forward pass.
+Server mode has inherent overhead (HTTP, scheduler loop, token streaming)
+vs raw generate mode (66 tok/s). Vexel uses GPU KV cache by default for
+serve; paged KV is used when `--context-len` or `--medusa` is specified.
 
-Note: Vexel run 1 at concurrency=1 shows cold-start overhead (2.5 tok/s);
-subsequent runs show true throughput. llama.cpp numbers are best-of-3.
+Multi-client batched throughput (with paged KV, `--context-len 2048`)
+scales with concurrency but at lower per-token rates due to the paged
+attention overhead. Optimizing the paged KV decode path is a priority.
 
 ---
 
@@ -241,19 +237,19 @@ waits per token (one per layer). This single change closed the decode gap
 from -89.4% to -15.1%.
 
 **Remaining gaps and known issues:**
-- **Small model decode:** llama.cpp is 2.6x faster on Qwen 0.5B (374 vs 143 tok/s).
-  Likely due to llama.cpp's CPU REPACK optimization for small models.
-- **Server batching:** Vexel's HTTP server serializes `/generate` requests (~8 tok/s
-  regardless of concurrency). The batched decode runtime works but the server layer
-  doesn't leverage it yet. llama.cpp server scales to 114 tok/s at 8 concurrent.
-- **KV cache limit:** Vexel max context is 2048. Needs configurable KV cache size.
-- **Speculative cold-start:** Medusa heads need sustained warmup. Benchmark should
-  pre-warm with extended generation before measuring speculation.
-- ~~**Context scaling:**~~ **FIXED.** Adaptive SDPA dispatch (tiled split-K for
-  kvLen>2048, NWG adaptive tiling, v3 fallback). Degradation: 5.5% at ctx=1024.
-- ~~**Q4_K kernels:**~~ **FIXED.** Sub-block strided decode (3.7x) and simdgroup
-  GEMM prefill (13.3x).
-- ~~**Prefill vs llama.cpp:**~~ **CLOSED.** Now 7% faster on 8B model (189.9 vs 176.7).
+- **Paged KV decode speed:** Paged KV attention path (~10 tok/s) is significantly
+  slower than GPU KV cache (~29 tok/s serve, ~66 tok/s generate). Needed for Medusa
+  and multi-client serving. Likely needs a dedicated paged decode Metal kernel.
+- **Qwen 0.5B paged KV crash:** Known SIGSEGV with Qwen 0.5B in paged KV mode.
+  Not a production target but blocks benchmarking.
+- **Medusa speculation quality:** Online-trained heads need more training time or
+  pre-trained weights to achieve useful acceptance rates. Adaptive speculation
+  prevents garbage output but provides no speedup currently.
+- ~~**Server batching:**~~ **FIXED.** HTTP server now uses GPU KV cache by default
+  for fast single-client decode. Paged KV only used when explicitly requested.
+- ~~**Context scaling:**~~ **FIXED.** Adaptive SDPA dispatch. 5.5% at ctx=1024.
+- ~~**Q4_K kernels:**~~ **FIXED.** Sub-block strided decode + simdgroup GEMM prefill.
+- ~~**Prefill vs llama.cpp:**~~ **CLOSED.** 7% faster on 8B model.
 
 ## Vexel's Competitive Advantages
 

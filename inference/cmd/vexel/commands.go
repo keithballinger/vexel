@@ -180,8 +180,9 @@ func runServe(globals GlobalFlags, args []string) error {
 	}
 
 	// Draft-model speculation still requires GPU KV cache (VerifySpeculativeWithHidden uses it).
-	// Medusa and standard modes use paged KV for multi-client batching.
-	usePaged := globals.DraftModel == ""
+	// Use paged KV when explicitly requested (--context-len) or for Medusa mode.
+	// Otherwise use GPU KV cache which is faster for single-client decode.
+	usePaged := globals.ContextLen > 0 || globals.Medusa
 	model, tok, gpuBackend, err := initModel(globals.Model, sf.MaxTokens, globals.ContextLen, globals.Verbose, usePaged)
 	if err != nil {
 		return err
