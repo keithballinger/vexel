@@ -255,11 +255,9 @@ func (g *GPUBlockPool) StoreKV(layerIdx int, seqID int64, startPos int,
 		g.pagedOps.ReshapePagedKV(vPtr, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
 			1, g.numKVHeads, g.headDim, g.blockSize, true)
 	} else {
-		// Multi-token path: scatter each token with CopyBuffer + ReshapePagedKV.
-		// Per-iteration sync required because blit (CopyBuffer) and compute
-		// (ReshapePagedKV) use different Metal encoder queues. The tokenBuf is
-		// reused across iterations; ptBuf1/offBuf1 cannot be shared because
-		// ToDevice + ReshapePagedKV must complete before rewrite.
+		// Multi-token path: scatter one token at a time.
+		// The batched ReshapePagedKV kernel hangs at certain dispatch sizes
+		// (Metal kernel bug). Per-token scatter is reliable and correct.
 		kvElems := g.numKVHeads * g.headDim
 		kvBytes := kvElems * 4
 		tokenBuf := g.allocPerm(kvBytes)
@@ -287,7 +285,6 @@ func (g *GPUBlockPool) StoreKV(layerIdx int, seqID int64, startPos int,
 			}
 			g.pagedOps.ReshapePagedKV(tokenBuf, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
 				1, g.numKVHeads, g.headDim, g.blockSize, true)
-			g.be.Sync() // Wait for scatter before reusing tokenBuf and ptBuf1/offBuf1
 		}
 		g.be.Free(tokenBuf)
 	}

@@ -13804,8 +13804,7 @@ void metal_reshape_paged_kv_f32(void* queuePtr, void* pipelinePtr,
     int numThreadgroups = (totalElements + threadgroupSize - 1) / threadgroupSize;
     MTLSize gridSize = MTLSizeMake(numThreadgroups, 1, 1);
     MTLSize tgSize = MTLSizeMake(threadgroupSize, 1, 1);
-    
-    // dispatchThreads is preferred for non-uniform grids
+
     [encoder dispatchThreads:MTLSizeMake(totalElements, 1, 1) threadsPerThreadgroup:tgSize];
 
     finish_encode(encoder, cmdBuffer, shouldCommit);
