@@ -169,3 +169,14 @@ cd benchmarks && ./full_comparison.sh all
 
 Supported architectures: LLaMA 2/3, Mistral, Phi-2, Phi-3 (NEW), Gemma 2, Qwen 2.5
 Supported quantizations: Q4_0, Q4_K_M, Q5_K, Q6_K, Q8_0, BF16
+
+### Extended Model Testing (2026-03-29)
+
+| Model | Size | Quant | Decode tok/s | Tensors | Status |
+|-------|------|-------|-------------|---------|--------|
+| LLaMA 2 13B | 7.9GB | Q4_K_M | 42.9 | 363/363 | ✅ |
+| Gemma 2 2B | 1.6GB | Q4_K_M | 79.2 | 236/237 | ⚠️ Weight tying works, output needs soft-cap fix |
+| Mistral 7B v0.3 | 4.4GB | Q4_K_M | 71.1 | 291/291 | ✅ Tokenization fixed |
+| Phi-3 mini 3.8B | 2.4GB | Q4 | 75.4 | 195/195 | ✅ NEW architecture support |
+
+**7 models across 5 architectures tested.** All load and run inference.
