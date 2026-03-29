@@ -280,8 +280,12 @@ func (t *GPUOnlineTrainer) trainStep() {
 		fmt.Printf("[GPU Trainer] trainStep: training with batch size %d\n", len(batch))
 	}
 
-	// Train using GPU heads (hold gpuMu to prevent concurrent Metal access with inference)
-	t.gpuMu.Lock()
+	// Train using GPU heads. Use TryLock to avoid blocking inference —
+	// if inference is currently using the GPU, skip this training tick
+	// and try again on the next interval.
+	if !t.gpuMu.TryLock() {
+		return
+	}
 	loss := t.gpuHeads.TrainStep(batch, t.config.LearningRate)
 	t.gpuMu.Unlock()
 
@@ -308,7 +312,9 @@ func (t *GPUOnlineTrainer) evaluate() {
 		return
 	}
 
-	t.gpuMu.Lock()
+	if !t.gpuMu.TryLock() {
+		return
+	}
 	accuracies := t.gpuHeads.Evaluate(evalBatch)
 	t.gpuMu.Unlock()
 
