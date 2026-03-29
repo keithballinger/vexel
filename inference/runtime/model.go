@@ -253,10 +253,16 @@ func (m *ModelRuntime) GPUKVCache() *GPUKVCache {
 
 // CreateGPUBlockPool creates a GPU-resident paged block pool for paged KV batching.
 // This eliminates CPU roundtrips in the paged KV path by keeping blocks on the GPU.
+// Uses FP16 KV cache by default for 2x memory savings; set VEXEL_KV_FP32=1 to force FP32.
 func (m *ModelRuntime) CreateGPUBlockPool(maxBlocksPerLayer int) *GPUBlockPool {
 	pagedOps, ok := m.backend.(backend.PagedKVOps)
 	if !ok {
 		return nil
+	}
+	// Default to FP16 for paged KV unless VEXEL_KV_FP32=1 is set
+	useFP16 := true
+	if os.Getenv("VEXEL_KV_FP32") == "1" {
+		useFP16 = false
 	}
 	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
 	pool := NewGPUBlockPool(
@@ -266,6 +272,7 @@ func (m *ModelRuntime) CreateGPUBlockPool(maxBlocksPerLayer int) *GPUBlockPool {
 		headDim,
 		16, // standard block size
 		maxBlocksPerLayer,
+		useFP16,
 	)
 	m.gpuPool = pool
 	return pool

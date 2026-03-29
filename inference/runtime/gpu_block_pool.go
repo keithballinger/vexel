@@ -14,9 +14,9 @@ import (
 //
 // Block pool layout per physical block:
 //
-//	K: [blockSize, numKVHeads, headDim] float32
-//	V: [blockSize, numKVHeads, headDim] float32
-//	Total: 2 * blockSize * numKVHeads * headDim * sizeof(float32)
+//	K: [blockSize, numKVHeads, headDim] float32 or float16
+//	V: [blockSize, numKVHeads, headDim] float32 or float16
+//	Total: 2 * blockSize * numKVHeads * headDim * bytesPerElement
 type GPUBlockPool struct {
 	be       backend.Backend
 	pagedOps backend.PagedKVOps
@@ -25,11 +25,13 @@ type GPUBlockPool struct {
 	// All GPUBlockPool buffers must use this instead of be.Alloc.
 	allocPerm func(bytes int) tensor.DevicePtr
 
-	numLayers  int
-	numKVHeads int
-	headDim    int
-	blockSize  int
-	maxBlocks  int // per layer
+	numLayers       int
+	numKVHeads      int
+	headDim         int
+	blockSize       int
+	maxBlocks       int // per layer
+	useFP16         bool
+	bytesPerElement int // 4 for F32, 2 for F16
 
 	// Per-layer GPU pool buffer (single large allocation)
 	pools []tensor.DevicePtr
@@ -62,7 +64,7 @@ type gpuSeqState struct {
 // NewGPUBlockPool creates a GPU-resident block pool.
 // maxBlocks is the maximum number of physical blocks per layer.
 func NewGPUBlockPool(be backend.Backend, pagedOps backend.PagedKVOps,
-	numLayers, numKVHeads, headDim, blockSize, maxBlocks int) *GPUBlockPool {
+	numLayers, numKVHeads, headDim, blockSize, maxBlocks int, useFP16 bool) *GPUBlockPool {
 
 	// All GPUBlockPool allocations must be permanent (survive ResetPool cycles).
 	// The pool allocator's ResetPool() recycles all Alloc'd buffers, but GPUBlockPool
@@ -78,25 +80,32 @@ func NewGPUBlockPool(be backend.Backend, pagedOps backend.PagedKVOps,
 		allocPerm = be.Alloc
 	}
 
+	bytesPerElement := 4
+	if useFP16 {
+		bytesPerElement = 2
+	}
+
 	g := &GPUBlockPool{
-		be:        be,
-		pagedOps:  pagedOps,
-		allocPerm: allocPerm,
-		numLayers:  numLayers,
-		numKVHeads: numKVHeads,
-		headDim:    headDim,
-		blockSize:  blockSize,
-		maxBlocks:  maxBlocks,
-		pools:      make([]tensor.DevicePtr, numLayers),
-		freeLists:  make([][]int32, numLayers),
-		refCounts:  make([]map[int32]int, numLayers),
-		seqs:       make(map[int64]*gpuSeqState),
+		be:              be,
+		pagedOps:        pagedOps,
+		allocPerm:       allocPerm,
+		numLayers:       numLayers,
+		numKVHeads:      numKVHeads,
+		headDim:         headDim,
+		blockSize:       blockSize,
+		maxBlocks:       maxBlocks,
+		useFP16:         useFP16,
+		bytesPerElement: bytesPerElement,
+		pools:           make([]tensor.DevicePtr, numLayers),
+		freeLists:       make([][]int32, numLayers),
+		refCounts:       make([]map[int32]int, numLayers),
+		seqs:            make(map[int64]*gpuSeqState),
 	}
 
 	alloc := allocPerm
 
 	elementsPerBlock := 2 * blockSize * numKVHeads * headDim
-	poolBytes := maxBlocks * elementsPerBlock * 4
+	poolBytes := maxBlocks * elementsPerBlock * bytesPerElement
 
 	for i := 0; i < numLayers; i++ {
 		g.pools[i] = alloc(poolBytes)
@@ -250,10 +259,17 @@ func (g *GPUBlockPool) StoreKV(layerIdx int, seqID int64, startPos int,
 		g.be.ToDevice(g.ptBuf1, ptBytes[:])
 		g.be.ToDevice(g.offBuf1, offBytes[:])
 
-		g.pagedOps.ReshapePagedKV(kPtr, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
-			1, g.numKVHeads, g.headDim, g.blockSize, false)
-		g.pagedOps.ReshapePagedKV(vPtr, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
-			1, g.numKVHeads, g.headDim, g.blockSize, true)
+		if g.useFP16 {
+			g.pagedOps.ReshapePagedKVF16(kPtr, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
+				1, g.numKVHeads, g.headDim, g.blockSize, false)
+			g.pagedOps.ReshapePagedKVF16(vPtr, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
+				1, g.numKVHeads, g.headDim, g.blockSize, true)
+		} else {
+			g.pagedOps.ReshapePagedKV(kPtr, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
+				1, g.numKVHeads, g.headDim, g.blockSize, false)
+			g.pagedOps.ReshapePagedKV(vPtr, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
+				1, g.numKVHeads, g.headDim, g.blockSize, true)
+		}
 	} else {
 		// Multi-token path: scatter one token at a time.
 		// The batched ReshapePagedKV kernel hangs at certain dispatch sizes
@@ -278,13 +294,23 @@ func (g *GPUBlockPool) StoreKV(layerIdx int, seqID int64, startPos int,
 			if copier != nil {
 				copier.CopyBuffer(kPtr, i*kvBytes, tokenBuf, 0, kvBytes)
 			}
-			g.pagedOps.ReshapePagedKV(tokenBuf, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
-				1, g.numKVHeads, g.headDim, g.blockSize, false)
+			if g.useFP16 {
+				g.pagedOps.ReshapePagedKVF16(tokenBuf, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
+					1, g.numKVHeads, g.headDim, g.blockSize, false)
+			} else {
+				g.pagedOps.ReshapePagedKV(tokenBuf, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
+					1, g.numKVHeads, g.headDim, g.blockSize, false)
+			}
 			if copier != nil {
 				copier.CopyBuffer(vPtr, i*kvBytes, tokenBuf, 0, kvBytes)
 			}
-			g.pagedOps.ReshapePagedKV(tokenBuf, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
-				1, g.numKVHeads, g.headDim, g.blockSize, true)
+			if g.useFP16 {
+				g.pagedOps.ReshapePagedKVF16(tokenBuf, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
+					1, g.numKVHeads, g.headDim, g.blockSize, true)
+			} else {
+				g.pagedOps.ReshapePagedKV(tokenBuf, g.pools[layerIdx], g.ptBuf1, g.offBuf1,
+					1, g.numKVHeads, g.headDim, g.blockSize, true)
+			}
 		}
 		g.be.Free(tokenBuf)
 	}
@@ -349,9 +375,15 @@ func (g *GPUBlockPool) AttentionWithKVLen(layerIdx int, seqID int64,
 	btGPU := seq.btGPU[layerIdx]
 	g.mu.Unlock()
 
-	g.pagedOps.SDPAPagedDecode(qPtr, g.pools[layerIdx], btGPU, outPtr,
-		numBlocks, g.blockSize, numQHeads, g.numKVHeads, headDim,
-		scale, tokensInLastBlock)
+	if g.useFP16 {
+		g.pagedOps.SDPAPagedDecodeF16(qPtr, g.pools[layerIdx], btGPU, outPtr,
+			numBlocks, g.blockSize, numQHeads, g.numKVHeads, headDim,
+			scale, tokensInLastBlock)
+	} else {
+		g.pagedOps.SDPAPagedDecode(qPtr, g.pools[layerIdx], btGPU, outPtr,
+			numBlocks, g.blockSize, numQHeads, g.numKVHeads, headDim,
+			scale, tokensInLastBlock)
+	}
 
 	return nil
 }
@@ -415,8 +447,13 @@ func (g *GPUBlockPool) AttentionMultiquery(layerIdx int, seqID int64,
 			tokenOut := tensor.DevicePtrOffset(outPtr, uintptr(i*qStride*4))
 			tokensInLastBlock := kvLens[i] - ((kvLens[i]-1)/g.blockSize)*g.blockSize
 			nBlocks := (kvLens[i] + g.blockSize - 1) / g.blockSize
-			g.pagedOps.SDPAPagedDecode(tokenQ, g.pools[layerIdx], btGPU, tokenOut,
-				nBlocks, g.blockSize, numQHeads, g.numKVHeads, g.headDim, scale, tokensInLastBlock)
+			if g.useFP16 {
+				g.pagedOps.SDPAPagedDecodeF16(tokenQ, g.pools[layerIdx], btGPU, tokenOut,
+					nBlocks, g.blockSize, numQHeads, g.numKVHeads, g.headDim, scale, tokensInLastBlock)
+			} else {
+				g.pagedOps.SDPAPagedDecode(tokenQ, g.pools[layerIdx], btGPU, tokenOut,
+					nBlocks, g.blockSize, numQHeads, g.numKVHeads, g.headDim, scale, tokensInLastBlock)
+			}
 		}
 	}
 
@@ -495,10 +532,10 @@ func (g *GPUBlockPool) GatherKV(layerIdx int, seqID int64, totalTokens int) (kOu
 		return tensor.DevicePtr{}, tensor.DevicePtr{}, fmt.Errorf("backend doesn't support BufferCopier")
 	}
 
-	kvElems := g.numKVHeads * g.headDim           // elements per token
-	blockKVBytes := g.blockSize * kvElems * 4      // bytes for K (or V) in one block
-	poolBlockBytes := 2 * blockKVBytes             // K + V per physical block
-	outBytes := totalTokens * kvElems * 4
+	kvElems := g.numKVHeads * g.headDim                       // elements per token
+	blockKVBytes := g.blockSize * kvElems * g.bytesPerElement  // bytes for K (or V) in one block
+	poolBlockBytes := 2 * blockKVBytes                         // K + V per physical block
+	outBytes := totalTokens * kvElems * g.bytesPerElement
 
 	kOut = g.allocPerm(outBytes)
 	vOut = g.allocPerm(outBytes)
@@ -512,12 +549,12 @@ func (g *GPUBlockPool) GatherKV(layerIdx int, seqID int64, totalTokens int) (kOu
 		if tokensInBlock > remaining {
 			tokensInBlock = remaining
 		}
-		copyBytes := tokensInBlock * kvElems * 4
+		copyBytes := tokensInBlock * kvElems * g.bytesPerElement
 
 		// Source offset in pool: physBlock * poolBlockBytes
 		srcBase := int(physBlock) * poolBlockBytes
 		// K is at offset 0, V is at offset blockKVBytes within each physical block
-		dstOffset := logicalBlock * g.blockSize * kvElems * 4
+		dstOffset := logicalBlock * g.blockSize * kvElems * g.bytesPerElement
 
 		copier.CopyBuffer(g.pools[layerIdx], srcBase, kOut, dstOffset, copyBytes)
 		copier.CopyBuffer(g.pools[layerIdx], srcBase+blockKVBytes, vOut, dstOffset, copyBytes)
@@ -590,7 +627,7 @@ func (g *GPUBlockPool) BlockStats() (totalBlocks, freeBlocks, sharedBlocks int) 
 func (g *GPUBlockPool) MemoryStats() (totalMB, usedMB, freeMB float64) {
 	total, free, _ := g.BlockStats()
 	used := total - free
-	bytesPerBlock := 2 * g.blockSize * g.numKVHeads * g.headDim * 4 // K+V, float32
+	bytesPerBlock := 2 * g.blockSize * g.numKVHeads * g.headDim * g.bytesPerElement // K+V
 	totalMB = float64(total*bytesPerBlock) / (1024 * 1024)
 	usedMB = float64(used*bytesPerBlock) / (1024 * 1024)
 	freeMB = float64(free*bytesPerBlock) / (1024 * 1024)
