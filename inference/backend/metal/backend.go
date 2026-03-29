@@ -511,6 +511,15 @@ func (b *Backend) Free(ptr tensor.DevicePtr) {
 	C.metal_release(buf)
 }
 
+// PoolStats returns the number of in-use and available buffers in the buffer pool.
+func (b *Backend) PoolStats() (inUse, available int) {
+	inUse = len(b.pool.inUse)
+	for _, bufs := range b.pool.available {
+		available += len(bufs)
+	}
+	return
+}
+
 // ResetPool returns all in-use buffers to the pool for reuse.
 // Call this at the start of each forward pass.
 func (b *Backend) ResetPool() {

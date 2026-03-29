@@ -689,6 +689,15 @@ func (s *Scheduler) Metrics() SchedulerMetrics {
 	return s.metrics
 }
 
+// GPUMemoryStats returns GPU block pool memory usage in MB.
+// Returns (0, 0, 0) if no GPU block pool is available.
+func (s *Scheduler) GPUMemoryStats() (totalMB, usedMB, freeMB float64) {
+	if pool := s.runtime.GetGPUBlockPool(); pool != nil {
+		return pool.MemoryStats()
+	}
+	return 0, 0, 0
+}
+
 // ModelConfig returns the loaded model's configuration.
 // Returns a zero-value config if no model is loaded.
 func (s *Scheduler) ModelConfig() runtime.ModelConfig {
