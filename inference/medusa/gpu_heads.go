@@ -148,7 +148,7 @@ func NewGPUHeadsWithInit(numHeads, hiddenSize, vocabSize int, b backend.Backend,
 			// Training still uses FC1+SiLU+FC2 to learn head-specific transforms.
 			h.heads[i].BypassFC1 = true
 			// Near-identity FC1 with per-head noise for training path.
-			noiseScale := float32(0.01) * float32(i+1)
+			noiseScale := float32(0.1) * float32(i+1) // Larger noise for stronger head divergence
 			for j := range h.heads[i].FC1CPU {
 				h.heads[i].FC1CPU[j] = (rand.Float32()*2 - 1) * noiseScale
 			}
@@ -408,6 +408,17 @@ func (h *GPUHeads) TrainStep(samples []TrainingSample, lr float32) float32 {
 	// Learning rate warmup: linearly ramp up over first 50 steps
 	// to prevent large initial updates that cause instability
 	h.trainSteps++
+
+	// After 100 training steps, disable BypassFC1 on all heads.
+	// This switches Forward from FC2-only (all heads identical) to
+	// FC1+SiLU+FC2 (per-head noise in FC1 provides divergence).
+	// The training path always used FC1+SiLU+FC2, so FC2 weights
+	// are already trained for the full pipeline.
+	if h.trainSteps == 100 {
+		for i := range h.heads {
+			h.heads[i].BypassFC1 = false
+		}
+	}
 	const warmupSteps = 50
 	if h.trainSteps <= warmupSteps {
 		lr = lr * float32(h.trainSteps) / float32(warmupSteps)

@@ -48,7 +48,7 @@ func TestGPUBlockPoolStoreAndAttend(t *testing.T) {
 			blockSize := 16
 			maxBlocks := (tc.kvLen + blockSize - 1) / blockSize + 2
 
-			pool := NewGPUBlockPool(b, pagedOps, numLayers, tc.numKVHeads, tc.headDim, blockSize, maxBlocks)
+			pool := NewGPUBlockPool(b, pagedOps, numLayers, tc.numKVHeads, tc.headDim, blockSize, maxBlocks, false)
 			defer pool.Close()
 
 			seqID := int64(42)
@@ -188,7 +188,7 @@ func TestGPUBlockPoolPrefillThenDecode(t *testing.T) {
 	blockSize := 4
 	maxBlocks := 8
 
-	pool := NewGPUBlockPool(b, pagedOps, numLayers, numKVHeads, headDim, blockSize, maxBlocks)
+	pool := NewGPUBlockPool(b, pagedOps, numLayers, numKVHeads, headDim, blockSize, maxBlocks, false)
 	defer pool.Close()
 
 	seqID := int64(99)
@@ -334,7 +334,7 @@ func TestGPUBlockPoolPrefixSharing(t *testing.T) {
 	blockSize := 4
 	maxBlocks := 16
 
-	pool := NewGPUBlockPool(b, pagedOps, numLayers, numKVHeads, headDim, blockSize, maxBlocks)
+	pool := NewGPUBlockPool(b, pagedOps, numLayers, numKVHeads, headDim, blockSize, maxBlocks, false)
 	defer pool.Close()
 
 	tokenKVElems := numKVHeads * headDim

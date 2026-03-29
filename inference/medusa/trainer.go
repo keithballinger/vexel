@@ -107,7 +107,7 @@ func DefaultOnlineConfig() OnlineConfig {
 		WarmupSamples:  200,     // Start training after 200 samples
 		MinAccuracy:    0.3,     // 30% top-1 accuracy to go hot
 		BatchSize:      64,      // Train on 64 samples at a time
-		LearningRate:   0.0001,  // Very conservative LR to prevent mode collapse from lm_head init
+		LearningRate:   0.001,   // Moderate LR; BypassFC1 protects early, FC1 divergence after step 100
 		TrainInterval:  500 * time.Millisecond, // Train every 500ms; TryLock skips when inference active
 		EvalInterval:   1 * time.Second,
 	}
