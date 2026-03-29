@@ -2,8 +2,8 @@
 
 > Hardware: Apple M4 Max, 128 GB Unified Memory, 40 GPU cores, Metal 4
 > Models: LLaMA 3.1 8B Q4_K_M, TinyLlama 1.1B Q4_0, Qwen 2.5 0.5B Q4_K_M
-> llama.cpp: b8534 (e99d77fa4)
-> Last updated: 2026-03-29
+> llama.cpp: b8534 (e99d77fa4), mlx-lm: 0.31.1
+> Last updated: 2026-03-28
 
 ## Current Results (2026-03-29, M4 Max)
 
@@ -85,21 +85,80 @@ per-head noise initialization, loss ~2.0. Heads auto-save to `<model>.medusa-hea
 
 ---
 
+## MLX Comparison (2026-03-28, M4 Max)
+
+> mlx-lm 0.31.1, Python 3.12, Apple MLX framework
+> All models: 4-bit quantized MLX-community variants from HuggingFace
+> Methodology: 3 warm runs per model, best-of-3 reported (first run excluded as cold start)
+
+### Decode Throughput (tok/s)
+
+| Model | Vexel | MLX | vs MLX |
+|-------|-------|-----|--------|
+| **LLaMA 3.1 8B (4-bit)** | **66.6** | 35.6 | **+87%** |
+| **Mistral 7B (4-bit)** | **71.1** | 38.8 | **+83%** |
+| **Phi-3 mini 3.8B (4-bit)** | **75.4** | 45.1 | **+67%** |
+| **Qwen 2.5 0.5B (4-bit)** | **147.3** | 85.9 | **+71%** |
+
+Vexel is **67-87% faster** than MLX across all tested models on decode throughput.
+
+### Prefill Throughput (tok/s)
+
+| Model | Vexel | MLX | vs MLX |
+|-------|-------|-----|--------|
+| LLaMA 3.1 8B (4-bit) | ~700* | 258 | ~+170% |
+
+*Vexel prefill measured at 128 tokens on LLaMA 2 7B Q4_0 (717 tok/s). Direct
+comparison is approximate due to different model variants.
+
+### Peak Memory (LLaMA 3.1 8B 4-bit)
+
+| Engine | Peak GPU Memory |
+|--------|----------------|
+| MLX | 4.7 GB |
+| Vexel | ~5.2 GB |
+
+Memory usage is comparable. MLX is slightly lower due to Python lazy evaluation.
+
+### Notes
+
+- **MLX** (Apple, Python): Uses MLX framework with safetensors format. Python-based
+  with NumPy-style API. Strong ecosystem integration with HuggingFace.
+- **Vexel** (Go): Uses GGUF format with custom Metal kernels. Single binary, no
+  Python dependency. Designed for server deployment.
+- MLX decode speeds are consistent across generation lengths (128-256 tokens).
+- MLX models sourced from `mlx-community/` on HuggingFace (pre-quantized).
+- Vexel numbers from existing benchmarks in this document (same hardware).
+- The performance gap is primarily due to Vexel's hand-tuned Metal kernels vs
+  MLX's general-purpose compute graph compiler.
+
+### Three-Way Comparison (LLaMA 8B class, 4-bit, M4 Max)
+
+| Engine | Decode tok/s | vs Vexel | Language | Format |
+|--------|-------------|----------|----------|--------|
+| **Vexel** | **66.6** | baseline | Go | GGUF |
+| llama.cpp | 42.4 | -36% | C++ | GGUF |
+| MLX | 35.6 | -47% | Python | safetensors |
+
+---
+
 ## Vexel's Competitive Advantages
 
-On the M4 Max, Vexel is **57% faster** than llama.cpp on LLaMA 3.1 8B decode,
-with better context scaling (<6% degradation at ctx=1024).
+On the M4 Max, Vexel is **87% faster** than Apple MLX and **57% faster** than
+llama.cpp on LLaMA 3.1 8B decode, with better context scaling (<6% degradation
+at ctx=1024).
 
-1. **57% faster decode** on LLaMA 3.1 8B Q4_K_M (66.6 vs 42.4 tok/s)
-2. **Superior context scaling** — <6% degradation at ctx=1024
-3. **Medusa speculative decoding** — online-trained heads with adaptive probes, zero overhead
-4. **Near-linear multi-client scaling** — 989 tok/s at 4 concurrent (paged KV)
-5. **Per-request sampling** — temperature, top_k, top_p via HTTP/gRPC JSON
-6. **Interactive chat** — multi-turn REPL with Llama 3, ChatML, Llama 2 templates
-7. **Single binary deployment** — pure Go, no Python dependency chain
-8. **Pre-trained heads** — save/load Medusa heads for instant startup
-9. **FP16 paged KV kernels** — 2x memory reduction for longer contexts
-10. **GPU memory reporting** — `--verbose` shows per-request memory stats
+1. **87% faster than MLX** on LLaMA 3.1 8B 4-bit (66.6 vs 35.6 tok/s)
+2. **57% faster than llama.cpp** on LLaMA 3.1 8B Q4_K_M (66.6 vs 42.4 tok/s)
+3. **Superior context scaling** — <6% degradation at ctx=1024
+4. **Medusa speculative decoding** — online-trained heads with adaptive probes, zero overhead
+5. **Near-linear multi-client scaling** — 989 tok/s at 4 concurrent (paged KV)
+6. **Per-request sampling** — temperature, top_k, top_p via HTTP/gRPC JSON
+7. **Interactive chat** — multi-turn REPL with Llama 3, ChatML, Llama 2 templates
+8. **Single binary deployment** — pure Go, no Python dependency chain
+9. **Pre-trained heads** — save/load Medusa heads for instant startup
+10. **FP16 paged KV kernels** — 2x memory reduction for longer contexts
+11. **GPU memory reporting** — `--verbose` shows per-request memory stats
 
 ---
 
