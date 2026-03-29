@@ -273,6 +273,10 @@ func (ms *MedusaScheduler) step(ctx context.Context) error {
 		if ms.probeCounter >= 8 {
 			ms.probeCounter = 0
 			ms.probeSpeculation(batch)
+			if os.Getenv("MEDUSA_DEBUG") != "" {
+				fmt.Printf("[Medusa] probe: speculationEnabled=%v, recentFull=%v\n",
+					ms.speculationEnabled(), ms.recentFull)
+			}
 		}
 	}
 
@@ -1026,6 +1030,9 @@ func (ms *MedusaScheduler) probeSpeculation(batch []*Sequence) {
 	accepted := 0
 	if predicted == actual {
 		accepted = 1
+	}
+	if os.Getenv("MEDUSA_DEBUG") != "" && ms.probeCounter == 0 {
+		fmt.Printf("[Medusa] probe: predicted=%d actual=%d match=%v\n", predicted, actual, predicted == actual)
 	}
 	ms.recordAcceptance(accepted)
 }

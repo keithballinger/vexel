@@ -279,7 +279,7 @@ func runServe(globals GlobalFlags, args []string) error {
 			baseSched.RemoveSequence(seqID)
 		}
 		log.Printf("Medusa warmup complete (%d tokens generated). Waiting for heads to train...", count)
-		time.Sleep(3 * time.Second)
+		time.Sleep(15 * time.Second) // Allow ~15 training steps at 1s interval
 
 		// Auto-save trained heads for faster startup next time
 		if medusaSched != nil {

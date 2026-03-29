@@ -144,9 +144,10 @@ func NewGPUHeadsWithInit(numHeads, hiddenSize, vocabSize int, b backend.Backend,
 		// Initialize FC1 on CPU
 		h.heads[i].FC1CPU = make([]float32, hiddenSize*hiddenSize)
 		if hasLMHead {
-			// Near-identity FC1 with per-head noise to break symmetry.
-			// Heads predict different future positions, so each needs to learn
-			// a different transformation. Noise scale increases with head index.
+			// BypassFC1 for inference: use FC2 (lm_head) directly on hidden state.
+			// Training still uses FC1+SiLU+FC2 to learn head-specific transforms.
+			h.heads[i].BypassFC1 = true
+			// Near-identity FC1 with per-head noise for training path.
 			noiseScale := float32(0.01) * float32(i+1)
 			for j := range h.heads[i].FC1CPU {
 				h.heads[i].FC1CPU[j] = (rand.Float32()*2 - 1) * noiseScale
@@ -267,15 +268,19 @@ func (h *GPUHeads) Forward(headIdx int, hidden []float32) []float32 {
 		h.backend.ToDevice(h.fwdHidden, float32ToBytes(hidden))
 	}
 
-	// Always use FC1+SiLU+FC2 to match the training path.
-	// FC1 starts as identity (or near-identity), so initial behavior matches
-	// the lm_head initialization. As training proceeds, FC1 learns head-specific
-	// transformations that differentiate the heads.
-	h.backend.MatMul(h.fwdHidden, head.FC1, h.fwdInter, 1, hiddenSize, hiddenSize)
-	if trainOps, ok := h.backend.(backend.TrainingOps); ok {
-		trainOps.SiLUInplace(h.fwdInter, hiddenSize)
+	// Use FC2 directly when BypassFC1 is set (lm_head initialization).
+	// Training uses FC1+SiLU+FC2, but inference bypasses FC1 to preserve
+	// the original lm_head mapping. After sufficient training, BypassFC1
+	// can be disabled to use the trained FC1 transformation.
+	if head.BypassFC1 {
+		h.backend.MatMul(h.fwdHidden, head.FC2, h.fwdLogits, 1, vocabSize, hiddenSize)
+	} else {
+		h.backend.MatMul(h.fwdHidden, head.FC1, h.fwdInter, 1, hiddenSize, hiddenSize)
+		if trainOps, ok := h.backend.(backend.TrainingOps); ok {
+			trainOps.SiLUInplace(h.fwdInter, hiddenSize)
+		}
+		h.backend.MatMul(h.fwdInter, head.FC2, h.fwdLogits, 1, vocabSize, hiddenSize)
 	}
-	h.backend.MatMul(h.fwdInter, head.FC2, h.fwdLogits, 1, vocabSize, hiddenSize)
 
 	// Download logits to CPU
 	logitsBytes := make([]byte, vocabSize*4)
