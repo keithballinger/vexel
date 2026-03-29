@@ -155,3 +155,17 @@ Run the full comparison suite:
 ```bash
 cd benchmarks && ./full_comparison.sh all
 ```
+
+### Model Support Matrix (2026-03-29)
+
+| Model | Architecture | Quant | Decode tok/s | Status |
+|-------|-------------|-------|-------------|--------|
+| LLaMA 3.1 8B | llama | Q4_K_M | 66.8 | ✅ Flagship |
+| Mistral 7B v0.3 | llama | Q4_K_M | 71.1 | ✅ |
+| Phi-3 mini 3.8B | phi3 | Q4 | 75.4 | ✅ NEW |
+| TinyLlama 1.1B | llama | Q4_0 | 345.2 | ✅ |
+| Qwen 2.5 0.5B | qwen2 | Q4_K_M | 147.3 | ✅ |
+| LLaMA 3.1 8B | llama | Q8_0 | 27.4 | ✅ (slower due to 8-bit bandwidth) |
+
+Supported architectures: LLaMA 2/3, Mistral, Phi-2, Phi-3 (NEW), Gemma 2, Qwen 2.5
+Supported quantizations: Q4_0, Q4_K_M, Q5_K, Q6_K, Q8_0, BF16
