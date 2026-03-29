@@ -581,6 +581,9 @@ void metal_embedding_f32(void* queue,
                          void* tokens, void* table, void* out,
                          int numTokens, int vocabSize, int dim);
 
+// Scalar scale: buf[i] *= scale for i in [0, n)
+void metal_scale_inplace_f32(void* buf, float scale, int n);
+
 // Attention operations
 // SDPA for decode (single query position against KV cache)
 // Q: [numQHeads, headDim], K/V: [numKVHeads, maxSeqLen, headDim] (head-major layout)

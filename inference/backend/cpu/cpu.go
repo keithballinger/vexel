@@ -554,6 +554,14 @@ func (b *CPUBackend) Embedding(ids tensor.DevicePtr, numTokens int, table, out t
 	}
 }
 
+// ScaleBuffer multiplies every element in buf by scale, in-place.
+func (b *CPUBackend) ScaleBuffer(buf tensor.DevicePtr, scale float32, n int) {
+	data := ptrToFloat32Slice(buf, n)
+	for i := 0; i < n; i++ {
+		data[i] *= scale
+	}
+}
+
 // SDPA performs Scaled Dot-Product Attention for decode.
 // KV cache is in head-major layout: [numKVHeads, maxSeqLen, headDim]
 // kvHeadStride = maxSeqLen * headDim

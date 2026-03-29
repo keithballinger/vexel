@@ -249,6 +249,14 @@ type BiasOps interface {
 	AddBias(x, bias, out tensor.DevicePtr, rows, cols int)
 }
 
+// ScaleOps is an optional interface for backends that support in-place scalar scaling.
+// Used by Gemma models which multiply embeddings by sqrt(hiddenSize).
+type ScaleOps interface {
+	// ScaleBuffer multiplies every element in buf by scale, in-place.
+	// buf: [n] in FP32
+	ScaleBuffer(buf tensor.DevicePtr, scale float32, n int)
+}
+
 // TrainingOps is an optional interface for backends that support neural network training.
 // These operations enable GPU-accelerated gradient computation and weight updates.
 type TrainingOps interface {

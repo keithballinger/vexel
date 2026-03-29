@@ -1791,6 +1791,12 @@ func (b *Backend) Embedding(ids tensor.DevicePtr, numTokens int, table, out tens
 		C.int(numTokens), C.int(vocabSize), C.int(dim))
 }
 
+// ScaleBuffer multiplies every element in buf by scale, in-place.
+// This runs on CPU (same as Embedding) since the buffer contents are CPU-accessible.
+func (b *Backend) ScaleBuffer(buf tensor.DevicePtr, scale float32, n int) {
+	C.metal_scale_inplace_f32(unsafe.Pointer(buf.Addr()), C.float(scale), C.int(n))
+}
+
 // SDPA performs scaled dot-product attention for decode (single query token).
 // Uses Flash Decoding for longer sequences, naive for short ones.
 func (b *Backend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale float32, kvHeadStride int) {

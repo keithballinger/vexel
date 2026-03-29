@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"fmt"
+	"math"
 
 	"vexel/inference/pkg/gguf"
 	"vexel/inference/tensor"
@@ -124,6 +125,9 @@ type ModelConfig struct {
 	HasPostNorms          bool      // Apply RMSNorm after attention and MLP (before residual). Gemma 2 only.
 	RoPEFreqScales        []float32 // Per-dimension inverse frequency values for learned RoPE (nil = use theta-based)
 
+	// Gemma embedding scaling
+	EmbeddingScale float32 // Multiply embeddings by this factor after lookup (0 = disabled). Gemma uses sqrt(hiddenSize).
+
 	// MoE (Mixture of Experts) settings
 	NumMoEExperts  int // Total number of routed experts (e.g., 64 or 256 for DeepSeek)
 	NumMoESelected int // Number of experts selected per token (e.g., 6 or 8 for DeepSeek)
@@ -192,6 +196,7 @@ func Gemma2B() ModelConfig {
 		NormType:          NormRMSNorm,
 		MLPType:           MLPGeGLU,
 		HasBias:           false,
+		EmbeddingScale:    float32(math.Sqrt(2048)), // sqrt(hiddenSize)
 	}
 }
 
@@ -211,6 +216,7 @@ func Gemma7B() ModelConfig {
 		NormType:          NormRMSNorm,
 		MLPType:           MLPGeGLU,
 		HasBias:           false,
+		EmbeddingScale:    float32(math.Sqrt(3072)), // sqrt(hiddenSize)
 	}
 }
 
@@ -385,6 +391,7 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 	attnLogitSoftCap := float32(0)         // 0 = disabled, typically 30.0 for Gemma 2
 	attnWindowType := WindowGlobal         // Default: full context on every layer
 	hasPostNorms := false                  // Default: no post-norms
+	embeddingScale := float32(0)           // 0 = disabled, Gemma uses sqrt(hiddenSize)
 
 	switch g.Architecture {
 	case "phi", "phi2":
@@ -409,11 +416,13 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		normType = NormRMSNorm
 		mlpType = MLPGeGLU
 		hasBias = false
+		embeddingScale = float32(math.Sqrt(float64(g.HiddenSize)))
 		// Gemma 1 uses LLaMA-style RoPE (interleaved pairs)
 	case "gemma2":
 		normType = NormRMSNorm
 		mlpType = MLPGeGLU
 		hasBias = false
+		embeddingScale = float32(math.Sqrt(float64(g.HiddenSize)))
 		attnLogitSoftCap = 30.0     // Gemma 2 uses logit soft-capping with cap=30
 		attnWindowType = WindowAlternating // Even layers=global, odd layers=sliding window
 		hasPostNorms = true                // Gemma 2 applies RMSNorm after attn and MLP
@@ -455,6 +464,7 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		AttentionWindowType:   attnWindowType,
 		AttentionLogitSoftCap: attnLogitSoftCap,
 		HasPostNorms:          hasPostNorms,
+		EmbeddingScale:        embeddingScale,
 		NumMoEExperts:         g.ExpertCount,
 		NumMoESelected:        g.ExpertUsedCount,
 	}
