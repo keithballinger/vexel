@@ -203,14 +203,16 @@ func (t *Tokenizer) encodeSegment(text string, atWordBoundary bool, isAbsoluteSt
 		return nil, nil
 	}
 
-	// Try exact match first
-	if id, ok := t.vocab[text]; ok {
-		return []int{id}, nil
-	}
-
-	// If we have BPE merges and SentencePiece mode, use proper BPE encoding
+	// If we have BPE merges and SentencePiece mode, use proper BPE encoding.
+	// Must be done before greedy matching because SentencePiece needs to
+	// preprocess (add ▁ prefix, replace spaces) before matching vocab.
 	if len(t.mergeRanks) > 0 && !t.useByteLevel {
 		return t.encodeBPE(text, atWordBoundary, isAbsoluteStart)
+	}
+
+	// Try exact match first (for non-BPE or ByteLevel paths)
+	if id, ok := t.vocab[text]; ok {
+		return []int{id}, nil
 	}
 
 	// Define space token based on tokenizer type
@@ -376,82 +378,36 @@ func (t *Tokenizer) encodeSegment(text string, atWordBoundary bool, isAbsoluteSt
 }
 
 // encodeBPE encodes a text segment using proper BPE merge rules (SentencePiece style).
-// It splits text into words at spaces, prepends ▁ for word boundaries, then applies
-// iterative pair merging according to the merge priority table.
+// SentencePiece replaces all spaces with ▁ and optionally prepends ▁ at the start,
+// then applies BPE merging on the entire sequence.
 func (t *Tokenizer) encodeBPE(text string, atWordBoundary bool, isAbsoluteStart bool) ([]int, error) {
 	spaceChar := "▁"
 
-	// Split text into words at space boundaries, tracking which get the ▁ prefix.
-	// SentencePiece convention: leading word gets ▁ prefix at word boundary,
-	// spaces in text become ▁ prefixes on the following word.
-	type wordInfo struct {
-		word      string
-		addPrefix bool
-	}
-	var words []wordInfo
+	// Convert text to SentencePiece form: replace spaces with ▁ and optionally add leading ▁.
+	// When text starts with a space at a word boundary, that space becomes the ▁ prefix
+	// (no extra ▁ added). When text doesn't start with a space, ▁ is prepended.
+	spText := strings.ReplaceAll(text, " ", spaceChar)
 
-	// Split on spaces: each space causes the next word to get ▁ prefix
-	parts := strings.Split(text, " ")
-	for i, part := range parts {
-		if part == "" {
-			continue
+	if atWordBoundary {
+		startsWithNewline := len(text) > 0 && text[0] == '\n'
+		startsWithSpecialChar := len(text) > 0 && (text[0] == '<' || text[0] == '[' || text[0] == '{')
+		startsWithSpace := len(text) > 0 && text[0] == ' '
+		skipPrefix := startsWithNewline || (isAbsoluteStart && startsWithSpecialChar) || startsWithSpace
+		if !skipPrefix {
+			spText = spaceChar + spText
 		}
-		addPrefix := false
-		if i == 0 {
-			// First part: add ▁ if at word boundary and not special start
-			startsWithNewline := len(part) > 0 && part[0] == '\n'
-			startsWithSpecialChar := len(part) > 0 && (part[0] == '<' || part[0] == '[' || part[0] == '{')
-			skipPrefix := startsWithNewline || (isAbsoluteStart && startsWithSpecialChar)
-			if atWordBoundary && !skipPrefix {
-				addPrefix = true
-			}
-		} else {
-			// After a space: always add ▁ prefix
-			addPrefix = true
-		}
-		words = append(words, wordInfo{word: part, addPrefix: addPrefix})
 	}
 
-	// Handle text that is just spaces
-	if len(words) == 0 {
-		// Each space becomes a ▁ token
-		var ids []int
-		for i := 0; i < len(text); i++ {
-			if text[i] == ' ' {
-				if id, ok := t.vocab[spaceChar]; ok {
-					ids = append(ids, id)
-				}
-			}
-		}
-		return ids, nil
-	}
-
-	var allTokens []int
-	for _, w := range words {
-		wordTokens := t.bpeEncodeWord(w.word, w.addPrefix, spaceChar)
-		allTokens = append(allTokens, wordTokens...)
-	}
-	return allTokens, nil
+	return t.bpeEncodeWord(spText, spaceChar), nil
 }
 
-// bpeEncodeWord encodes a single word using BPE merge rules.
-func (t *Tokenizer) bpeEncodeWord(word string, addPrefix bool, spaceChar string) []int {
-	// Build initial symbol sequence: split into individual UTF-8 characters,
-	// with optional ▁ prefix.
+// bpeEncodeWord encodes a string (already in SentencePiece form with ▁) using BPE merge rules.
+func (t *Tokenizer) bpeEncodeWord(word string, spaceChar string) []int {
+	// Build initial symbol sequence: split into individual UTF-8 characters.
 	var symbols []string
 	runes := []rune(word)
-
-	if addPrefix {
-		// SentencePiece BPE: ▁ is always its own initial symbol, then each character separately.
-		// The merge table contains rules like "▁ t" -> "▁t", so they get merged during BPE.
-		symbols = append(symbols, spaceChar)
-		for _, r := range runes {
-			symbols = append(symbols, string(r))
-		}
-	} else {
-		for _, r := range runes {
-			symbols = append(symbols, string(r))
-		}
+	for _, r := range runes {
+		symbols = append(symbols, string(r))
 	}
 
 	if len(symbols) == 0 {
