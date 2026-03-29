@@ -225,15 +225,23 @@ curl -N -X POST http://localhost:8080/stream \
   -d '{"prompt": "Tell me a joke"}'
 ```
 
-**Per-request `max_tokens`:** Both `/generate` and `/stream` accept an optional `max_tokens` field to override the server's default `--max-tokens` on a per-request basis:
+**Per-request parameters:** Both `/generate` and `/stream` accept optional fields to override the server defaults:
 
 ```bash
 curl -X POST http://localhost:8080/generate \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "Summarize this in one sentence.", "max_tokens": 50}'
+  -d '{"prompt": "Write a creative story.", "max_tokens": 100, "temperature": 0.8, "top_k": 40, "top_p": 0.9}'
 ```
 
-The Go client library supports this via `GenerateOptions.MaxTokens` (see [`examples/client/main.go`](examples/client/main.go)).
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `prompt` | string | required | Input text |
+| `max_tokens` | int | server default | Maximum tokens to generate |
+| `temperature` | float | 0 (greedy) | Sampling temperature (0 = deterministic) |
+| `top_k` | int | 0 (disabled) | Keep top K tokens |
+| `top_p` | float | 0 (disabled) | Nucleus sampling threshold |
+
+The Go client library supports all parameters via `GenerateOptions` (see [`examples/client/main.go`](examples/client/main.go)). The gRPC API also supports these via `SamplingParams`.
 
 ## Examples
 
@@ -242,6 +250,7 @@ The Go client library supports this via `GenerateOptions.MaxTokens` (see [`examp
 | [`examples/client/`](examples/client/main.go) | HTTP client with Generate and Stream | none |
 | [`examples/server/`](examples/server/main.go) | Embed Vexel server in your Go app | `metal` |
 | [`examples/generate/`](examples/generate/main.go) | Direct inference loop (no HTTP) | `metal` |
+| [`examples/benchmark/`](examples/benchmark/main.go) | Programmatic benchmarking (GPU KV vs paged) | `metal` |
 
 Run examples with:
 ```bash
@@ -276,14 +285,15 @@ scripts/             Performance harness and benchmarking tools
 
 ## Performance
 
-Benchmarks on Apple M3 Max (128 GB) with LLaMA 2 7B:
+Benchmarks on Apple M4 Max (128 GB) with LLaMA 3.1 8B Q4_K_M:
 
-**Q4_0 (3.56 GB):**
+| Metric | Vexel | llama.cpp | vs llama.cpp |
+|--------|-------|-----------|--------------|
+| Decode throughput | **65.9 tok/s** | 51.0 tok/s | **+29%** |
+| Server throughput | **52 tok/s** | 43 tok/s | **+21%** |
+| Context degradation (16→1024) | 5.5% | 8.1% | better |
 
-| Metric | Vexel | llama.cpp | MLX | Gap (vs llama.cpp) |
-|--------|-------|-----------|-----|-----|
-| Decode throughput | 64.8 tok/s | 76.3 tok/s | 83.5 tok/s | -15.1% |
-| Decode ctx degradation (16→512) | ~-10% | -2.7% | -2.5% | — |
+See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) for detailed tuning guide and [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md) for full benchmark data.
 | Prefill (128 tokens) | 377 tok/s | 803 tok/s | 725 tok/s | -53% |
 | Model load time | ~885 ms | ~1100 ms | — | +20% faster |
 
