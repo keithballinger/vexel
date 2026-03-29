@@ -815,7 +815,17 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 		if err := gpuPool.StoreKV(layerIdx, seqID, startPos, kPtr, vPtr, seqLen); err != nil {
 			return x, fmt.Errorf("gpu pool store prefill: %w", err)
 		}
-		if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
+		if startPos > 0 {
+			// Verification: use multi-query paged SDPA — each query token attends
+			// to its own causal window within the block pool KV.
+			kvLens := make([]int, seqLen)
+			for i := 0; i < seqLen; i++ {
+				kvLens[i] = startPos + i + 1
+			}
+			if err := gpuPool.AttentionMultiquery(layerIdx, seqID, qPtr, attnOutPtr, numHeads, headDim, scale, seqLen, kvLens); err != nil {
+				return x, fmt.Errorf("multiquery attention: %w", err)
+			}
+		} else if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
 			b.softCapOps.SDPAPrefillSoftCap(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap)
 		} else {
 			b.backend.SDPAPrefill(qPtr, kPtr, vPtr, attnOutPtr, seqLen, numHeads, numKVHeads, headDim, scale)
