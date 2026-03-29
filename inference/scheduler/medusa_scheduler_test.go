@@ -490,9 +490,9 @@ func TestSelectBestTreePathEmpty(t *testing.T) {
 	_ = finalToken
 }
 
-// TestSelectBestTreePathPartialAccept verifies that when the best path is
-// partially accepted and an alternate shares the accepted prefix but diverges
-// later, the path with the most accepted tokens wins.
+// TestSelectBestTreePathPartialAccept verifies that only the best path is used.
+// Even when an alternate path could accept more tokens, it's unsafe because the
+// KV cache contains the best path's tokens.
 func TestSelectBestTreePathPartialAccept(t *testing.T) {
 	vocabSize := 8
 
@@ -503,7 +503,7 @@ func TestSelectBestTreePathPartialAccept(t *testing.T) {
 		{Tokens: []int{3, 4, 2}, Confidence: 8.0},  // diverges at position 1
 	}
 
-	// Target accepts [3, 1] but rejects 5, prefers 2 at position 2
+	// Target accepts [3, 1] but rejects 5 at position 2
 	verifyLogits := make([]float32, 4*vocabSize)
 	verifyLogits[0*vocabSize+3] = 10.0 // position 0 -> 3
 	verifyLogits[1*vocabSize+1] = 10.0 // position 1 -> 1
@@ -512,16 +512,15 @@ func TestSelectBestTreePathPartialAccept(t *testing.T) {
 
 	bestIdx, accepted, finalToken := selectBestTreePath(paths, verifyLogits, vocabSize)
 
-	// Path 1 [3, 1, 2] should be fully accepted (3 tokens)
-	// since it shares prefix [3, 1] and has the target's preferred token 2
-	if bestIdx != 1 {
-		t.Errorf("bestIdx = %d, want 1 (path with token 2 at position 2)", bestIdx)
+	// Only best path is used — accepts 2 tokens [3, 1], rejects at position 2
+	if bestIdx != 0 {
+		t.Errorf("bestIdx = %d, want 0 (only best path used)", bestIdx)
 	}
-	if accepted != 3 {
-		t.Errorf("accepted = %d, want 3 (full path accepted)", accepted)
+	if accepted != 2 {
+		t.Errorf("accepted = %d, want 2 (best path accepts [3,1])", accepted)
 	}
-	if finalToken != 0 {
-		t.Errorf("finalToken = %d, want 0 (bonus token)", finalToken)
+	if finalToken != 2 {
+		t.Errorf("finalToken = %d, want 2 (target's correction at position 2)", finalToken)
 	}
 }
 

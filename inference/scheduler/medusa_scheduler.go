@@ -974,69 +974,16 @@ func selectBestTreePath(paths []medusa.CandidatePath, verifyLogits []float32, vo
 		}
 	}
 
-	accepted = bestAccepted
-	finalToken = bestFinal
-	bestIdx = 0
-
-	// Check alternate paths that share the ENTIRE accepted prefix with the best path.
-	// Only safe when bestAccepted > 0, because the KV cache and logits at shared
-	// positions are conditioned on the same token sequence. When bestAccepted == 0,
-	// alternate paths diverge at position 0 where the KV has the best path's token.
-	for pi := 1; pi < len(paths) && bestAccepted > 0; pi++ {
-		altPath := paths[pi]
-		if len(altPath.Tokens) == 0 || len(altPath.Tokens) <= bestAccepted {
-			continue
-		}
-
-		// Verify the alternate path shares the full prefix with the best path
-		// through all of the best path's accepted positions.
-		prefixMatch := true
-		for i := 0; i < bestAccepted && i < len(paths[0].Tokens) && i < len(altPath.Tokens); i++ {
-			if altPath.Tokens[i] != paths[0].Tokens[i] {
-				prefixMatch = false
-				break
-			}
-		}
-		if !prefixMatch {
-			continue
-		}
-
-		// Check the divergence point: does the alternate's token match the target?
-		altAccepted := bestAccepted
-		altFinal := 0
-		for i := bestAccepted; i < len(altPath.Tokens); i++ {
-			if i >= numPositions {
-				break
-			}
-			posLogits := verifyLogits[i*vocabSize : (i+1)*vocabSize]
-			targetToken := argmaxFloat32(posLogits)
-			if altPath.Tokens[i] == targetToken {
-				altAccepted++
-			} else {
-				altFinal = targetToken
-				break
-			}
-		}
-
-		if altAccepted == len(altPath.Tokens) && altAccepted < numPositions {
-			posLogits := verifyLogits[altAccepted*vocabSize : (altAccepted+1)*vocabSize]
-			altFinal = argmaxFloat32(posLogits)
-		}
-
-		if altAccepted > accepted {
-			accepted = altAccepted
-			finalToken = altFinal
-			bestIdx = pi
-		}
-	}
-
-	// If no tokens accepted from any path, use the target's correction at position 0
-	if accepted == 0 && numPositions > 0 && finalToken == 0 {
+	// Only use the best path. Alternate paths cannot be safely accepted because
+	// the KV cache contains the best path's tokens at every position — accepting
+	// tokens from a different path creates a mismatch between the cached KV state
+	// and the output token sequence, producing corrupt output.
+	if bestAccepted == 0 && numPositions > 0 && bestFinal == 0 {
 		posLogits := verifyLogits[0:vocabSize]
-		finalToken = argmaxFloat32(posLogits)
+		bestFinal = argmaxFloat32(posLogits)
 	}
 
-	return bestIdx, accepted, finalToken
+	return 0, bestAccepted, bestFinal
 }
 
 // recordAcceptance records how many draft tokens were accepted in a speculation step.
