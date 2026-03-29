@@ -250,6 +250,12 @@ type BlockRuntime struct {
 	W1, W2, W3   tensor.Tensor // Gate, Down, Up (W3 not used for GELU MLP)
 	W1W3         tensor.Tensor // Combined gate+up projection (optional, fused prefill path)
 
+	// MoE (Mixture of Experts) weights - loaded as concatenated tensors
+	ExpertGate     tensor.Tensor // Router/gate weights [hidden, num_experts] - selects experts per token
+	ExpertGateProj tensor.Tensor // Concatenated expert gate projections [num_experts, intermediate, hidden]
+	ExpertUpProj   tensor.Tensor // Concatenated expert up projections [num_experts, intermediate, hidden]
+	ExpertDownProj tensor.Tensor // Concatenated expert down projections [num_experts, hidden, intermediate]
+
 	// Optional bias tensors (for Phi, GPT-2, etc.)
 	AttnNormBias tensor.Tensor // LayerNorm bias for attention
 	FFNNormBias  tensor.Tensor // LayerNorm bias for FFN

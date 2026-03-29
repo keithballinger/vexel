@@ -314,6 +314,20 @@ func (m *ModelRuntime) requiredTensorNames() []string {
 				prefix+"input_layernorm.weight",
 				prefix+"post_attention_layernorm.weight",
 			)
+		} else if m.config.MLPType == MLPMoE {
+			// DeepSeek MoE architecture: separate Q/K/V, MoE FFN with router + experts
+			names = append(names,
+				prefix+"self_attn.q_proj.weight",
+				prefix+"self_attn.k_proj.weight",
+				prefix+"self_attn.v_proj.weight",
+				prefix+"self_attn.o_proj.weight",
+				prefix+"mlp.gate.weight",              // Router/gate layer
+				prefix+"mlp.experts.gate_proj.weight",  // Concatenated expert gate projections
+				prefix+"mlp.experts.up_proj.weight",    // Concatenated expert up projections
+				prefix+"mlp.experts.down_proj.weight",  // Concatenated expert down projections
+				prefix+"input_layernorm.weight",
+				prefix+"post_attention_layernorm.weight",
+			)
 		} else {
 			// LLaMA-style architecture: separate Q/K/V, gate/up/down MLP
 			names = append(names,
@@ -631,6 +645,19 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 		if err := copyToDevice(&layer.PostFFNNorm); err != nil {
 			return fmt.Errorf("layer %d post_ffn_norm: %w", i, err)
 		}
+		// MoE expert weights
+		if err := copyToDevice(&layer.ExpertGate); err != nil {
+			return fmt.Errorf("layer %d expert_gate: %w", i, err)
+		}
+		if err := copyToDevice(&layer.ExpertGateProj); err != nil {
+			return fmt.Errorf("layer %d expert_gate_proj: %w", i, err)
+		}
+		if err := copyToDevice(&layer.ExpertUpProj); err != nil {
+			return fmt.Errorf("layer %d expert_up_proj: %w", i, err)
+		}
+		if err := copyToDevice(&layer.ExpertDownProj); err != nil {
+			return fmt.Errorf("layer %d expert_down_proj: %w", i, err)
+		}
 	}
 
 	// Sync to ensure all copies complete
@@ -892,6 +919,16 @@ func (m *ModelRuntime) mapTensor(name string, t tensor.Tensor) {
 		layer.W3 = t
 	case "mlp.down_proj.weight":
 		layer.W2 = t
+
+	// MoE (Mixture of Experts) tensors
+	case "mlp.gate.weight", "ffn_gate_inp.weight":
+		layer.ExpertGate = t
+	case "mlp.experts.gate_proj.weight", "ffn_gate_exps.weight":
+		layer.ExpertGateProj = t
+	case "mlp.experts.up_proj.weight", "ffn_up_exps.weight":
+		layer.ExpertUpProj = t
+	case "mlp.experts.down_proj.weight", "ffn_down_exps.weight":
+		layer.ExpertDownProj = t
 
 	// Phi-3-style fused gate+up projection (SwiGLU with pre-fused tensor)
 	case "mlp.gate_up_proj.weight":
