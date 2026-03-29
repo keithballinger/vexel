@@ -182,7 +182,7 @@ func runServe(globals GlobalFlags, args []string) error {
 	// Draft-model speculation still requires GPU KV cache (VerifySpeculativeWithHidden uses it).
 	// Use paged KV when explicitly requested (--context-len) or for Medusa mode.
 	// Otherwise use GPU KV cache which is faster for single-client decode.
-	usePaged := globals.ContextLen > 0 || globals.Medusa
+	usePaged := globals.ContextLen > 0
 	model, tok, gpuBackend, err := initModel(globals.Model, sf.MaxTokens, globals.ContextLen, globals.Verbose, usePaged)
 	if err != nil {
 		return err
@@ -331,7 +331,7 @@ func runGenerate(globals GlobalFlags, args []string) error {
 		return fmt.Errorf("--draft-model and --medusa are mutually exclusive")
 	}
 
-	usePaged := globals.ContextLen > 0 || globals.Medusa
+	usePaged := globals.ContextLen > 0
 	model, tok, gpuBackend, err := initModel(globals.Model, gf.MaxTokens, globals.ContextLen, globals.Verbose, usePaged)
 	if err != nil {
 		return err
