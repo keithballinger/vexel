@@ -237,11 +237,10 @@ waits per token (one per layer). This single change closed the decode gap
 from -89.4% to -15.1%.
 
 **Remaining gaps and known issues:**
-- **Paged KV decode speed:** Paged KV attention path (~10 tok/s) is significantly
-  slower than GPU KV cache (~29 tok/s serve, ~66 tok/s generate). Needed for Medusa
-  and multi-client serving. Likely needs a dedicated paged decode Metal kernel.
-- **Qwen 0.5B paged KV crash:** Known SIGSEGV with Qwen 0.5B in paged KV mode.
-  Not a production target but blocks benchmarking.
+- ~~**Paged KV decode speed:**~~ **FIXED.** Command buffer batching brought paged KV
+  from ~10 tok/s to ~260 tok/s on TinyLlama, ~58 tok/s on LLaMA 8B (11% below GPU KV).
+- ~~**Qwen 0.5B paged KV crash:**~~ **FIXED.** Was caused by missing command buffer
+  batching in the paged KV path. Now runs at 148 tok/s decode.
 - **Medusa speculation quality:** Online-trained heads need more training time or
   pre-trained weights to achieve useful acceptance rates. Adaptive speculation
   prevents garbage output but provides no speedup currently.
