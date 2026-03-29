@@ -289,9 +289,9 @@ Benchmarks on Apple M4 Max (128 GB) with LLaMA 3.1 8B Q4_K_M:
 
 | Metric | Vexel | llama.cpp | vs llama.cpp |
 |--------|-------|-----------|--------------|
-| Decode throughput | **65.9 tok/s** | 51.0 tok/s | **+29%** |
-| Server throughput | **52 tok/s** | 43 tok/s | **+21%** |
-| Context degradation (16→1024) | 5.5% | 8.1% | better |
+| Decode throughput | **66.6 tok/s** | 42.4 tok/s | **+57%** |
+| Server throughput | **52 tok/s** | 42 tok/s | **+24%** |
+| Context degradation (16→1024) | <6% | 8.1% | better |
 
 See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) for detailed tuning guide and [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md) for full benchmark data.
 | Prefill (128 tokens) | 377 tok/s | 803 tok/s | 725 tok/s | -53% |
@@ -305,7 +305,7 @@ See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) for detailed tuning guide and [
 | Prefill (128 tokens) | 220.4 tok/s | 0.58x | 16.6 tok/s (13.3x faster) |
 | Context degradation (16→512) | -10.8% | — | — |
 
-Vexel achieves **85% of llama.cpp's decode throughput** on Q4_0 and supports
+Vexel achieves **+57% over llama.cpp's decode throughput** on Q4_K_M and supports
 Q4_K_M with custom sub-block strided decode and simdgroup tiled prefill kernels.
 
 **Flash Attention:** Adaptive SDPA kernel dispatch with tiled split-K for long contexts and NWG multi-threadgroup for medium contexts. Context scaling degradation reduced from -24.5% to ~-10% (ctx=16 → ctx=512). The dispatch chain auto-selects: tiled split-K (kvLen > 2048) → NWG adaptive (kvLen > 64) → v3 chunk-based → v1 fallback.
