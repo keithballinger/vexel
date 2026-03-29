@@ -53,6 +53,9 @@ type Sequence struct {
 	// kvSeqID is the sequence ID in the PagedKVCache.
 	kvSeqID int64
 
+	// maxTokens is the per-request generation limit (0 = use global config).
+	maxTokens int
+
 	// tokenChan creates a stream of generated tokens back to the caller.
 	tokenChan chan string
 }
@@ -136,6 +139,26 @@ func (s *Sequence) AddGeneratedToken(tokenID int) {
 // GeneratedTokens returns all generated token IDs.
 func (s *Sequence) GeneratedTokens() []int {
 	return s.generatedTokens
+}
+
+// SetMaxTokens sets the per-request max token limit.
+func (s *Sequence) SetMaxTokens(n int) {
+	s.maxTokens = n
+}
+
+// MaxTokens returns the per-request limit, or 0 for global default.
+func (s *Sequence) MaxTokens() int {
+	return s.maxTokens
+}
+
+// ReachedMaxTokens returns true if this sequence has generated enough tokens.
+// Uses the per-request limit if set, otherwise the global config limit.
+func (s *Sequence) ReachedMaxTokens(globalMax int) bool {
+	limit := s.maxTokens
+	if limit <= 0 {
+		limit = globalMax
+	}
+	return limit > 0 && len(s.generatedTokens) >= limit
 }
 
 // IsPrefillComplete returns true if all prompt tokens have been processed.

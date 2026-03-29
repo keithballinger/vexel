@@ -221,7 +221,7 @@ func (ss *SpeculativeScheduler) runSpeculativeDecodeStep(ctx context.Context, ba
 		}
 
 		// Check max tokens
-		if ss.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= ss.config.MaxTokens {
+		if seq.ReachedMaxTokens(ss.config.MaxTokens) {
 			seq.SetState(StateFinished)
 			seq.Close()
 			break

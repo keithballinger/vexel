@@ -370,7 +370,7 @@ func (ms *MedusaScheduler) runDecodeStepWithTraining(ctx context.Context, batch 
 		}
 
 		// Check max tokens
-		if ms.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= ms.config.MaxTokens {
+		if seq.ReachedMaxTokens(ms.config.MaxTokens) {
 			seq.SetState(StateFinished)
 			seq.Close()
 			continue
@@ -661,7 +661,7 @@ func (ms *MedusaScheduler) runMedusaDecodeStep(ctx context.Context, batch []*Seq
 		}
 
 		// Check max tokens
-		if ms.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= ms.config.MaxTokens {
+		if seq.ReachedMaxTokens(ms.config.MaxTokens) {
 			seq.SetState(StateFinished)
 			seq.Close()
 			ms.lastHidden = nil
@@ -874,7 +874,7 @@ func (ms *MedusaScheduler) runTreeMedusaDecodeStep(ctx context.Context, batch []
 			return nil
 		}
 
-		if ms.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= ms.config.MaxTokens {
+		if seq.ReachedMaxTokens(ms.config.MaxTokens) {
 			seq.SetState(StateFinished)
 			seq.Close()
 			ms.lastHidden = nil
@@ -955,36 +955,39 @@ func selectBestTreePath(paths []medusa.CandidatePath, verifyLogits []float32, vo
 	finalToken = bestFinal
 	bestIdx = 0
 
-	// Now check alternate paths for better acceptance.
-	// An alternate path can only be validly checked at positions where it shares
-	// a prefix with the best path (since the verification logits are conditioned
-	// on the best path's tokens).
-	for pi := 1; pi < len(paths); pi++ {
+	// Check alternate paths that share the ENTIRE accepted prefix with the best path.
+	// Only safe when bestAccepted > 0, because the KV cache and logits at shared
+	// positions are conditioned on the same token sequence. When bestAccepted == 0,
+	// alternate paths diverge at position 0 where the KV has the best path's token.
+	for pi := 1; pi < len(paths) && bestAccepted > 0; pi++ {
 		altPath := paths[pi]
-		if len(altPath.Tokens) == 0 {
+		if len(altPath.Tokens) == 0 || len(altPath.Tokens) <= bestAccepted {
 			continue
 		}
 
-		altAccepted := 0
-		altFinal := 0
+		// Verify the alternate path shares the full prefix with the best path
+		// through all of the best path's accepted positions.
+		prefixMatch := true
+		for i := 0; i < bestAccepted && i < len(paths[0].Tokens) && i < len(altPath.Tokens); i++ {
+			if altPath.Tokens[i] != paths[0].Tokens[i] {
+				prefixMatch = false
+				break
+			}
+		}
+		if !prefixMatch {
+			continue
+		}
 
-		for i, draftToken := range altPath.Tokens {
+		// Check the divergence point: does the alternate's token match the target?
+		altAccepted := bestAccepted
+		altFinal := 0
+		for i := bestAccepted; i < len(altPath.Tokens); i++ {
 			if i >= numPositions {
 				break
 			}
-
-			// Check if this position's logits are valid for this alternate path.
-			// The logits at position i are conditioned on the best path's tokens
-			// at positions 0..i-1. So the alternate path must share the same prefix.
-			if i > 0 && i-1 < len(paths[0].Tokens) && i-1 < len(altPath.Tokens) {
-				if altPath.Tokens[i-1] != paths[0].Tokens[i-1] {
-					break
-				}
-			}
-
 			posLogits := verifyLogits[i*vocabSize : (i+1)*vocabSize]
 			targetToken := argmaxFloat32(posLogits)
-			if draftToken == targetToken {
+			if altPath.Tokens[i] == targetToken {
 				altAccepted++
 			} else {
 				altFinal = targetToken
@@ -992,20 +995,11 @@ func selectBestTreePath(paths []medusa.CandidatePath, verifyLogits []float32, vo
 			}
 		}
 
-		// If all tokens accepted, sample bonus token
 		if altAccepted == len(altPath.Tokens) && altAccepted < numPositions {
 			posLogits := verifyLogits[altAccepted*vocabSize : (altAccepted+1)*vocabSize]
 			altFinal = argmaxFloat32(posLogits)
 		}
 
-		// If the loop ended without setting altFinal (e.g., prefix diverged),
-		// compute it from the next valid position's logits.
-		if altFinal == 0 && altAccepted > 0 && altAccepted < numPositions {
-			posLogits := verifyLogits[altAccepted*vocabSize : (altAccepted+1)*vocabSize]
-			altFinal = argmaxFloat32(posLogits)
-		}
-
-		// Select the path with more accepted tokens
 		if altAccepted > accepted {
 			accepted = altAccepted
 			finalToken = altFinal

@@ -84,7 +84,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Prompt string `json:"prompt"`
+		Prompt    string `json:"prompt"`
+		MaxTokens int    `json:"max_tokens,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -106,6 +107,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	// 1. Create Sequence
 	seqID := nextSeqID()
 	seq := scheduler.NewSequence(seqID, req.Prompt)
+	if req.MaxTokens > 0 {
+		seq.SetMaxTokens(req.MaxTokens)
+	}
 
 	// 2. Add to Scheduler
 	s.scheduler.AddSequence(seq)
@@ -129,7 +133,8 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Prompt string `json:"prompt"`
+		Prompt    string `json:"prompt"`
+		MaxTokens int    `json:"max_tokens,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -140,6 +145,9 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	// 1. Create Sequence
 	seqID := nextSeqID()
 	seq := scheduler.NewSequence(seqID, req.Prompt)
+	if req.MaxTokens > 0 {
+		seq.SetMaxTokens(req.MaxTokens)
+	}
 
 	// 2. Add to Scheduler
 	s.scheduler.AddSequence(seq)

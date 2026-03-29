@@ -420,7 +420,8 @@ func TestSelectBestTreePathFullAccept(t *testing.T) {
 }
 
 // TestSelectBestTreePathFallback verifies that when the best path is rejected,
-// an alternate path with the target's preferred token is selected.
+// the target's correction token is returned (alternate paths are not used since
+// they would create KV cache / logits mismatch).
 func TestSelectBestTreePathFallback(t *testing.T) {
 	vocabSize := 8
 
@@ -439,17 +440,16 @@ func TestSelectBestTreePathFallback(t *testing.T) {
 
 	bestIdx, accepted, finalToken := selectBestTreePath(paths, verifyLogits, vocabSize)
 
-	// Best path [3, 1] gets 0 accepted. Alternate [7, 1] should match position 0.
-	// Note: verifyLogits at position 1 are conditioned on token 3 (not 7),
-	// so we can only guarantee acceptance at the divergence point.
-	// selectBestTreePath should pick the path with most accepted tokens.
-	if accepted < 1 {
-		t.Errorf("accepted = %d, want >= 1 (alternate should match at position 0)", accepted)
+	// Only the best path is considered. It's rejected at position 0 (draft=3, target=7).
+	if bestIdx != 0 {
+		t.Errorf("bestIdx = %d, want 0 (only best path used)", bestIdx)
 	}
-	if bestIdx == 0 {
-		t.Error("should not select path 0 (it was rejected at position 0)")
+	if accepted != 0 {
+		t.Errorf("accepted = %d, want 0 (best path rejected at position 0)", accepted)
 	}
-	_ = finalToken
+	if finalToken != 7 {
+		t.Errorf("finalToken = %d, want 7 (target's correction)", finalToken)
+	}
 }
 
 // TestSelectBestTreePathAllRejected verifies behavior when no path matches

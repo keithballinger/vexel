@@ -303,7 +303,7 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 					if tokenID == eosToken {
 						seq.SetState(StateFinished)
 						seq.Close()
-					} else if s.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= s.config.MaxTokens {
+					} else if seq.ReachedMaxTokens(s.config.MaxTokens) {
 						seq.SetState(StateFinished)
 						seq.Close()
 					} else {
@@ -363,7 +363,7 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 			if tokenID == eosToken {
 				seq.SetState(StateFinished)
 				seq.Close()
-			} else if s.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= s.config.MaxTokens {
+			} else if seq.ReachedMaxTokens(s.config.MaxTokens) {
 				seq.SetState(StateFinished)
 				seq.Close()
 			} else {
@@ -413,7 +413,7 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 				}
 
 				// Check max tokens
-				if s.config.MaxTokens > 0 && len(seq.GeneratedTokens()) >= s.config.MaxTokens {
+				if seq.ReachedMaxTokens(s.config.MaxTokens) {
 					seq.SetState(StateFinished)
 					seq.Close()
 					continue
