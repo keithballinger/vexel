@@ -185,7 +185,9 @@ type Backend struct {
 	deinterleaveQKVPipeline    unsafe.Pointer // Deinterleave fused QKV output into separate Q, K, V
 	deinterleave2WayPipeline   unsafe.Pointer // Deinterleave fused gate_up output into separate gate, up
 	reshapePagedKVPipeline              unsafe.Pointer
+	reshapePagedKVF16Pipeline           unsafe.Pointer
 	sdpaPagedDecodePipeline             unsafe.Pointer
+	sdpaPagedDecodeF16PagedPipeline     unsafe.Pointer
 	sdpaPagedDecodeMultiqueryPipeline   unsafe.Pointer
 
 	// NWG SDPA scratch buffers (lazy-allocated, reused across calls)
@@ -368,7 +370,9 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.deinterleaveQKVPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("deinterleave_qkv_f32"))
 	b.deinterleave2WayPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("deinterleave_2way_f32"))
 	b.reshapePagedKVPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("reshape_paged_kv_f32"))
+	b.reshapePagedKVF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("reshape_paged_kv_f16"))
 	b.sdpaPagedDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_paged_decode_f32"))
+	b.sdpaPagedDecodeF16PagedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_paged_decode_f16"))
 	b.sdpaPagedDecodeMultiqueryPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_paged_decode_multiquery_f32"))
 
 	return b, nil
@@ -2372,8 +2376,16 @@ func (b *Backend) SDPAPagedDecode(q, kvPool, blockTable, out tensor.DevicePtr, n
 
 func (b *Backend) SDPAPagedDecodeF16(q, kvPool, blockTable, out tensor.DevicePtr, numBlocks, blockSize, numQHeads, numKVHeads, headDim int, scale float32, tokensInLastBlock int) {
 	b.profiler.RecordDispatch("SDPAPagedDecodeF16")
-	// Initial implementation: delegate to F32 path.
-	// Native F16 paged kernel will be added when F16 block pool is supported.
+	if b.sdpaPagedDecodeF16PagedPipeline != nil {
+		C.metal_sdpa_paged_decode_f16_paged(b.queue, b.sdpaPagedDecodeF16PagedPipeline,
+			unsafe.Pointer(q.Addr()), unsafe.Pointer(kvPool.Addr()),
+			unsafe.Pointer(blockTable.Addr()), unsafe.Pointer(out.Addr()),
+			C.int(numBlocks), C.int(blockSize),
+			C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+			C.float(scale), C.int(tokensInLastBlock))
+		return
+	}
+	// Fallback to F32 path
 	b.SDPAPagedDecode(q, kvPool, blockTable, out,
 		numBlocks, blockSize, numQHeads, numKVHeads, headDim,
 		scale, tokensInLastBlock)
@@ -2392,6 +2404,22 @@ func (b *Backend) SDPAPagedDecodeBatched(q, kvPool tensor.DevicePtr, blockTables
 		b.SDPAPagedDecode(seqQ, kvPool, blockTables[i], seqOut,
 			numBlocks, blockSize, numQHeads, numKVHeads, headDim, scale, tokensInLastBlock)
 	}
+}
+
+// ReshapePagedKVF16 converts F32 input and scatters into FP16 paged blocks.
+func (b *Backend) ReshapePagedKVF16(src, dstBase, pageTable, blockOffsets tensor.DevicePtr, numTokens, numKVHeads, headDim, blockSize int, isValue bool) {
+	b.profiler.RecordDispatch("ReshapePagedKVF16")
+	if b.reshapePagedKVF16Pipeline == nil {
+		panic("ReshapePagedKVF16 called but pipeline unavailable")
+	}
+	valFlag := 0
+	if isValue {
+		valFlag = 1
+	}
+	C.metal_reshape_paged_kv_f16(b.queue, b.reshapePagedKVF16Pipeline,
+		unsafe.Pointer(src.Addr()), unsafe.Pointer(dstBase.Addr()),
+		unsafe.Pointer(pageTable.Addr()), unsafe.Pointer(blockOffsets.Addr()),
+		C.int(numTokens), C.int(numKVHeads), C.int(headDim), C.int(blockSize), C.int(valFlag))
 }
 
 // SDPAPagedDecodeMultiquery handles multiple query positions against paged KV in one dispatch.

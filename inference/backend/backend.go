@@ -429,6 +429,9 @@ type PagedKVOps interface {
 		seqLens []int,
 	)
 
+	// ReshapePagedKVF16 converts F32 input and scatters into FP16 paged blocks.
+	ReshapePagedKVF16(src, dstBase, pageTable, blockOffsets tensor.DevicePtr, numTokens, numKVHeads, headDim, blockSize int, isValue bool)
+
 	// SDPAPagedDecodeMultiquery handles multiple query positions against paged KV
 	// in a single dispatch. Used for speculative decoding verification.
 	// q: [querySeqLen, numQHeads, headDim], out: [querySeqLen, numQHeads, headDim]

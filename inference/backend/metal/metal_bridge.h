@@ -772,6 +772,19 @@ void metal_sdpa_paged_decode_f32(void* queue, void* pipeline,
                                   float scale, int tokensInLastBlock);
 
 
+// FP16 paged KV scatter: converts F32 input to F16 and scatters into FP16 block pool.
+void metal_reshape_paged_kv_f16(void* queue, void* pipeline,
+                                void* src, void* dstBase,
+                                void* pageTable, void* blockOffsets,
+                                int numTokens, int numKVHeads, int headDim, int blockSize, int isValue);
+
+// FP16 paged SDPA decode: reads F16 K/V from paged block pool.
+void metal_sdpa_paged_decode_f16_paged(void* queue, void* pipeline,
+                                        void* Q, void* kvPool, void* blockTable, void* out,
+                                        int numBlocks, int blockSize,
+                                        int numQHeads, int numKVHeads, int headDim,
+                                        float scale, int tokensInLastBlock);
+
 // Multi-query paged SDPA decode: handles querySeqLen query positions in one dispatch.
 // Q: [querySeqLen, numQHeads, headDim], out: [querySeqLen, numQHeads, headDim]
 // kvLens: [querySeqLen] int32 per-query KV lengths for causal masking
