@@ -352,6 +352,7 @@ func runGenerate(globals GlobalFlags, args []string) error {
 	var baseSched *scheduler.Scheduler
 	var runFunc func(context.Context) error
 	var specSched *scheduler.SpeculativeScheduler
+	var genMedusaSched *scheduler.MedusaScheduler
 
 	if globals.DraftModel != "" {
 		draft, err := loadDraftModel(globals.DraftModel, gpuBackend, gf.MaxTokens, globals.ContextLen, globals.Verbose)
@@ -374,6 +375,7 @@ func runGenerate(globals GlobalFlags, args []string) error {
 		}
 		baseSched = ms.BaseScheduler()
 		runFunc = ms.Run
+		genMedusaSched = ms
 	} else {
 		sched, err := scheduler.NewScheduler(model, tok, schedConfig)
 		if err != nil {
@@ -408,6 +410,14 @@ func runGenerate(globals GlobalFlags, args []string) error {
 			sm := specSched.SpecMetrics()
 			log.Printf("[speculative: acceptance=%.1f%% speedup=%.1fx generated=%d accepted=%d]",
 				sm.AcceptanceRate()*100, sm.Speedup(), sm.DraftTokensGenerated, sm.DraftTokensAccepted)
+		}
+	}
+
+	// Save Medusa heads after generation (enables offline training via generate)
+	if genMedusaSched != nil && globals.MedusaHeadsPath == "" {
+		headsPath := globals.Model + ".medusa-heads.bin"
+		if err := genMedusaSched.SaveHeads(headsPath); err == nil {
+			log.Printf("Saved Medusa heads to %s", headsPath)
 		}
 	}
 
