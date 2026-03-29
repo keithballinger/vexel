@@ -491,11 +491,22 @@ func (b *Backend) AllocPermanent(bytes int) tensor.DevicePtr {
 	return tensor.NewDevicePtr(tensor.Metal, uintptr(buf))
 }
 
-// Free releases a Metal buffer.
+// Free releases a Metal buffer. Removes from pool.inUse if present,
+// preventing ResetPool from accessing a freed buffer.
 func (b *Backend) Free(ptr tensor.DevicePtr) {
-	if !ptr.IsNil() {
-		C.metal_release(unsafe.Pointer(ptr.Addr()))
+	if ptr.IsNil() {
+		return
 	}
+	buf := unsafe.Pointer(ptr.Addr())
+	// Remove from inUse to prevent ResetPool crash on freed buffers
+	for i, p := range b.pool.inUse {
+		if p == buf {
+			b.pool.inUse[i] = b.pool.inUse[len(b.pool.inUse)-1]
+			b.pool.inUse = b.pool.inUse[:len(b.pool.inUse)-1]
+			break
+		}
+	}
+	C.metal_release(buf)
 }
 
 // ResetPool returns all in-use buffers to the pool for reuse.
