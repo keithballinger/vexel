@@ -53,6 +53,13 @@ type GPUHeads struct {
 
 	// Track whether GPU weights have been modified since last CPU sync
 	weightsDirty bool
+
+	// Permanent buffers for GPU-accelerated inference forward pass.
+	// Allocated once and never recycled (survive ResetPool).
+	fwdHidden tensor.DevicePtr // [1, hiddenSize]
+	fwdInter  tensor.DevicePtr // [1, hiddenSize]
+	fwdLogits tensor.DevicePtr // [1, vocabSize]
+	fwdReady  bool
 }
 
 // NewGPUHeads creates GPU-accelerated Medusa heads.
@@ -168,20 +175,30 @@ func (h *GPUHeads) syncWeightsFromGPU() {
 	h.weightsDirty = false
 }
 
-// Forward computes logits for a single head using CPU.
-// Note: Uses CPU to avoid concurrent Metal access issues during speculation.
+// ensureFwdBuffers allocates permanent GPU buffers for inference forward pass.
+func (h *GPUHeads) ensureFwdBuffers() {
+	if h.fwdReady {
+		return
+	}
+	type permanentAllocator interface {
+		AllocPermanent(bytes int) tensor.DevicePtr
+	}
+	alloc := h.backend.Alloc
+	if pa, ok := h.backend.(permanentAllocator); ok {
+		alloc = pa.AllocPermanent
+	}
+	h.fwdHidden = alloc(h.HiddenSize * 4)
+	h.fwdInter = alloc(h.HiddenSize * 4)
+	h.fwdLogits = alloc(h.VocabSize * 4)
+	h.fwdReady = true
+}
+
+// Forward computes logits for a single head on GPU.
+// Caller must hold the GPU lock (via Trainer.GPULock) to prevent concurrent Metal access.
 // hidden: [hiddenSize] on CPU
 // Returns: logits [vocabSize] on CPU
 func (h *GPUHeads) Forward(headIdx int, hidden []float32) []float32 {
 	h.mu.RLock()
-	// Check if we need to sync weights (upgrade to write lock if dirty)
-	if h.weightsDirty {
-		h.mu.RUnlock()
-		h.mu.Lock()
-		h.syncWeightsFromGPU()
-		h.mu.Unlock()
-		h.mu.RLock()
-	}
 	defer h.mu.RUnlock()
 
 	if headIdx < 0 || headIdx >= h.NumHeads {
@@ -192,38 +209,34 @@ func (h *GPUHeads) Forward(headIdx int, hidden []float32) []float32 {
 	hiddenSize := h.HiddenSize
 	vocabSize := h.VocabSize
 
-	// Get intermediate representation
-	var intermediate []float32
+	h.ensureFwdBuffers()
+
+	// Upload hidden state to GPU
+	h.backend.ToDevice(h.fwdHidden, float32ToBytes(hidden))
+
 	if head.BypassFC1 {
-		// Bypass FC1+ReLU: use hidden state directly
-		// This preserves the lm_head initialization exactly
-		intermediate = hidden
+		// FC2 only: logits = hidden @ FC2  [1, hidden] @ [hidden, vocab] -> [1, vocab]
+		h.backend.MatMul(h.fwdHidden, head.FC2, h.fwdLogits, 1, vocabSize, hiddenSize)
 	} else {
-		// FC1: intermediate = SiLU(hidden @ FC1)
-		intermediate = make([]float32, hiddenSize)
-		for i := 0; i < hiddenSize; i++ {
-			var sum float32
-			for j := 0; j < hiddenSize; j++ {
-				sum += hidden[j] * head.FC1CPU[j*hiddenSize+i]
-			}
-			intermediate[i] = silu(sum)
+		// FC1: intermediate = hidden @ FC1  [1, hidden] @ [hidden, hidden] -> [1, hidden]
+		h.backend.MatMul(h.fwdHidden, head.FC1, h.fwdInter, 1, hiddenSize, hiddenSize)
+		// SiLU in-place
+		if trainOps, ok := h.backend.(backend.TrainingOps); ok {
+			trainOps.SiLUInplace(h.fwdInter, hiddenSize)
 		}
+		// FC2: logits = intermediate @ FC2  [1, hidden] @ [hidden, vocab] -> [1, vocab]
+		h.backend.MatMul(h.fwdInter, head.FC2, h.fwdLogits, 1, vocabSize, hiddenSize)
 	}
 
-	// FC2: logits = intermediate @ FC2
-	logits := make([]float32, vocabSize)
-	for i := 0; i < vocabSize; i++ {
-		var sum float32
-		for j := 0; j < hiddenSize; j++ {
-			sum += intermediate[j] * head.FC2CPU[j*vocabSize+i]
-		}
-		logits[i] = sum
-	}
-
-	return logits
+	// Download logits to CPU
+	logitsBytes := make([]byte, vocabSize*4)
+	h.backend.Sync()
+	h.backend.ToHost(logitsBytes, h.fwdLogits)
+	h.backend.Sync()
+	return bytesToFloat32(logitsBytes)
 }
 
-// ForwardAll computes logits for all heads.
+// ForwardAll computes logits for all heads on GPU.
 func (h *GPUHeads) ForwardAll(hidden []float32) [][]float32 {
 	results := make([][]float32, h.NumHeads)
 	for i := 0; i < h.NumHeads; i++ {

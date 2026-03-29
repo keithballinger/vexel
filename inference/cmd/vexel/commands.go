@@ -245,16 +245,31 @@ func runServe(globals GlobalFlags, args []string) error {
 	// With WarmupSamples=500, we need ~600 tokens for Cold→Warming transition,
 	// then a few seconds for training steps to reach Hot phase.
 	if globals.Medusa {
-		warmupTokens := 600
-		log.Printf("Warming Medusa heads (%d tokens)...", warmupTokens)
-		warmupPrompt := "The quick brown fox jumps over the lazy dog and runs across the wide green field"
-		warmupSeq := scheduler.NewSequence(scheduler.SequenceID(999999), warmupPrompt)
-		baseSched.AddSequence(warmupSeq)
+		warmupTarget := 600
+		warmupPrompts := []string{
+			"Once upon a time in a land far away there lived a brave knight who embarked on a quest",
+			"The history of science begins with early civilizations who developed mathematics and astronomy",
+			"In a small village by the sea the fishermen would gather every morning before dawn to prepare",
+			"The principles of economics are based on the study of how societies allocate scarce resources",
+			"A young wizard discovered an ancient spell book hidden in the depths of a forgotten library",
+			"The development of modern technology has transformed every aspect of human life from communication",
+			"Deep in the forest there existed a magical creature that could speak all languages of the world",
+			"The study of philosophy asks fundamental questions about existence knowledge and ethics",
+		}
+		log.Printf("Warming Medusa heads (%d tokens)...", warmupTarget)
+		time.Sleep(100 * time.Millisecond) // Let scheduler goroutine start
 		count := 0
-		for range warmupSeq.TokenChan() {
-			count++
-			if count >= warmupTokens {
+		for i, prompt := range warmupPrompts {
+			if count >= warmupTarget {
 				break
+			}
+			warmupSeq := scheduler.NewSequence(scheduler.SequenceID(999990+i), prompt)
+			baseSched.AddSequence(warmupSeq)
+			for range warmupSeq.TokenChan() {
+				count++
+				if count >= warmupTarget {
+					break
+				}
 			}
 		}
 		log.Printf("Medusa warmup complete (%d tokens generated). Waiting for heads to train...", count)

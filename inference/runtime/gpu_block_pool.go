@@ -287,8 +287,19 @@ func (g *GPUBlockPool) StoreKV(layerIdx int, seqID int64, startPos int,
 }
 
 // Attention performs paged SDPA decode for a single query token.
+// Uses seq.seqLen to determine the number of KV tokens.
 func (g *GPUBlockPool) Attention(layerIdx int, seqID int64,
 	qPtr, outPtr tensor.DevicePtr, numQHeads, headDim int, scale float32) error {
+	return g.AttentionWithKVLen(layerIdx, seqID, qPtr, outPtr, numQHeads, headDim, scale, 0)
+}
+
+// AttentionWithKVLen performs paged SDPA decode with an explicit KV length.
+// If kvLen <= 0, seq.seqLen is used (normal decode). If kvLen > 0, it overrides
+// seq.seqLen for computing tokensInLastBlock. This is needed when processing
+// multiple tokens sequentially across layers — seq.seqLen may reflect tokens
+// stored by a prior layer, not the current layer.
+func (g *GPUBlockPool) AttentionWithKVLen(layerIdx int, seqID int64,
+	qPtr, outPtr tensor.DevicePtr, numQHeads, headDim int, scale float32, kvLen int) error {
 
 	g.mu.Lock()
 	seq, ok := g.seqs[seqID]
@@ -304,7 +315,16 @@ func (g *GPUBlockPool) Attention(layerIdx int, seqID int64,
 		return fmt.Errorf("no blocks for seq %d layer %d", seqID, layerIdx)
 	}
 
-	tokensInLastBlock := seq.seqLen - (numBlocks-1)*g.blockSize
+	effectiveLen := seq.seqLen
+	if kvLen > 0 {
+		effectiveLen = kvLen
+	}
+	// When kvLen overrides seq.seqLen, limit numBlocks to what's actually valid
+	effectiveBlocks := (effectiveLen + g.blockSize - 1) / g.blockSize
+	if effectiveBlocks < numBlocks {
+		numBlocks = effectiveBlocks
+	}
+	tokensInLastBlock := effectiveLen - (numBlocks-1)*g.blockSize
 
 	// Sync block table to GPU if dirty
 	if seq.btDirty[layerIdx] || seq.btGPU[layerIdx].IsNil() {

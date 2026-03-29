@@ -799,6 +799,10 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 		// Each token must attend to the full KV history (all prior cached tokens plus
 		// tokens earlier in this batch). We store one token's KV at a time and then
 		// run paged SDPA decode for that single query against the complete cache.
+		//
+		// We use AttentionWithKVLen to pass the exact KV length for THIS layer,
+		// because seq.seqLen is shared across layers and may reflect tokens stored
+		// by a prior layer that haven't been stored yet for the current layer.
 		qStride := numHeads * headDim   // elements per token in Q
 		kvStride := numKVHeads * headDim // elements per token in K/V
 		for i := 0; i < seqLen; i++ {
@@ -809,7 +813,8 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 			}
 			tokenQPtr := tensor.DevicePtrOffset(qPtr, uintptr(i*qStride*4))
 			tokenOutPtr := tensor.DevicePtrOffset(attnOutPtr, uintptr(i*qStride*4))
-			if err := gpuPool.Attention(layerIdx, seqID, tokenQPtr, tokenOutPtr, numHeads, headDim, scale); err != nil {
+			kvLen := startPos + i + 1 // exact number of KV tokens for this layer
+			if err := gpuPool.AttentionWithKVLen(layerIdx, seqID, tokenQPtr, tokenOutPtr, numHeads, headDim, scale, kvLen); err != nil {
 				return x, fmt.Errorf("gpu pool attention verify token %d: %w", i, err)
 			}
 		}

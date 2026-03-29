@@ -209,7 +209,7 @@ func (t *GPUOnlineTrainer) trainingLoop(ctx context.Context) {
 			if gpuTrainerDebug && tickCount <= 5 {
 				fmt.Printf("[GPU Trainer] Train tick %d, phase=%v\n", tickCount, phase)
 			}
-			if phase >= PhaseWarming {
+			if phase == PhaseWarming {
 				t.trainStep()
 			}
 
