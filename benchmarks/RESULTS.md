@@ -3,7 +3,7 @@
 > Hardware: Apple M4 Max, 128 GB Unified Memory, 40 GPU cores, Metal 4
 > Model: LLaMA 3.1 8B Instruct Q4_K_M (4.9 GB) and Qwen 2.5 0.5B Q4_K_M (0.4 GB)
 > llama.cpp: b8534 (e99d77fa4)
-> Last updated: 2026-03-29 (Updated after Medusa fixes, paged KV bugfixes, adaptive speculation)
+> Last updated: 2026-03-29 (Full benchmark refresh: multi-client fix, CopyBuffer sync, serve greedy default)
 
 ## Current Results (2026-03-29, M4 Max)
 
@@ -53,17 +53,14 @@ higher acceptance and provide actual speedup.
 
 | Engine | Decode tok/s | Notes |
 |--------|-------------|-------|
-| Vexel (GPU KV) | ~29 | Default for single/few clients |
-| Vexel (paged KV) | ~10 | With `--context-len`, needed for Medusa |
+| **Vexel (GPU KV)** | **~52** | Default greedy sampling |
+| Vexel (paged KV) | ~58 | With `--context-len`, used for multi-client |
 | llama.cpp | ~43 | |
 
-Server mode has inherent overhead (HTTP, scheduler loop, token streaming)
-vs raw generate mode (66 tok/s). Vexel uses GPU KV cache by default for
-serve; paged KV is used when `--context-len` or `--medusa` is specified.
-
-Multi-client batched throughput (with paged KV, `--context-len 2048`)
-scales with concurrency but at lower per-token rates due to the paged
-attention overhead. Optimizing the paged KV decode path is a priority.
+Server mode uses greedy sampling by default for maximum throughput.
+Per-request sampling params (temperature, top_k, top_p) can be set
+via the JSON request body. Multi-client serving with paged KV produces
+correct output for all concurrent clients.
 
 ---
 
