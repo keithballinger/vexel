@@ -304,6 +304,16 @@ func (m *ModelRuntime) requiredTensorNames() []string {
 					// No post_attention_layernorm.bias for parallel residual
 				)
 			}
+		} else if m.config.MLPType == MLPSwiGLUFused {
+			// Phi-3-style architecture: combined QKV, fused gate+up SwiGLU MLP, serial residual
+			names = append(names,
+				prefix+"self_attn.qkv_proj.weight", // Combined QKV
+				prefix+"self_attn.o_proj.weight",
+				prefix+"mlp.gate_up_proj.weight", // Fused gate+up [hidden, 2*intermediate]
+				prefix+"mlp.down_proj.weight",    // Down projection
+				prefix+"input_layernorm.weight",
+				prefix+"post_attention_layernorm.weight",
+			)
 		} else {
 			// LLaMA-style architecture: separate Q/K/V, gate/up/down MLP
 			names = append(names,
@@ -467,6 +477,10 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 				// Q4_K: 144 bytes per 256 elements
 				numBlocks := (numElements + 255) / 256
 				sizeBytes = numBlocks * 144
+			case tensor.Q5_K:
+				// Q5_K: 176 bytes per 256 elements
+				numBlocks := (numElements + 255) / 256
+				sizeBytes = numBlocks * 176
 			case tensor.Q6_K:
 				// Q6_K: 210 bytes per 256 elements
 				numBlocks := (numElements + 255) / 256
@@ -533,20 +547,34 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 		if err := copyToDevice(&layer.AttnNormBias); err != nil {
 			return fmt.Errorf("layer %d attn_norm_bias: %w", i, err)
 		}
-		if err := copyToDevice(&layer.Wq); err != nil {
-			return fmt.Errorf("layer %d wq: %w", i, err)
+		// For fused QKV (Phi-style): copy Wqkv to GPU, then derive Wq/Wk/Wv as sub-regions
+		if !layer.Wqkv.DevicePtr().IsNil() && layer.Wqkv.DevicePtr().Location() != m.backend.Device().Location {
+			if err := copyToDevice(&layer.Wqkv); err != nil {
+				return fmt.Errorf("layer %d wqkv: %w", i, err)
+			}
+			m.splitQKVGPU(layer)
+			if err := copyToDevice(&layer.WqkvBias); err != nil {
+				return fmt.Errorf("layer %d wqkv_bias: %w", i, err)
+			}
+			if !layer.WqkvBias.DevicePtr().IsNil() && layer.WqkvBias.DevicePtr().Location() == m.backend.Device().Location {
+				m.splitQKVBiasGPU(layer)
+			}
+		} else {
+			if err := copyToDevice(&layer.Wq); err != nil {
+				return fmt.Errorf("layer %d wq: %w", i, err)
+			}
+			if err := copyToDevice(&layer.Wk); err != nil {
+				return fmt.Errorf("layer %d wk: %w", i, err)
+			}
+			if err := copyToDevice(&layer.Wv); err != nil {
+				return fmt.Errorf("layer %d wv: %w", i, err)
+			}
 		}
 		if err := copyToDevice(&layer.WqBias); err != nil {
 			return fmt.Errorf("layer %d wq_bias: %w", i, err)
 		}
-		if err := copyToDevice(&layer.Wk); err != nil {
-			return fmt.Errorf("layer %d wk: %w", i, err)
-		}
 		if err := copyToDevice(&layer.WkBias); err != nil {
 			return fmt.Errorf("layer %d wk_bias: %w", i, err)
-		}
-		if err := copyToDevice(&layer.Wv); err != nil {
-			return fmt.Errorf("layer %d wv: %w", i, err)
 		}
 		if err := copyToDevice(&layer.WvBias); err != nil {
 			return fmt.Errorf("layer %d wv_bias: %w", i, err)
@@ -563,8 +591,24 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 		if err := copyToDevice(&layer.FFNNormBias); err != nil {
 			return fmt.Errorf("layer %d ffn_norm_bias: %w", i, err)
 		}
-		if err := copyToDevice(&layer.W1); err != nil {
-			return fmt.Errorf("layer %d w1: %w", i, err)
+		// For fused gate+up (W1W3): copy to GPU, then derive W1/W3 as sub-regions
+		// to avoid duplicating memory. W1W3 is set by Phi-3 loader (MLPSwiGLUFused).
+		if !layer.W1W3.DevicePtr().IsNil() && layer.W1W3.DevicePtr().Location() != m.backend.Device().Location {
+			if err := copyToDevice(&layer.W1W3); err != nil {
+				return fmt.Errorf("layer %d w1w3: %w", i, err)
+			}
+			// Derive W1/W3 as sub-regions of the GPU W1W3 tensor
+			m.splitGateUpGPU(layer)
+		} else {
+			if err := copyToDevice(&layer.W1); err != nil {
+				return fmt.Errorf("layer %d w1: %w", i, err)
+			}
+			if err := copyToDevice(&layer.W3); err != nil {
+				return fmt.Errorf("layer %d w3: %w", i, err)
+			}
+			if err := copyToDevice(&layer.W1W3); err != nil {
+				return fmt.Errorf("layer %d w1w3: %w", i, err)
+			}
 		}
 		if err := copyToDevice(&layer.W1Bias); err != nil {
 			return fmt.Errorf("layer %d w1_bias: %w", i, err)
@@ -574,9 +618,6 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 		}
 		if err := copyToDevice(&layer.W2Bias); err != nil {
 			return fmt.Errorf("layer %d w2_bias: %w", i, err)
-		}
-		if err := copyToDevice(&layer.W3); err != nil {
-			return fmt.Errorf("layer %d w3: %w", i, err)
 		}
 		// Post-norm weights (Gemma 2)
 		if err := copyToDevice(&layer.PostAttnNorm); err != nil {
@@ -847,6 +888,11 @@ func (m *ModelRuntime) mapTensor(name string, t tensor.Tensor) {
 	case "mlp.down_proj.weight":
 		layer.W2 = t
 
+	// Phi-3-style fused gate+up projection (SwiGLU with pre-fused tensor)
+	case "mlp.gate_up_proj.weight":
+		layer.W1W3 = t
+		m.splitGateUpWeight(layer, t)
+
 	// Phi-style MLP (GELU)
 	// fc1 is up/gate combined (or just up/gate depending on impl)
 	// For Phi-2: fc1 is "ffn_up", fc2 is "ffn_down"
@@ -1003,4 +1049,229 @@ func (m *ModelRuntime) splitQKVBias(layer *BlockRuntime, combined tensor.Tensor)
 	layer.WqBias = tensor.NewTensor(tensor.NewShape(qSize), m.config.DType, qPtr)
 	layer.WkBias = tensor.NewTensor(tensor.NewShape(kvSize), m.config.DType, kPtr)
 	layer.WvBias = tensor.NewTensor(tensor.NewShape(kvSize), m.config.DType, vPtr)
+}
+
+// splitGateUpWeight splits a fused gate+up weight matrix into separate W1 (gate) and W3 (up) tensors.
+// Phi-3 has [2*intermediate, hidden] shaped gate_up that contains gate and up stacked row-wise.
+func (m *ModelRuntime) splitGateUpWeight(layer *BlockRuntime, combined tensor.Tensor) {
+	dims := combined.Shape().Dims()
+	if len(dims) != 2 {
+		fmt.Printf("Warning: unexpected gate_up weight shape: %v\n", dims)
+		return
+	}
+
+	totalRows := dims[0] // 2 * intermediate
+	cols := dims[1]      // hidden
+
+	intermediateSize := m.config.IntermediateSize
+	if totalRows != 2*intermediateSize {
+		fmt.Printf("Warning: gate_up weight rows %d != expected %d (2*%d)\n",
+			totalRows, 2*intermediateSize, intermediateSize)
+		return
+	}
+
+	srcPtr := combined.DevicePtr()
+	if srcPtr.IsNil() {
+		return
+	}
+
+	gateRows := intermediateSize
+	upRows := intermediateSize
+
+	// For quantized tensors, calculate byte offsets based on quantization block sizes
+	if combined.IsQuantized() {
+		profile := combined.QuantProfile()
+		var blockSize, bytesPerBlock int
+		switch profile {
+		case tensor.Q4_0:
+			blockSize, bytesPerBlock = 32, 18
+		case tensor.Q4_K:
+			blockSize, bytesPerBlock = 256, 144
+		case tensor.Q5_K:
+			blockSize, bytesPerBlock = 256, 176
+		case tensor.Q6_K:
+			blockSize, bytesPerBlock = 256, 210
+		case tensor.Q8_0:
+			blockSize, bytesPerBlock = 32, 34
+		case tensor.BF16:
+			blockSize, bytesPerBlock = 1, 2
+		default:
+			fmt.Printf("Warning: splitting quantized gate_up profile %v not yet supported\n", profile)
+			return
+		}
+
+		gateElements := gateRows * cols
+		if gateElements%blockSize != 0 {
+			fmt.Printf("Warning: quantized gate_up split point not aligned with block size (%d)\n", blockSize)
+			return
+		}
+
+		gateSizeBytes := (gateElements / blockSize) * bytesPerBlock
+
+		gatePtr := srcPtr
+		upPtr := tensor.DevicePtrOffset(srcPtr, uintptr(gateSizeBytes))
+
+		layer.W1 = tensor.NewQuantTensor(tensor.NewShape(gateRows, cols), m.config.DType, gatePtr, profile)
+		layer.W3 = tensor.NewQuantTensor(tensor.NewShape(upRows, cols), m.config.DType, upPtr, profile)
+		return
+	}
+
+	// F32 tensors: 4 bytes per element
+	elemSize := 4
+	gateSizeBytes := gateRows * cols * elemSize
+
+	gatePtr := srcPtr
+	upPtr := tensor.DevicePtrOffset(srcPtr, uintptr(gateSizeBytes))
+
+	layer.W1 = tensor.NewTensor(tensor.NewShape(gateRows, cols), m.config.DType, gatePtr)
+	layer.W3 = tensor.NewTensor(tensor.NewShape(upRows, cols), m.config.DType, upPtr)
+}
+
+// splitGateUpGPU derives W1 (gate) and W3 (up) as sub-regions of the GPU W1W3 tensor.
+// Called after W1W3 has been copied to GPU, to avoid duplicate GPU memory allocations.
+func (m *ModelRuntime) splitGateUpGPU(layer *BlockRuntime) {
+	dims := layer.W1W3.Shape().Dims()
+	if len(dims) != 2 {
+		return
+	}
+
+	totalRows := dims[0]
+	cols := dims[1]
+	intermediateSize := m.config.IntermediateSize
+
+	if totalRows != 2*intermediateSize {
+		return
+	}
+
+	gateRows := intermediateSize
+	upRows := intermediateSize
+	srcPtr := layer.W1W3.DevicePtr()
+
+	if layer.W1W3.IsQuantized() {
+		profile := layer.W1W3.QuantProfile()
+		var blockSize, bytesPerBlock int
+		switch profile {
+		case tensor.Q4_0:
+			blockSize, bytesPerBlock = 32, 18
+		case tensor.Q4_K:
+			blockSize, bytesPerBlock = 256, 144
+		case tensor.Q5_K:
+			blockSize, bytesPerBlock = 256, 176
+		case tensor.Q6_K:
+			blockSize, bytesPerBlock = 256, 210
+		case tensor.Q8_0:
+			blockSize, bytesPerBlock = 32, 34
+		case tensor.BF16:
+			blockSize, bytesPerBlock = 1, 2
+		default:
+			return
+		}
+
+		gateElements := gateRows * cols
+		if gateElements%blockSize != 0 {
+			return
+		}
+		gateSizeBytes := (gateElements / blockSize) * bytesPerBlock
+
+		layer.W1 = tensor.NewQuantTensor(tensor.NewShape(gateRows, cols), m.config.DType, srcPtr, profile)
+		layer.W3 = tensor.NewQuantTensor(tensor.NewShape(upRows, cols), m.config.DType,
+			tensor.DevicePtrOffset(srcPtr, uintptr(gateSizeBytes)), profile)
+		return
+	}
+
+	gateSizeBytes := gateRows * cols * 4
+	layer.W1 = tensor.NewTensor(tensor.NewShape(gateRows, cols), m.config.DType, srcPtr)
+	layer.W3 = tensor.NewTensor(tensor.NewShape(upRows, cols), m.config.DType,
+		tensor.DevicePtrOffset(srcPtr, uintptr(gateSizeBytes)))
+}
+
+// splitQKVGPU derives Wq, Wk, Wv as sub-regions of the GPU Wqkv tensor.
+// Called after Wqkv has been copied to GPU, to avoid duplicate GPU memory allocations.
+func (m *ModelRuntime) splitQKVGPU(layer *BlockRuntime) {
+	dims := layer.Wqkv.Shape().Dims()
+	if len(dims) != 2 {
+		return
+	}
+
+	totalRows := dims[0]
+	cols := dims[1]
+
+	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	qRows := m.config.NumAttentionHeads * headDim
+	kvRows := m.config.NumKeyValueHeads * headDim
+
+	expectedRows := qRows + kvRows + kvRows
+	if totalRows != expectedRows {
+		return
+	}
+
+	srcPtr := layer.Wqkv.DevicePtr()
+
+	if layer.Wqkv.IsQuantized() {
+		profile := layer.Wqkv.QuantProfile()
+		var blockSize, bytesPerBlock int
+		switch profile {
+		case tensor.Q4_0:
+			blockSize, bytesPerBlock = 32, 18
+		case tensor.Q4_K:
+			blockSize, bytesPerBlock = 256, 144
+		case tensor.Q5_K:
+			blockSize, bytesPerBlock = 256, 176
+		case tensor.Q6_K:
+			blockSize, bytesPerBlock = 256, 210
+		case tensor.Q8_0:
+			blockSize, bytesPerBlock = 32, 34
+		case tensor.BF16:
+			blockSize, bytesPerBlock = 1, 2
+		default:
+			return
+		}
+
+		qElements := qRows * cols
+		kvElements := kvRows * cols
+		if qElements%blockSize != 0 || kvElements%blockSize != 0 {
+			return
+		}
+
+		qSizeBytes := (qElements / blockSize) * bytesPerBlock
+		kvSizeBytes := (kvElements / blockSize) * bytesPerBlock
+
+		layer.Wq = tensor.NewQuantTensor(tensor.NewShape(qRows, cols), m.config.DType, srcPtr, profile)
+		layer.Wk = tensor.NewQuantTensor(tensor.NewShape(kvRows, cols), m.config.DType,
+			tensor.DevicePtrOffset(srcPtr, uintptr(qSizeBytes)), profile)
+		layer.Wv = tensor.NewQuantTensor(tensor.NewShape(kvRows, cols), m.config.DType,
+			tensor.DevicePtrOffset(srcPtr, uintptr(qSizeBytes+kvSizeBytes)), profile)
+		return
+	}
+
+	elemSize := 4
+	qSizeBytes := qRows * cols * elemSize
+	kvSizeBytes := kvRows * cols * elemSize
+
+	layer.Wq = tensor.NewTensor(tensor.NewShape(qRows, cols), m.config.DType, srcPtr)
+	layer.Wk = tensor.NewTensor(tensor.NewShape(kvRows, cols), m.config.DType,
+		tensor.DevicePtrOffset(srcPtr, uintptr(qSizeBytes)))
+	layer.Wv = tensor.NewTensor(tensor.NewShape(kvRows, cols), m.config.DType,
+		tensor.DevicePtrOffset(srcPtr, uintptr(qSizeBytes+kvSizeBytes)))
+}
+
+// splitQKVBiasGPU derives WqBias, WkBias, WvBias as sub-regions of the GPU WqkvBias tensor.
+func (m *ModelRuntime) splitQKVBiasGPU(layer *BlockRuntime) {
+	dims := layer.WqkvBias.Shape().Dims()
+	if len(dims) != 1 {
+		return
+	}
+
+	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	qSize := m.config.NumAttentionHeads * headDim
+	kvSize := m.config.NumKeyValueHeads * headDim
+
+	srcPtr := layer.WqkvBias.DevicePtr()
+	elemSize := 4
+
+	layer.WqBias = tensor.NewTensor(tensor.NewShape(qSize), m.config.DType, srcPtr)
+	layer.WkBias = tensor.NewTensor(tensor.NewShape(kvSize), m.config.DType,
+		tensor.DevicePtrOffset(srcPtr, uintptr(qSize*elemSize)))
+	layer.WvBias = tensor.NewTensor(tensor.NewShape(kvSize), m.config.DType,
+		tensor.DevicePtrOffset(srcPtr, uintptr((qSize+kvSize)*elemSize)))
 }

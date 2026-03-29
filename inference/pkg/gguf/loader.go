@@ -174,6 +174,10 @@ func GetLayerTensorName(hfName string) string {
 	case "mlp.down_proj.weight":
 		ggufSuffix = "ffn_down.weight"
 
+	// Phi-3-style fused gate+up projection (SwiGLU with pre-fused gate_up)
+	case "mlp.gate_up_proj.weight":
+		ggufSuffix = "ffn_up.weight"
+
 	// Phi-style MLP (GELU: fc1/up, fc2/down)
 	case "mlp.fc1.weight":
 		ggufSuffix = "ffn_up.weight"

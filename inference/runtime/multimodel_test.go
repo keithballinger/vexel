@@ -140,8 +140,8 @@ func TestModelConfigFromGGUF_ArchitectureDetection(t *testing.T) {
 		{
 			name:     "phi3",
 			arch:     "phi3",
-			wantNorm: NormLayerNorm, wantMLP: MLPGELU,
-			wantBias: true, wantParallel: true, wantRoPENeox: true, wantSoftCap: 0, wantWindowType: WindowGlobal, wantPostNorms: false,
+			wantNorm: NormRMSNorm, wantMLP: MLPSwiGLUFused,
+			wantBias: false, wantParallel: false, wantRoPENeox: true, wantSoftCap: 0, wantWindowType: WindowGlobal, wantPostNorms: false,
 		},
 		{
 			name:     "gpt2",

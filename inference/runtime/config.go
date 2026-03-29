@@ -41,6 +41,10 @@ const (
 	// MLPGeGLU uses GELU-gated linear unit with 3 projections (Gemma).
 	// Structure: down(gelu(gate(x)) * up(x))
 	MLPGeGLU
+	// MLPSwiGLUFused uses SiLU-gated linear unit with a pre-fused gate+up projection (Phi-3).
+	// Structure: down(silu(gate_up[:half](x)) * gate_up[half:](x))
+	// The GGUF stores gate and up as a single [hidden, 2*intermediate] tensor.
+	MLPSwiGLUFused
 )
 
 func (m MLPType) String() string {
@@ -51,6 +55,8 @@ func (m MLPType) String() string {
 		return "GELU"
 	case MLPGeGLU:
 		return "GeGLU"
+	case MLPSwiGLUFused:
+		return "SwiGLU(Fused)"
 	default:
 		return "Unknown"
 	}
@@ -371,12 +377,18 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 	hasPostNorms := false                  // Default: no post-norms
 
 	switch g.Architecture {
-	case "phi", "phi2", "phi3":
+	case "phi", "phi2":
 		normType = NormLayerNorm
 		mlpType = MLPGELU
 		hasBias = true
-		parallelResidual = true // Phi uses parallel residual
+		parallelResidual = true // Phi-2 uses parallel residual
 		ropeNeox = true         // Phi uses NEOX-style RoPE (split pairs)
+	case "phi3":
+		normType = NormRMSNorm
+		mlpType = MLPSwiGLUFused // Phi-3 uses SwiGLU with pre-fused gate+up tensor
+		hasBias = false
+		parallelResidual = false // Phi-3 uses serial residual
+		ropeNeox = true          // Phi-3 uses NEOX-style RoPE (split pairs)
 	case "gpt2", "gptneox":
 		normType = NormLayerNorm
 		mlpType = MLPGELU

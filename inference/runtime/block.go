@@ -1065,15 +1065,10 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		return x, nil
 	}
 
-	// Use command buffer batching if available (and not profiling - profiling needs sync points)
-	// Batching encodes all operations per layer into one command buffer, reducing ~10
-	// waitUntilCompleted calls per layer to just 1 (via EndBatch). Memory barriers
-	// between dependent dispatches ensure correct scratch buffer visibility.
-	useBatching := b.batcher != nil
-	// Profiler disables batching to measure individual kernel times
-	if cachedGPUProfile {
-		useBatching = false
-	}
+	// Command buffer batching for decode only. For prefill (seqLen>1),
+	// individual dispatches with finish_encode prevent GPU timeout issues.
+	prefillSeqLen := x.Shape().NumElements() / b.HiddenSize
+	useBatching := b.batcher != nil && !cachedGPUProfile && prefillSeqLen == 1
 
 	if useBatching {
 		b.batcher.BeginBatch()
@@ -1998,7 +1993,7 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		mlpQuantProfile := b.W1.QuantProfile()
 		canFuseFFN := fuseMLP && seqLen == 1 &&
 			b.NormType == NormRMSNorm &&
-			b.MLPType == MLPSwiGLU && // Fused kernel uses SiLU, not GELU
+			(b.MLPType == MLPSwiGLU || b.MLPType == MLPSwiGLUFused) && // Fused kernel uses SiLU, not GELU
 			mlpQuantProfile == b.W3.QuantProfile() &&
 			((mlpQuantProfile == tensor.Q4_0 && b.fusedOps != nil) ||
 				mlpQuantProfile == tensor.Q4_K)
