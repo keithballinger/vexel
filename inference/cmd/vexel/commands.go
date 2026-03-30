@@ -81,6 +81,19 @@ func initModel(modelPath string, maxTokens, contextLen int, verbose, usePaged bo
 		gpuBackend.Close()
 		return nil, nil, nil, fmt.Errorf("copy weights: %w", err)
 	}
+	// GPU scratch allocator: bump-allocates layer intermediates from a single MTLBuffer.
+	// Disabled by default — several fused decode kernels (Q4_K FusedMLP, FP16 SDPA/QKV)
+	// don't support scratch buffer offsets yet. Set VEXEL_SCRATCH=1 to enable (works
+	// correctly for Q4_0 models like TinyLlama with FP32 KV cache).
+	if os.Getenv("VEXEL_SCRATCH") == "1" {
+		decodeScratchBytes := modelCfg.ScratchBytes(1) + 7*256
+		if err := gpuBackend.InitScratch(int(decodeScratchBytes)); err != nil {
+			log.Printf("[WARNING] GPU scratch allocator init failed, falling back to pool alloc: %v", err)
+		} else {
+			model.SetUseScratch(true) // Forces FP32 KV cache (FP16 incompatible with scratch)
+		}
+	}
+
 	if usePaged {
 		blockSize := 16
 		maxBlocks := (maxContextLen + blockSize - 1) / blockSize
@@ -88,18 +101,6 @@ func initModel(modelPath string, maxTokens, contextLen int, verbose, usePaged bo
 		log.Printf("Using paged KV cache (maxBlocks=%d, blockSize=%d, maxContext=%d)", maxBlocks, blockSize, maxContextLen)
 	} else {
 		model.CreateGPUKVCache(maxContextLen)
-	}
-
-	// GPU scratch allocator: bump-allocates layer intermediates from a single MTLBuffer.
-	// Currently disabled — the fused decode kernels have offset handling issues that
-	// cause incorrect output. The offset-aware variants for MatMulTransposed and
-	// SDPAPrefill are in place, but the fused QKV+MLP decode path needs more work.
-	// Set VEXEL_SCRATCH=1 to enable for testing.
-	if os.Getenv("VEXEL_SCRATCH") == "1" {
-		decodeScratchBytes := modelCfg.ScratchBytes(1) + 7*256
-		if err := gpuBackend.InitScratch(int(decodeScratchBytes)); err != nil {
-			log.Printf("[WARNING] GPU scratch allocator init failed, falling back to pool alloc: %v", err)
-		}
 	}
 
 	// Load tokenizer from GGUF (preferred — guarantees vocab matches the model).

@@ -21,6 +21,7 @@ size_t metal_buffer_size(void* buffer);
 void* metal_buffer_contents(void* buffer);
 void metal_copy_to_buffer(void* buffer, const void* src, size_t size);
 void metal_copy_from_buffer(void* dst, void* buffer, size_t size);
+void metal_copy_from_buffer_offset(void* dst, void* buffer, uint64_t offset, size_t size);
 
 // GPU-to-GPU buffer copy (uses blit encoder)
 void metal_copy_buffer(void* queue, void* srcBuffer, size_t srcOffset,
@@ -227,6 +228,13 @@ void metal_matvec_q4k_fused_rmsnorm_out_f32(void* queue, void* pipeline,
                                               void* x, void* normWeight,
                                               void* W, void* C,
                                               int N, int K, float eps);
+
+// Q4_K fused MLP (SwiGLU) with offset support
+void metal_matvec_q4k_fused_mlp_f32_offset(void* queue, void* pipeline,
+                                            void* x, uint64_t xOff,
+                                            void* W1, void* W3,
+                                            void* out, uint64_t outOff,
+                                            int N, int K);
 
 // Q4_K W2 + SiLU_Mul + Add: eliminates separate SiLU_Mul dispatch
 void metal_matvec_q4k_fused_silumul_add_f32(void* queue, void* pipeline,

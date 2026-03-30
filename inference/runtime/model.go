@@ -26,6 +26,7 @@ type ModelRuntime struct {
 	config     ModelConfig
 	layers     []*BlockRuntime
 	plan       *ExecutionPlan // Model-aware execution plan
+	useScratch bool           // Whether scratch allocator is active (disables FP16 KV cache)
 
 	// Global weights (stored as DevicePtr for GPU execution)
 	Embedding     tensor.Tensor
@@ -162,6 +163,12 @@ func (m *ModelRuntime) Backend() backend.Backend {
 	return m.backend
 }
 
+// SetUseScratch marks whether the scratch allocator is active.
+// When active, FP16 KV cache is disabled (FP16 fused kernels lack offset support).
+func (m *ModelRuntime) SetUseScratch(active bool) {
+	m.useScratch = active
+}
+
 // applyFinalNorm applies the final normalization (RMSNorm or LayerNorm based on config).
 func (m *ModelRuntime) applyFinalNorm(xPtr, outPtr tensor.DevicePtr, rows, cols int) {
 	if m.FinalNorm.DevicePtr().IsNil() {
@@ -224,10 +231,17 @@ func (m *ModelRuntime) CreatePagedKVCache(maxBlocks int) *kv.PagedKVCache {
 func (m *ModelRuntime) CreateGPUKVCache(maxSeqLen int) *GPUKVCache {
 	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
 
-	// Auto-enable FP16 if backend supports it (2x memory bandwidth savings)
+	// Auto-enable FP16 if backend supports it (2x memory bandwidth savings).
+	// Disable FP16 when scratch allocator is active — the FP16 fused decode kernels
+	// (FusedRMSNormQKV_F16, SDPAF16, F16InAdd) don't handle scratch buffer offsets,
+	// causing identical attention output across all layers.
 	useFP16 := false
 	if _, ok := m.backend.(backend.FP16Ops); ok {
 		useFP16 = true
+	}
+	// Disable FP16 when scratch is active (set by InitScratch before CreateGPUKVCache)
+	if m.useScratch {
+		useFP16 = false
 	}
 	// Allow forcing FP32 for testing (VEXEL_KV_FP32=1)
 	if os.Getenv("VEXEL_KV_FP32") == "1" {

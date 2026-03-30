@@ -548,6 +548,12 @@ func (b *Backend) ToHost(dst []byte, src tensor.DevicePtr) {
 	if src.IsNil() || len(dst) == 0 {
 		return
 	}
+	if src.Offset() != 0 {
+		// Scratch-allocated: read from base buffer + offset
+		C.metal_copy_from_buffer_offset(unsafe.Pointer(&dst[0]),
+			unsafe.Pointer(src.Addr()), C.uint64_t(src.Offset()), C.size_t(len(dst)))
+		return
+	}
 	C.metal_copy_from_buffer(unsafe.Pointer(&dst[0]), unsafe.Pointer(src.Addr()), C.size_t(len(dst)))
 }
 
@@ -833,6 +839,14 @@ func (b *Backend) MatMulQ6_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 			q6kNR2DebugOnce.Do(func() {
 				fmt.Println("[DEBUG] Using Q6_K NR2 kernel for LM head")
 			})
+			if a.Offset() != 0 || out.Offset() != 0 {
+				C.metal_matvec_q6k_nr2_f32_offset(b.queue, b.matvecQ6KNR2Pipeline,
+					unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+					unsafe.Pointer(bMat.Addr()),
+					unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+					C.int(n), C.int(k))
+				return
+			}
 			C.metal_matvec_q6k_nr2_f32(b.queue, b.matvecQ6KNR2Pipeline,
 				unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 				C.int(n), C.int(k))
@@ -842,9 +856,17 @@ func (b *Backend) MatMulQ6_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 		if b.matvecQ6KPipeline == nil {
 			panic("MatMulQ6_K called but no Q6_K pipeline available")
 		}
-		C.metal_matvec_q6k_multi_output_f32(b.queue, b.matvecQ6KPipeline,
-			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
-			C.int(n), C.int(k))
+		if a.Offset() != 0 || out.Offset() != 0 {
+			C.metal_matvec_q6k_multi_output_f32_offset(b.queue, b.matvecQ6KPipeline,
+				unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+				unsafe.Pointer(bMat.Addr()),
+				unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+				C.int(n), C.int(k))
+		} else {
+			C.metal_matvec_q6k_multi_output_f32(b.queue, b.matvecQ6KPipeline,
+				unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+				C.int(n), C.int(k))
+		}
 	} else {
 		// Looped matvec for prefill — must use offset-aware dispatch since
 		// DevicePtrOffset creates sub-buffer pointers within the same MTLBuffer.
@@ -1061,6 +1083,14 @@ func (b *Backend) MatMulQ4_K_FusedMLP(x, w1, w3, out tensor.DevicePtr, m, n, k i
 	}
 	if b.matvecQ4KFusedMLPPipeline == nil {
 		panic("MatMulQ4_K_FusedMLP called but pipeline unavailable")
+	}
+	if x.Offset() != 0 || out.Offset() != 0 {
+		C.metal_matvec_q4k_fused_mlp_f32_offset(b.queue, b.matvecQ4KFusedMLPPipeline,
+			unsafe.Pointer(x.Addr()), C.uint64_t(x.Offset()),
+			unsafe.Pointer(w1.Addr()), unsafe.Pointer(w3.Addr()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			C.int(n), C.int(k))
+		return
 	}
 	C.metal_matvec_q4k_fused_mlp_f32(b.queue, b.matvecQ4KFusedMLPPipeline,
 		unsafe.Pointer(x.Addr()), unsafe.Pointer(w1.Addr()),

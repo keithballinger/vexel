@@ -11113,6 +11113,11 @@ void metal_copy_from_buffer(void* dst, void* buffer, size_t size) {
     memcpy(dst, [buf contents], size);
 }
 
+void metal_copy_from_buffer_offset(void* dst, void* buffer, uint64_t offset, size_t size) {
+    id<MTLBuffer> buf = (__bridge id<MTLBuffer>)buffer;
+    memcpy(dst, (char*)[buf contents] + offset, size);
+}
+
 // GPU-to-GPU buffer copy using blit encoder
 void metal_copy_buffer(void* queue, void* srcBuffer, size_t srcOffset,
                        void* dstBuffer, size_t dstOffset, size_t size) {
@@ -15891,6 +15896,28 @@ void metal_matvec_q4k_fused_mlp_f32(void* queuePtr, void* pipelinePtr,
     MTLSize threadsPerGroup_mlp = MTLSizeMake(256, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups_mlp threadsPerThreadgroup:threadsPerGroup_mlp];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_matvec_q4k_fused_mlp_f32_offset(void* queuePtr, void* pipelinePtr,
+                                            void* x, uint64_t xOff,
+                                            void* W1, void* W3,
+                                            void* out, uint64_t outOff,
+                                            int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+    id<MTLCommandBuffer> cmdBuffer; bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)x offset:xOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)W1 offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)W3 offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:outOff atIndex:3];
+    [encoder setBytes:&N length:sizeof(N) atIndex:4];
+    [encoder setBytes:&K length:sizeof(K) atIndex:5];
+    int outputsPerTG_mlp = 32;
+    int numThreadgroups_mlp = (N + outputsPerTG_mlp - 1) / outputsPerTG_mlp;
+    [encoder dispatchThreadgroups:MTLSizeMake(numThreadgroups_mlp, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
