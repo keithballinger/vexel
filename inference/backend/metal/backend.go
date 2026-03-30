@@ -744,28 +744,27 @@ func (b *Backend) MatMulQ4_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 	if b.matvecQ4NR2Pipeline == nil {
 		panic("MatMulQ4_0 called but no matvecQ4NR2Pipeline available")
 	}
-	if m == 1 {
-		// For partial blocks (K not multiple of 32), fall back to the scalar-safe single-output kernel.
+	// Use the SAME M=1 kernel for all batch sizes via explicit loop.
+	// This ensures bit-identical results for the same row regardless of M,
+	// preventing FP32 precision divergence for models with large QKV bias.
+	stateRowBytes := uintptr(k * 4)
+	outRowBytes := uintptr(n * 4)
+	for i := 0; i < m; i++ {
+		rowA := tensor.DevicePtrOffset(a, uintptr(i)*stateRowBytes)
+		rowOut := tensor.DevicePtrOffset(out, uintptr(i)*outRowBytes)
 		if k%32 != 0 && b.matvecQ4Pipeline != nil {
-			C.metal_matvec_q4_0_transposed_f32(b.queue, b.matvecQ4Pipeline,
-				unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+			C.metal_matvec_q4_0_transposed_f32_offset(b.queue, b.matvecQ4Pipeline,
+				unsafe.Pointer(rowA.Addr()), C.uint64_t(rowA.Offset()),
+				unsafe.Pointer(bMat.Addr()),
+				unsafe.Pointer(rowOut.Addr()), C.uint64_t(rowOut.Offset()),
 				C.int(n), C.int(k))
-			return
+		} else {
+			C.metal_matvec_q4_0_v2_f32_offset(b.queue, b.matvecQ4V2Pipeline,
+				unsafe.Pointer(rowA.Addr()), C.uint64_t(rowA.Offset()),
+				unsafe.Pointer(bMat.Addr()),
+				unsafe.Pointer(rowOut.Addr()), C.uint64_t(rowOut.Offset()),
+				C.int(n), C.int(k))
 		}
-		// Single row (decode) - use v2 matvec (llama.cpp-matched: 64 threads, NR0=4, fused nibble-masking)
-		C.metal_matvec_q4_0_v2_f32(b.queue, b.matvecQ4V2Pipeline,
-			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
-			C.int(n), C.int(k))
-	} else if m >= 8 && b.matmulQ4SimdgroupPipeline != nil {
-		// V1-blocked: 32×64×64 tiles, 8 SG, blocked 8×8 shared memory layout
-		C.metal_matmul_q4_0_simdgroup_f32(b.queue, b.matmulQ4SimdgroupPipeline,
-			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
-			C.int(m), C.int(n), C.int(k))
-	} else {
-		// Fallback: simple batched kernel (one threadgroup per output element)
-		C.metal_matmul_q4_0_batched_f32(b.queue, b.matmulQ4BatchedPipeline,
-			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
-			C.int(m), C.int(n), C.int(k))
 	}
 }
 
@@ -905,44 +904,30 @@ func (b *Backend) MatMulQ6_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 // B contains raw Q4_K data (144 bytes per 256 elements).
 func (b *Backend) MatMulQ4_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 	b.profiler.RecordDispatch("MatMulQ4_K")
-	if m == 1 {
-		// Decode: NR4 (4 outputs/SG, 32/TG) wins at large N (1.11-1.21×) due to
-		// activation reuse; multi_output (1 output/SG, 8/TG) is better for small/medium N.
-		// Benchmarked on M3 Max: NR4 wins at N>8192, neutral at N≤8192.
+	if b.matvecQ4KPipeline == nil {
+		panic("MatMulQ4_K called but no matvecQ4KPipeline available")
+	}
+	// Use the SAME M=1 kernel for all batch sizes via explicit loop.
+	// This ensures bit-identical results for the same row regardless of M,
+	// preventing FP32 precision divergence for models with large QKV bias.
+	stateRowBytes := uintptr(k * 4)
+	outRowBytes := uintptr(n * 4)
+	for i := 0; i < m; i++ {
+		aOff := C.uint64_t(a.Offset()) + C.uint64_t(uintptr(i)*stateRowBytes)
+		outOff := C.uint64_t(out.Offset()) + C.uint64_t(uintptr(i)*outRowBytes)
 		if n > 8192 && b.matvecQ4KNR4Pipeline != nil {
 			C.metal_matvec_q4k_nr4_f32(b.queue, b.matvecQ4KNR4Pipeline,
-				unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+				unsafe.Pointer(a.Addr()), aOff,
 				unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
-				unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+				unsafe.Pointer(out.Addr()), outOff,
 				C.int(n), C.int(k))
 		} else {
-			if b.matvecQ4KPipeline == nil {
-				panic("MatMulQ4_K called but no matvecQ4KPipeline available")
-			}
 			C.metal_matvec_q4k_multi_output_f32(b.queue, b.matvecQ4KPipeline,
-				unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+				unsafe.Pointer(a.Addr()), aOff,
 				unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
-				unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+				unsafe.Pointer(out.Addr()), outOff,
 				C.int(n), C.int(k))
 		}
-	} else if m >= 8 && b.matmulQ4KSimdgroupPipeline != nil {
-		// Prefill (M>=8): use simdgroup_matrix tiled kernel (hardware 8×8 matmul)
-		// 32×64 tiled kernel with 8 simdgroups, same structure as Q4_0 simdgroup.
-		C.metal_matmul_q4k_simdgroup_f32(b.queue, b.matmulQ4KSimdgroupPipeline,
-			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
-			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
-			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
-			C.int(m), C.int(n), C.int(k))
-	} else {
-		// Small batch (M<8) or no simdgroup pipeline: use batched NR2 kernel
-		if b.matmulQ4KBatchedPipeline == nil {
-			panic("MatMulQ4_K called with M>1 but no matmulQ4KBatchedPipeline available")
-		}
-		C.metal_matmul_q4k_batched_f32(b.queue, b.matmulQ4KBatchedPipeline,
-			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
-			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
-			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
-			C.int(m), C.int(n), C.int(k))
 	}
 }
 
@@ -1241,24 +1226,23 @@ func (b *Backend) MatMulQ5_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 // Track 4: Quantization Expansion, Phase 2 Task 2.
 func (b *Backend) MatMulQ8_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 	b.profiler.RecordDispatch("MatMulQ8_0")
-	if m == 1 {
-		if b.matvecQ8_0NR2Pipeline == nil {
-			panic("MatMulQ8_0 called but no matvecQ8_0NR2Pipeline available")
-		}
+	if b.matvecQ8_0NR2Pipeline == nil {
+		panic("MatMulQ8_0 called but no matvecQ8_0NR2Pipeline available")
+	}
+	// Use the SAME M=1 kernel for all batch sizes via explicit loop.
+	// This ensures bit-identical results for the same row regardless of M,
+	// preventing FP32 precision divergence that compounds through layers
+	// for models with large QKV bias (Qwen: K values ~130).
+	stateRowBytes := uintptr(k * 4)
+	outRowBytes := uintptr(n * 4)
+	for i := 0; i < m; i++ {
+		aOff := C.uint64_t(a.Offset()) + C.uint64_t(uintptr(i)*stateRowBytes)
+		outOff := C.uint64_t(out.Offset()) + C.uint64_t(uintptr(i)*outRowBytes)
 		C.metal_matvec_q8_0_nr2_f32(b.queue, b.matvecQ8_0NR2Pipeline,
-			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+			unsafe.Pointer(a.Addr()), aOff,
 			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
-			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			unsafe.Pointer(out.Addr()), outOff,
 			C.int(n), C.int(k))
-	} else {
-		if b.matmulQ8_0BatchedPipeline == nil {
-			panic("MatMulQ8_0 batched called but no matmulQ8_0BatchedPipeline available")
-		}
-		C.metal_matmul_q8_0_batched_f32(b.queue, b.matmulQ8_0BatchedPipeline,
-			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
-			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
-			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
-			C.int(m), C.int(n), C.int(k))
 	}
 }
 

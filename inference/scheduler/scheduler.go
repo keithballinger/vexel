@@ -571,9 +571,26 @@ func (s *Scheduler) runGPUPrefill(seq *Sequence) error {
 		cache.Reset()
 	}
 
-	// Run prefill with all tokens at once using GPU KV cache
+	// Run prefill: either batched (all tokens at once) or sequential (one at a time).
+	// Sequential mode ensures the SDPA decode kernel is used consistently,
+	// avoiding FP32 precision divergence between SDPAPrefill and SDPA decode
+	// that compounds for models with large QKV bias (e.g., Qwen).
 	startTime := time.Now()
-	logits, err := s.runtime.DecodeWithGPUKV(promptTokens, 0)
+	var logits tensor.Tensor
+	var err error
+
+	useSequentialPrefill := os.Getenv("VEXEL_SEQUENTIAL_PREFILL") == "1"
+	if useSequentialPrefill {
+		// Process each token individually using the decode (M=1) path
+		for i, tok := range promptTokens {
+			logits, err = s.runtime.DecodeWithGPUKV([]int{tok}, i)
+			if err != nil {
+				return fmt.Errorf("sequential prefill token %d failed: %w", i, err)
+			}
+		}
+	} else {
+		logits, err = s.runtime.DecodeWithGPUKV(promptTokens, 0)
+	}
 
 	if err != nil {
 		return fmt.Errorf("GPU prefill failed: %w", err)
