@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"fmt"
+	"os"
 	"sync"
 
 	"vexel/inference/backend"
@@ -202,6 +204,10 @@ func (c *GPUKVCache) AppendKV(layerIdx int, kPtr, vPtr tensor.DevicePtr, srcDTyp
 			}
 			return c.kBuffers[layerIdx], c.vBuffers[layerIdx], fullSeqLen
 		}
+	}
+
+	if os.Getenv("DEBUG_DECODE") == "1" {
+		fmt.Printf("[WARNING] KV cache AppendKV using blit fallback for layer %d\n", layerIdx)
 	}
 
 	// Fall back to blit copies (less efficient but works for all cases)
