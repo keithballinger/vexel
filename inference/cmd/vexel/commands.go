@@ -90,21 +90,29 @@ func initModel(modelPath string, maxTokens, contextLen int, verbose, usePaged bo
 		model.CreateGPUKVCache(maxContextLen)
 	}
 
-	// Initialize GPU scratch allocator for decode-path bump allocation.
-	// Sized for one layer's intermediates at decode (seqLen=1): normOut + Q + K + V + attnOut + gate + up,
-	// plus alignment padding (7 allocations × 256 bytes).
-	decodeScratchBytes := modelCfg.ScratchBytes(1) + 7*256
-	if os.Getenv("VEXEL_NO_SCRATCH") != "1" {
+	// GPU scratch allocator: bump-allocates layer intermediates from a single MTLBuffer.
+	// Disabled by default due to offset handling issues in some kernel dispatch paths.
+	// Set VEXEL_SCRATCH=1 to enable (produces wrong output with some models).
+	if os.Getenv("VEXEL_SCRATCH") == "1" {
+		decodeScratchBytes := modelCfg.ScratchBytes(1) + 7*256
 		if err := gpuBackend.InitScratch(int(decodeScratchBytes)); err != nil {
 			log.Printf("[WARNING] GPU scratch allocator init failed, falling back to pool alloc: %v", err)
 		}
 	}
 
-	tokPath := filepath.Join(filepath.Dir(modelPath), "tokenizer.json")
-	tok, err := tokenizer.Load(tokPath)
+	// Load tokenizer from GGUF (preferred — guarantees vocab matches the model).
+	// Falls back to tokenizer.json if GGUF tokenizer loading fails.
+	tok, err := tokenizer.LoadFromGGUF(modelPath)
 	if err != nil {
-		gpuBackend.Close()
-		return nil, nil, nil, fmt.Errorf("load tokenizer: %w", err)
+		if verbose {
+			log.Printf("GGUF tokenizer unavailable (%v), falling back to tokenizer.json", err)
+		}
+		tokPath := filepath.Join(filepath.Dir(modelPath), "tokenizer.json")
+		tok, err = tokenizer.Load(tokPath)
+		if err != nil {
+			gpuBackend.Close()
+			return nil, nil, nil, fmt.Errorf("load tokenizer: %w", err)
+		}
 	}
 
 	return model, tok, gpuBackend, nil
@@ -580,17 +588,23 @@ func runTokenize(globals GlobalFlags, args []string) error {
 		return err
 	}
 
-	tokPath := tf.Tokenizer
-	if tokPath == "" && globals.Model != "" {
-		tokPath = filepath.Join(filepath.Dir(globals.Model), "tokenizer.json")
+	// Prefer GGUF tokenizer (matches model vocab), fall back to tokenizer.json
+	var tok *tokenizer.Tokenizer
+	if globals.Model != "" {
+		tok, err = tokenizer.LoadFromGGUF(globals.Model)
 	}
-	if tokPath == "" {
-		return fmt.Errorf("--tokenizer flag is required (or --model to infer)")
-	}
-
-	tok, err := tokenizer.Load(tokPath)
-	if err != nil {
-		return fmt.Errorf("load tokenizer: %w", err)
+	if tok == nil {
+		tokPath := tf.Tokenizer
+		if tokPath == "" && globals.Model != "" {
+			tokPath = filepath.Join(filepath.Dir(globals.Model), "tokenizer.json")
+		}
+		if tokPath == "" {
+			return fmt.Errorf("--tokenizer flag is required (or --model to infer)")
+		}
+		tok, err = tokenizer.Load(tokPath)
+		if err != nil {
+			return fmt.Errorf("load tokenizer: %w", err)
+		}
 	}
 
 	input := tf.Input

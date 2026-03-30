@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"vexel/inference/pkg/gguf"
 )
 
 // Tokenizer handles text <-> id conversion.
@@ -114,6 +116,152 @@ func Load(path string) (*Tokenizer, error) {
 
 	return &Tokenizer{
 		vocab:         data.Model.Vocab,
+		ids:           ids,
+		bos:           bos,
+		eos:           eos,
+		addBos:        addBos,
+		specialTokens: specialTokens,
+		useByteLevel:  useByteLevel,
+		mergeRanks:    mergeRanks,
+	}, nil
+}
+
+// LoadFromGGUF loads a tokenizer from the vocabulary embedded in a GGUF file.
+// This is the preferred method since it guarantees the tokenizer matches the model.
+func LoadFromGGUF(path string) (*Tokenizer, error) {
+	gf, err := gguf.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open GGUF: %w", err)
+	}
+	defer gf.Close()
+
+	// Read token strings from tokenizer.ggml.tokens
+	tokensVal, ok := gf.Metadata["tokenizer.ggml.tokens"]
+	if !ok {
+		return nil, fmt.Errorf("GGUF file missing tokenizer.ggml.tokens")
+	}
+
+	vocab := make(map[string]int, len(tokensVal.Array))
+	ids := make(map[int]string, len(tokensVal.Array))
+	for i, tv := range tokensVal.Array {
+		token := tv.AsString()
+		vocab[token] = i
+		ids[i] = token
+	}
+
+	// Read scores (used for SentencePiece models)
+	var scores []float32
+	if scoresVal, ok := gf.Metadata["tokenizer.ggml.scores"]; ok {
+		scores = make([]float32, len(scoresVal.Array))
+		for i, sv := range scoresVal.Array {
+			scores[i] = sv.AsFloat32()
+		}
+	}
+
+	// Read token types to identify special tokens
+	var tokenTypes []int
+	if typesVal, ok := gf.Metadata["tokenizer.ggml.token_type"]; ok {
+		tokenTypes = make([]int, len(typesVal.Array))
+		for i, tv := range typesVal.Array {
+			tokenTypes[i] = int(tv.AsUint32())
+		}
+	}
+
+	// Determine BOS/EOS from metadata
+	bos := 1
+	eos := 2
+	addBos := true
+	if v, ok := gf.Metadata["tokenizer.ggml.bos_token_id"]; ok {
+		bos = int(v.AsUint32())
+	}
+	if v, ok := gf.Metadata["tokenizer.ggml.eos_token_id"]; ok {
+		eos = int(v.AsUint32())
+	}
+
+	// Detect tokenizer type
+	tokenizerModel := "llama" // default to SentencePiece
+	if v, ok := gf.Metadata["tokenizer.ggml.model"]; ok {
+		tokenizerModel = v.AsString()
+	}
+	useByteLevel := tokenizerModel == "gpt2"
+
+	// Disable BOS only for models where BOS and EOS share the same token (GPT-2, Phi-2).
+	// LLaMA 3 uses GPT-2 BPE format but has a distinct BOS (128000) — it still needs BOS.
+	if bos == eos {
+		addBos = false
+	}
+
+	// Collect special tokens (types 3=control, 6=byte)
+	var specialTokens []string
+	for i, tok := range tokensVal.Array {
+		token := tok.AsString()
+		if len(tokenTypes) > i {
+			tt := tokenTypes[i]
+			if tt == 3 { // control token
+				specialTokens = append(specialTokens, token)
+			}
+		}
+	}
+	sort.Slice(specialTokens, func(i, j int) bool {
+		return len(specialTokens[i]) > len(specialTokens[j])
+	})
+
+	// Build BPE merge rules from scores (SentencePiece uses scores as merge priority).
+	// For SentencePiece, we don't have explicit merges — the vocab+scores define the model.
+	// We build pseudo-merges from the vocabulary: if token "AB" exists and both "A" and "B"
+	// exist, then "A B" is a merge with priority based on the token's score.
+	mergeRanks := make(map[string]int)
+
+	// Read explicit merges if available (some GGUF files have them)
+	if mergesVal, ok := gf.Metadata["tokenizer.ggml.merges"]; ok && len(mergesVal.Array) > 0 {
+		for i, mv := range mergesVal.Array {
+			mergeRanks[mv.AsString()] = i
+		}
+	}
+
+	// If no explicit merges but we have scores, build merge rules from vocabulary.
+	// This handles SentencePiece models where merges are implicit in the vocab scores.
+	if len(mergeRanks) == 0 && len(scores) > 0 && !useByteLevel {
+		type scoredToken struct {
+			token string
+			id    int
+			score float32
+		}
+		var sortedTokens []scoredToken
+		for i, tv := range tokensVal.Array {
+			token := tv.AsString()
+			if len(tokenTypes) > i && tokenTypes[i] >= 3 {
+				continue // skip control/byte tokens
+			}
+			if len([]rune(token)) > 1 {
+				sortedTokens = append(sortedTokens, scoredToken{token, i, scores[i]})
+			}
+		}
+		// Sort by score descending (higher score = higher priority merge)
+		sort.Slice(sortedTokens, func(i, j int) bool {
+			return sortedTokens[i].score > sortedTokens[j].score
+		})
+		// Build merge pairs: for each multi-char token, try splitting at each position
+		for rank, st := range sortedTokens {
+			runes := []rune(st.token)
+			for splitPos := 1; splitPos < len(runes); splitPos++ {
+				left := string(runes[:splitPos])
+				right := string(runes[splitPos:])
+				if _, leftOk := vocab[left]; leftOk {
+					if _, rightOk := vocab[right]; rightOk {
+						key := left + " " + right
+						if _, exists := mergeRanks[key]; !exists {
+							mergeRanks[key] = rank
+						}
+						break // use first valid split
+					}
+				}
+			}
+		}
+	}
+
+	return &Tokenizer{
+		vocab:         vocab,
 		ids:           ids,
 		bos:           bos,
 		eos:           eos,

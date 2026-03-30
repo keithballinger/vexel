@@ -12155,6 +12155,68 @@ void metal_matvec_q6k_multi_output_f32(void* queuePtr, void* pipelinePtr,
     finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
+// Q6_K multi-output matvec with offset support (for prefill looped dispatch)
+void metal_matvec_q6k_multi_output_f32_offset(void* queuePtr, void* pipelinePtr,
+                                               void* A, uint64_t aOff,
+                                               void* B,
+                                               void* C, uint64_t cOff,
+                                               int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:aOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:cOff atIndex:2];
+    [encoder setBytes:&N length:sizeof(N) atIndex:3];
+    [encoder setBytes:&K length:sizeof(K) atIndex:4];
+
+    int outputsPerTG = 8;
+    int threadgroupSize = 256;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
+
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Q6_K NR2 matvec with offset support (for prefill looped dispatch)
+void metal_matvec_q6k_nr2_f32_offset(void* queuePtr, void* pipelinePtr,
+                                      void* A, uint64_t aOff,
+                                      void* B,
+                                      void* C, uint64_t cOff,
+                                      int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:aOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:cOff atIndex:2];
+    [encoder setBytes:&N length:sizeof(N) atIndex:3];
+    [encoder setBytes:&K length:sizeof(K) atIndex:4];
+
+    int outputsPerTG = 16;
+    int threadgroupSize = 256;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
+
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
 // Q6_K NR2 matvec: 16 outputs per threadgroup (2 per simdgroup)
 // Grid: ceil(N/16) threadgroups of 256 threads
 void metal_matvec_q6k_nr2_f32(void* queuePtr, void* pipelinePtr,

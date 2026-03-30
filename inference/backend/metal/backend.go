@@ -825,20 +825,25 @@ func (b *Backend) MatMulQ6_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
 			C.int(n), C.int(k))
 	} else {
-		// Looped matvec for prefill
+		// Looped matvec for prefill — must use offset-aware dispatch since
+		// DevicePtrOffset creates sub-buffer pointers within the same MTLBuffer.
 		stateRowBytes := uintptr(k * 4)
 		outRowBytes := uintptr(n * 4)
 		for i := 0; i < m; i++ {
-			rowA := tensor.DevicePtrOffset(a, uintptr(i)*stateRowBytes)
-			rowOut := tensor.DevicePtrOffset(out, uintptr(i)*outRowBytes)
+			aOff := C.uint64_t(a.Offset()) + C.uint64_t(uintptr(i)*stateRowBytes)
+			outOff := C.uint64_t(out.Offset()) + C.uint64_t(uintptr(i)*outRowBytes)
 
 			if b.matvecQ6KNR2Pipeline != nil {
-				C.metal_matvec_q6k_nr2_f32(b.queue, b.matvecQ6KNR2Pipeline,
-					unsafe.Pointer(rowA.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(rowOut.Addr()),
+				C.metal_matvec_q6k_nr2_f32_offset(b.queue, b.matvecQ6KNR2Pipeline,
+					unsafe.Pointer(a.Addr()), aOff,
+					unsafe.Pointer(bMat.Addr()),
+					unsafe.Pointer(out.Addr()), outOff,
 					C.int(n), C.int(k))
 			} else {
-				C.metal_matvec_q6k_multi_output_f32(b.queue, b.matvecQ6KPipeline,
-					unsafe.Pointer(rowA.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(rowOut.Addr()),
+				C.metal_matvec_q6k_multi_output_f32_offset(b.queue, b.matvecQ6KPipeline,
+					unsafe.Pointer(a.Addr()), aOff,
+					unsafe.Pointer(bMat.Addr()),
+					unsafe.Pointer(out.Addr()), outOff,
 					C.int(n), C.int(k))
 			}
 		}

@@ -132,6 +132,18 @@ void metal_matvec_q6k_nr2_f32(void* queue, void* pipeline,
 
 #include <stdint.h>
 
+// Q6_K offset-aware dispatch (for prefill looped matvec)
+void metal_matvec_q6k_multi_output_f32_offset(void* queue, void* pipeline,
+                                               void* A, uint64_t aOff,
+                                               void* B,
+                                               void* C, uint64_t cOff,
+                                               int N, int K);
+void metal_matvec_q6k_nr2_f32_offset(void* queue, void* pipeline,
+                                      void* A, uint64_t aOff,
+                                      void* B,
+                                      void* C, uint64_t cOff,
+                                      int N, int K);
+
 // Q4_K multi-output matvec: for attention projections using Q4_K quantization
 void metal_matvec_q4k_multi_output_f32(void* queue, void* pipeline,
                                         void* A, uint64_t aOff,
