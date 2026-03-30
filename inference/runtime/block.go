@@ -890,9 +890,9 @@ func (b *BlockRuntime) ExecuteWithPagedKV(x, scratch tensor.Tensor, pagedCache *
 
 		if seqLen == 1 {
 			if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
-				b.softCapOps.SDPASoftCap(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap, numKVHeads*headDim)
+				b.softCapOps.SDPASoftCap(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap, headDim)
 			} else {
-				b.backend.SDPA(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale, numKVHeads*headDim)
+				b.backend.SDPA(qPtr, fullKPtr, fullVPtr, attnOutPtr, fullSeqLen, numHeads, numKVHeads, headDim, scale, headDim)
 			}
 		} else {
 			if b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
