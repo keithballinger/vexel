@@ -1072,7 +1072,9 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	}
 
 	// Command buffer batching for decode only. For prefill (seqLen>1),
-	// individual dispatches with finish_encode prevent GPU timeout issues.
+	// individual dispatches with finish_encode ensure each kernel completes within
+	// Metal's GPU timeout. Batching prefill dispatches can cause timeout kills
+	// when large matmuls (8+ tokens × full hidden size) exceed the per-buffer limit.
 	prefillSeqLen := x.Shape().NumElements() / b.HiddenSize
 	useBatching := b.batcher != nil && !cachedGPUProfile && prefillSeqLen == 1
 

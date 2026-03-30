@@ -539,14 +539,7 @@ func (s *Scheduler) runBatchedPrefill(seq *Sequence) error {
 	return nil
 }
 
-// prefillChunkSize is the maximum number of tokens processed in a single prefill chunk.
-// Chunking reduces Metal command buffer count from O(layers × dispatches_per_layer × tokens)
-// to O(layers × dispatches_per_layer × chunk_size), preventing GPU command queue deadlocks.
-const prefillChunkSize = 64
-
 // runGPUPrefill processes all prompt tokens for a sequence using GPU KV cache.
-// For long prompts, tokens are processed in chunks to prevent Metal command queue
-// flooding (each chunk generates ~32 layers × ~6 dispatches = ~192 command buffers).
 func (s *Scheduler) runGPUPrefill(seq *Sequence) error {
 	promptTokens := seq.PromptTokens()
 	if len(promptTokens) == 0 {
@@ -559,34 +552,9 @@ func (s *Scheduler) runGPUPrefill(seq *Sequence) error {
 		cache.Reset()
 	}
 
+	// Run prefill with all tokens at once using GPU KV cache
 	startTime := time.Now()
-	var logits tensor.Tensor
-	var err error
-
-	// Process prompt in chunks to prevent Metal command queue flooding.
-	// Each chunk runs a full forward pass through all layers, appending K/V to the cache.
-	// The KV cache tracks cumulative sequence length across chunks.
-	if len(promptTokens) <= prefillChunkSize {
-		// Short prompt: single pass (no chunking overhead)
-		logits, err = s.runtime.DecodeWithGPUKV(promptTokens, 0)
-	} else {
-		// Long prompt: process in chunks
-		pos := 0
-		for pos < len(promptTokens) {
-			end := pos + prefillChunkSize
-			if end > len(promptTokens) {
-				end = len(promptTokens)
-			}
-			chunk := promptTokens[pos:end]
-			logits, err = s.runtime.DecodeWithGPUKV(chunk, pos)
-			if err != nil {
-				return fmt.Errorf("GPU prefill chunk at pos %d failed: %w", pos, err)
-			}
-			// Sync between chunks to ensure KV cache is fully written
-			s.runtime.Backend().Sync()
-			pos = end
-		}
-	}
+	logits, err := s.runtime.DecodeWithGPUKV(promptTokens, 0)
 
 	if err != nil {
 		return fmt.Errorf("GPU prefill failed: %w", err)
