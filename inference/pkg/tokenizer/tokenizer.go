@@ -14,13 +14,14 @@ import (
 
 // Tokenizer handles text <-> id conversion.
 type Tokenizer struct {
-	vocab         map[string]int
-	ids           map[int]string
-	bos           int      // Beginning of sequence token
-	eos           int      // End of sequence token
-	addBos        bool     // Whether to add BOS token to prompts (false for Phi-2, GPT-2)
-	specialTokens []string // Special tokens to match before BPE (longest first)
-	useByteLevel  bool     // Whether to use ByteLevel BPE (spaces -> Ġ)
+	vocab          map[string]int
+	ids            map[int]string
+	bos            int      // Beginning of sequence token
+	eos            int      // End of sequence token
+	addBos         bool     // Whether to add BOS token to prompts (false for Phi-2, GPT-2)
+	addSpacePrefix bool     // Whether to prepend ▁ to text before encoding (SentencePiece default: true)
+	specialTokens  []string // Special tokens to match before BPE (longest first)
+	useByteLevel   bool     // Whether to use ByteLevel BPE (spaces -> Ġ)
 
 	// BPE merge rules: maps "tokenA tokenB" -> merge priority (lower = higher priority).
 	mergeRanks map[string]int
@@ -115,14 +116,15 @@ func Load(path string) (*Tokenizer, error) {
 	}
 
 	return &Tokenizer{
-		vocab:         data.Model.Vocab,
-		ids:           ids,
-		bos:           bos,
-		eos:           eos,
-		addBos:        addBos,
-		specialTokens: specialTokens,
-		useByteLevel:  useByteLevel,
-		mergeRanks:    mergeRanks,
+		vocab:          data.Model.Vocab,
+		ids:            ids,
+		bos:            bos,
+		eos:            eos,
+		addBos:         addBos,
+		addSpacePrefix: true, // Default for tokenizer.json (SentencePiece convention)
+		specialTokens:  specialTokens,
+		useByteLevel:   useByteLevel,
+		mergeRanks:     mergeRanks,
 	}, nil
 }
 
@@ -197,6 +199,13 @@ func LoadFromGGUF(path string) (*Tokenizer, error) {
 		}
 	}
 
+	// SentencePiece space prefix: prepend ▁ to text before encoding (default: true).
+	// Some models (Gemma 2) set add_space_prefix=false in GGUF metadata.
+	addSpacePrefix := true
+	if v, ok := gf.Metadata["tokenizer.ggml.add_space_prefix"]; ok {
+		addSpacePrefix = v.AsBool()
+	}
+
 	// Collect special tokens (types 3=control, 6=byte)
 	var specialTokens []string
 	for i, tok := range tokensVal.Array {
@@ -269,13 +278,14 @@ func LoadFromGGUF(path string) (*Tokenizer, error) {
 	}
 
 	return &Tokenizer{
-		vocab:         vocab,
-		ids:           ids,
-		bos:           bos,
-		eos:           eos,
-		addBos:        addBos,
-		specialTokens: specialTokens,
-		useByteLevel:  useByteLevel,
+		vocab:          vocab,
+		ids:            ids,
+		bos:            bos,
+		eos:            eos,
+		addBos:         addBos,
+		addSpacePrefix: addSpacePrefix,
+		specialTokens:  specialTokens,
+		useByteLevel:   useByteLevel,
 		mergeRanks:    mergeRanks,
 	}, nil
 }
@@ -445,7 +455,7 @@ func (t *Tokenizer) encodeSegment(text string, atWordBoundary bool, isAbsoluteSt
 			}
 
 			startsWithNewline := len(remaining) > 0 && remaining[0] == '\n'
-			skipSpacePrefix := startsWithNewline || (isAbsoluteStart && startsWithSpecialChar)
+			skipSpacePrefix := startsWithNewline || (isAbsoluteStart && startsWithSpecialChar) || !t.addSpacePrefix
 			if bestID < 0 && isStart && !hasLeadingSpace && !skipSpacePrefix {
 				prefixed := spaceChar + remaining
 				foundPrefixed := false
@@ -548,7 +558,7 @@ func (t *Tokenizer) encodeBPE(text string, atWordBoundary bool, isAbsoluteStart 
 		startsWithNewline := len(text) > 0 && text[0] == '\n'
 		startsWithSpecialChar := len(text) > 0 && (text[0] == '<' || text[0] == '[' || text[0] == '{')
 		startsWithSpace := len(text) > 0 && text[0] == ' '
-		skipPrefix := startsWithNewline || (isAbsoluteStart && startsWithSpecialChar) || startsWithSpace
+		skipPrefix := startsWithNewline || (isAbsoluteStart && startsWithSpecialChar) || startsWithSpace || !t.addSpacePrefix
 		if !skipPrefix {
 			spText = spaceChar + spText
 		}
