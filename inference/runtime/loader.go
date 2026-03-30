@@ -136,11 +136,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			)
 			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
 			q4Count++
-		// NOTE: Q5_0 GPU kernel exists but has dequantization bugs. Q5_0 weights
-		// are dequantized to F32 during loading (fall through to default path).
-		// The F32 path produces correct prefill logits matching llama.cpp.
-		} else if false && info.Type == gguf.TensorTypeQ5_0 {
-			// Q5_0 native GPU kernel (DISABLED — dequantization bug, TODO fix)
+		} else if info.Type == gguf.TensorTypeQ5_0 && (m.isWeightMatrix(hfName) || hfName == "lm_head.weight") {
 			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
 			if err != nil {
 				fmt.Printf("Warning: failed to load raw Q5_0 tensor %s: %v\n", hfName, err)

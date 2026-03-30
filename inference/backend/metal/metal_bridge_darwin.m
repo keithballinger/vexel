@@ -5348,7 +5348,8 @@ kernel void matvec_q5_0_nr2_f32(
         {
             device const uchar* p = b_row0 + block * Q5_0_BYTES_PER_BLOCK;
             float d = float(as_type<half>(*((device const ushort*)p)));
-            uint32_t qh = *((device const uint32_t*)(p + 2));
+            // Read qh byte-by-byte to avoid potential alignment issues
+            uint32_t qh = uint32_t(p[2]) | (uint32_t(p[3]) << 8) | (uint32_t(p[4]) << 16) | (uint32_t(p[5]) << 24);
             device const uchar* qs = p + 6;
 
             float s = 0.0f;
@@ -5373,7 +5374,8 @@ kernel void matvec_q5_0_nr2_f32(
         if (row1 < N) {
             device const uchar* p = b_row1 + block * Q5_0_BYTES_PER_BLOCK;
             float d = float(as_type<half>(*((device const ushort*)p)));
-            uint32_t qh = *((device const uint32_t*)(p + 2));
+            // Read qh byte-by-byte to avoid potential alignment issues
+            uint32_t qh = uint32_t(p[2]) | (uint32_t(p[3]) << 8) | (uint32_t(p[4]) << 16) | (uint32_t(p[5]) << 24);
             device const uchar* qs = p + 6;
 
             float s = 0.0f;
@@ -5441,7 +5443,8 @@ kernel void matmul_q5_0_batched_f32(
         {
             device const uchar* p = b_row0 + block * Q5_0_BYTES_PER_BLOCK;
             float d = float(as_type<half>(*((device const ushort*)p)));
-            uint32_t qh = *((device const uint32_t*)(p + 2));
+            // Read qh byte-by-byte to avoid potential alignment issues
+            uint32_t qh = uint32_t(p[2]) | (uint32_t(p[3]) << 8) | (uint32_t(p[4]) << 16) | (uint32_t(p[5]) << 24);
             device const uchar* qs = p + 6;
 
             float s = 0.0f;
@@ -5463,7 +5466,8 @@ kernel void matmul_q5_0_batched_f32(
         if (row1 < N) {
             device const uchar* p = b_row1 + block * Q5_0_BYTES_PER_BLOCK;
             float d = float(as_type<half>(*((device const ushort*)p)));
-            uint32_t qh = *((device const uint32_t*)(p + 2));
+            // Read qh byte-by-byte to avoid potential alignment issues
+            uint32_t qh = uint32_t(p[2]) | (uint32_t(p[3]) << 8) | (uint32_t(p[4]) << 16) | (uint32_t(p[5]) << 24);
             device const uchar* qs = p + 6;
 
             float s = 0.0f;
