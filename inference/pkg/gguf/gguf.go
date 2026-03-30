@@ -132,21 +132,21 @@ func (t TensorType) BytesPerBlock() int {
 
 // MetadataValue holds a parsed metadata value.
 type MetadataValue struct {
-	Type       MetadataType
-	Uint8      uint8
-	Int8       int8
-	Uint16     uint16
-	Int16      int16
-	Uint32     uint32
-	Int32      int32
-	Uint64     uint64
-	Int64      int64
-	Float32    float32
-	Float64    float64
-	Bool       bool
-	String     string
-	Array      []MetadataValue
-	ArrayType  MetadataType
+	Type      MetadataType
+	Uint8     uint8
+	Int8      int8
+	Uint16    uint16
+	Int16     int16
+	Uint32    uint32
+	Int32     int32
+	Uint64    uint64
+	Int64     int64
+	Float32   float32
+	Float64   float64
+	Bool      bool
+	String    string
+	Array     []MetadataValue
+	ArrayType MetadataType
 }
 
 // AsString returns the value as a string if it is one.
@@ -225,24 +225,24 @@ type File struct {
 	DataOffset int64 // Offset to tensor data section
 
 	// Cached model config values
-	Architecture    string
-	NumLayers       int
-	HiddenSize      int
-	NumHeads        int
-	NumKVHeads      int
-	VocabSize       int
-	IntermediateSize int
-	ContextLength   int
-	RoPETheta       float32
-	RoPEDimCount    int // Dimensions for RoPE (0 = full headDim). For partial RoPE like Phi-2.
-	SlidingWindow   int // Sliding window size
-	RMSNormEPS      float32 // RMS normalization epsilon (0 = use default 1e-5)
-	HeadDim         int     // Explicit head dimension (0 = hiddenSize/numHeads). Gemma 2 uses 256 with hiddenSize=2304, numHeads=8.
-	AttnLogitSoftCap float32 // Attention logit soft-capping value (0 = disabled, 50.0 for Gemma 2)
-	FinalLogitSoftCap float32 // Final logit soft-capping value (0 = disabled, 30.0 for Gemma 2)
-	ExpertCount     int // Total number of routed experts (MoE models, e.g., 64 or 256)
-	ExpertUsedCount int // Number of experts selected per token (MoE models, e.g., 6 or 8)
-	file            *os.File // Underlying file for mmap access
+	Architecture      string
+	NumLayers         int
+	HiddenSize        int
+	NumHeads          int
+	NumKVHeads        int
+	VocabSize         int
+	IntermediateSize  int
+	ContextLength     int
+	RoPETheta         float32
+	RoPEDimCount      int      // Dimensions for RoPE (0 = full headDim). For partial RoPE like Phi-2.
+	SlidingWindow     int      // Sliding window size
+	RMSNormEPS        float32  // RMS normalization epsilon (0 = use default 1e-5)
+	HeadDim           int      // Explicit head dimension (0 = hiddenSize/numHeads). Gemma 2 uses 256 with hiddenSize=2304, numHeads=8.
+	AttnLogitSoftCap  float32  // Attention logit soft-capping value (0 = disabled, 50.0 for Gemma 2)
+	FinalLogitSoftCap float32  // Final logit soft-capping value (0 = disabled, 30.0 for Gemma 2)
+	ExpertCount       int      // Total number of routed experts (MoE models, e.g., 64 or 256)
+	ExpertUsedCount   int      // Number of experts selected per token (MoE models, e.g., 6 or 8)
+	file              *os.File // Underlying file for mmap access
 }
 
 // Open opens and parses a GGUF file.
@@ -636,23 +636,23 @@ func (f *File) PrintSummary() {
 // ModelConfigValues returns the extracted model configuration values.
 // This can be used to initialize a runtime.ModelConfig.
 type ModelConfigValues struct {
-	Architecture     string
-	NumLayers        int
-	HiddenSize       int
-	IntermediateSize int
-	NumHeads         int
-	NumKVHeads       int
-	VocabSize        int
-	ContextLength    int
-	RoPETheta        float32
-	RoPEDimCount     int // Dimensions for RoPE (0 = full headDim)
-	SlidingWindow    int // Sliding window size
-	RMSNormEPS       float32 // RMS normalization epsilon (0 = use default 1e-5)
-	HeadDim          int     // Explicit head dimension (0 = hiddenSize/numHeads). Gemma 2 2B: 256.
-	AttnLogitSoftCap float32 // Attention logit soft-capping (0 = disabled, 50.0 for Gemma 2)
+	Architecture      string
+	NumLayers         int
+	HiddenSize        int
+	IntermediateSize  int
+	NumHeads          int
+	NumKVHeads        int
+	VocabSize         int
+	ContextLength     int
+	RoPETheta         float32
+	RoPEDimCount      int     // Dimensions for RoPE (0 = full headDim)
+	SlidingWindow     int     // Sliding window size
+	RMSNormEPS        float32 // RMS normalization epsilon (0 = use default 1e-5)
+	HeadDim           int     // Explicit head dimension (0 = hiddenSize/numHeads). Gemma 2 2B: 256.
+	AttnLogitSoftCap  float32 // Attention logit soft-capping (0 = disabled, 50.0 for Gemma 2)
 	FinalLogitSoftCap float32 // Final logit soft-capping (0 = disabled, 30.0 for Gemma 2)
-	ExpertCount      int // Total number of routed experts (MoE models)
-	ExpertUsedCount  int // Number of experts selected per token (MoE models)
+	ExpertCount       int     // Total number of routed experts (MoE models)
+	ExpertUsedCount   int     // Number of experts selected per token (MoE models)
 }
 
 // GetModelConfig returns the extracted model configuration.

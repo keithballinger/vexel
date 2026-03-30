@@ -5300,6 +5300,197 @@ kernel void matmul_q4k_simdgroup_f32(
 // =============================================================================
 // Q8_0 MATMUL KERNELS
 // =============================================================================
+// =============================================================================
+// Q5_0 MatMul Kernels
+// Q5_0 format: 32 elements per block, 22 bytes (2 byte f16 scale + 4 byte qh + 16 bytes qs).
+// Each element is a 5-bit unsigned value: lower 4 bits from qs nibbles, upper 1 bit from qh.
+// Dequantized as: value = (q5 - 16) * d
+// =============================================================================
+
+constant int Q5_0_BLOCK_SIZE = 32;
+constant int Q5_0_BYTES_PER_BLOCK = 22;
+constant int Q5_0_NR2_OUTPUTS_PER_TG = 16; // 8 simdgroups × 2 outputs
+
+// Q5_0 NR2 matvec: [1,K] × [N,K]^T → [1,N]
+// Each simdgroup handles 2 N outputs, lanes stride through blocks.
+kernel void matvec_q5_0_nr2_f32(
+    device const float* A [[buffer(0)]],
+    device const uchar* B [[buffer(1)]],
+    device float* C [[buffer(2)]],
+    constant int& N [[buffer(3)]],
+    constant int& K [[buffer(4)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int row0 = gid * Q5_0_NR2_OUTPUTS_PER_TG + simd_group * 2;
+    int row1 = row0 + 1;
+    if (row0 >= N) return;
+
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+
+    int numBlocks = (K + Q5_0_BLOCK_SIZE - 1) / Q5_0_BLOCK_SIZE;
+    device const uchar* b_row0 = B + (int64_t)row0 * numBlocks * Q5_0_BYTES_PER_BLOCK;
+    device const uchar* b_row1 = B + (int64_t)row1 * numBlocks * Q5_0_BYTES_PER_BLOCK;
+
+    for (int block = simd_lane; block < numBlocks; block += 32) {
+        int base_k = block * Q5_0_BLOCK_SIZE;
+        int elems = min(Q5_0_BLOCK_SIZE, K - base_k);
+
+        // Load A values for this block (reuse across both rows)
+        float a_vals[32];
+        for (int i = 0; i < elems; i++) {
+            a_vals[i] = A[base_k + i];
+        }
+
+        // Row 0
+        {
+            device const uchar* p = b_row0 + block * Q5_0_BYTES_PER_BLOCK;
+            float d = float(as_type<half>(*((device const ushort*)p)));
+            uint32_t qh = *((device const uint32_t*)(p + 2));
+            device const uchar* qs = p + 6;
+
+            float s = 0.0f;
+            // First 16 elements (low nibbles)
+            for (int j = 0; j < min(16, elems); j++) {
+                uint8_t xi0 = qs[j] & 0x0F;
+                uint8_t xh0 = ((qh >> j) << 4) & 0x10;
+                int q = int(xi0 | xh0) - 16;
+                s += a_vals[j] * float(q);
+            }
+            // Second 16 elements (high nibbles)
+            for (int j = 0; j < min(16, elems - 16); j++) {
+                uint8_t xi1 = qs[j] >> 4;
+                uint8_t xh1 = ((qh >> (j + 16)) << 4) & 0x10;
+                int q = int(xi1 | xh1) - 16;
+                s += a_vals[j + 16] * float(q);
+            }
+            sum0 += d * s;
+        }
+
+        // Row 1
+        if (row1 < N) {
+            device const uchar* p = b_row1 + block * Q5_0_BYTES_PER_BLOCK;
+            float d = float(as_type<half>(*((device const ushort*)p)));
+            uint32_t qh = *((device const uint32_t*)(p + 2));
+            device const uchar* qs = p + 6;
+
+            float s = 0.0f;
+            for (int j = 0; j < min(16, elems); j++) {
+                uint8_t xi0 = qs[j] & 0x0F;
+                uint8_t xh0 = ((qh >> j) << 4) & 0x10;
+                int q = int(xi0 | xh0) - 16;
+                s += a_vals[j] * float(q);
+            }
+            for (int j = 0; j < min(16, elems - 16); j++) {
+                uint8_t xi1 = qs[j] >> 4;
+                uint8_t xh1 = ((qh >> (j + 16)) << 4) & 0x10;
+                int q = int(xi1 | xh1) - 16;
+                s += a_vals[j + 16] * float(q);
+            }
+            sum1 += d * s;
+        }
+    }
+
+    sum0 = simd_sum(sum0);
+    sum1 = simd_sum(sum1);
+    if (simd_lane == 0) {
+        C[row0] = sum0;
+        if (row1 < N) C[row1] = sum1;
+    }
+}
+
+// Q5_0 batched matmul: [M,K] × [N,K]^T → [M,N] using NR2 pattern.
+// Grid: (ceil(N/16), M). Each TG handles one M row, 16 N outputs.
+kernel void matmul_q5_0_batched_f32(
+    device const float* A [[buffer(0)]],
+    device const uchar* B [[buffer(1)]],
+    device float* C [[buffer(2)]],
+    constant int& M [[buffer(3)]],
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    uint2 gid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int m = gid.y;
+    if (m >= M) return;
+
+    int row0 = gid.x * Q5_0_NR2_OUTPUTS_PER_TG + simd_group * 2;
+    int row1 = row0 + 1;
+    if (row0 >= N) return;
+
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+
+    device const float* a_row = A + m * K;
+    int numBlocks = (K + Q5_0_BLOCK_SIZE - 1) / Q5_0_BLOCK_SIZE;
+    device const uchar* b_row0 = B + (int64_t)row0 * numBlocks * Q5_0_BYTES_PER_BLOCK;
+    device const uchar* b_row1 = B + (int64_t)row1 * numBlocks * Q5_0_BYTES_PER_BLOCK;
+
+    for (int block = simd_lane; block < numBlocks; block += 32) {
+        int base_k = block * Q5_0_BLOCK_SIZE;
+        int elems = min(Q5_0_BLOCK_SIZE, K - base_k);
+
+        float a_vals[32];
+        for (int i = 0; i < elems; i++) {
+            a_vals[i] = a_row[base_k + i];
+        }
+
+        {
+            device const uchar* p = b_row0 + block * Q5_0_BYTES_PER_BLOCK;
+            float d = float(as_type<half>(*((device const ushort*)p)));
+            uint32_t qh = *((device const uint32_t*)(p + 2));
+            device const uchar* qs = p + 6;
+
+            float s = 0.0f;
+            for (int j = 0; j < min(16, elems); j++) {
+                uint8_t xi0 = qs[j] & 0x0F;
+                uint8_t xh0 = ((qh >> j) << 4) & 0x10;
+                int q = int(xi0 | xh0) - 16;
+                s += a_vals[j] * float(q);
+            }
+            for (int j = 0; j < min(16, elems - 16); j++) {
+                uint8_t xi1 = qs[j] >> 4;
+                uint8_t xh1 = ((qh >> (j + 16)) << 4) & 0x10;
+                int q = int(xi1 | xh1) - 16;
+                s += a_vals[j + 16] * float(q);
+            }
+            sum0 += d * s;
+        }
+
+        if (row1 < N) {
+            device const uchar* p = b_row1 + block * Q5_0_BYTES_PER_BLOCK;
+            float d = float(as_type<half>(*((device const ushort*)p)));
+            uint32_t qh = *((device const uint32_t*)(p + 2));
+            device const uchar* qs = p + 6;
+
+            float s = 0.0f;
+            for (int j = 0; j < min(16, elems); j++) {
+                uint8_t xi0 = qs[j] & 0x0F;
+                uint8_t xh0 = ((qh >> j) << 4) & 0x10;
+                int q = int(xi0 | xh0) - 16;
+                s += a_vals[j] * float(q);
+            }
+            for (int j = 0; j < min(16, elems - 16); j++) {
+                uint8_t xi1 = qs[j] >> 4;
+                uint8_t xh1 = ((qh >> (j + 16)) << 4) & 0x10;
+                int q = int(xi1 | xh1) - 16;
+                s += a_vals[j + 16] * float(q);
+            }
+            sum1 += d * s;
+        }
+    }
+
+    sum0 = simd_sum(sum0);
+    sum1 = simd_sum(sum1);
+    if (simd_lane == 0) {
+        C[m * N + row0] = sum0;
+        if (row1 < N) C[m * N + row1] = sum1;
+    }
+}
+
 // Q8_0 format: 32 elements per block, 34 bytes (2 byte f16 scale + 32 int8 values).
 // Track 4: Quantization Expansion, Phase 2 Task 2.
 
@@ -11908,6 +12099,67 @@ void metal_matmul_q4k_simdgroup_f32(void* queuePtr, void* pipelinePtr,
     int tilesN = (N + TILE_N - 1) / TILE_N;
     int tilesM = (M + TILE_M - 1) / TILE_M;
     MTLSize threadgroups = MTLSizeMake(tilesN, tilesM, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_matvec_q5_0_nr2_f32(void* queuePtr, void* pipelinePtr,
+                                void* A, uint64_t aOff,
+                                void* B, uint64_t bOff,
+                                void* C, uint64_t cOff,
+                                int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:aOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:bOff atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:cOff atIndex:2];
+    [encoder setBytes:&N length:sizeof(N) atIndex:3];
+    [encoder setBytes:&K length:sizeof(K) atIndex:4];
+
+    int outputsPerTG = 16;
+    int threadgroupSize = 256;
+    int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
+
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_matmul_q5_0_batched_f32(void* queuePtr, void* pipelinePtr,
+                                    void* A, uint64_t aOff,
+                                    void* B, uint64_t bOff,
+                                    void* C, uint64_t cOff,
+                                    int M, int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:aOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:bOff atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:cOff atIndex:2];
+    [encoder setBytes:&M length:sizeof(M) atIndex:3];
+    [encoder setBytes:&N length:sizeof(N) atIndex:4];
+    [encoder setBytes:&K length:sizeof(K) atIndex:5];
+
+    int outputsPerTG = 16;
+    int threadgroupSize = 256;
+    int nTiles = (N + outputsPerTG - 1) / outputsPerTG;
+
+    MTLSize threadgroups = MTLSizeMake(nTiles, M, 1);
     MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];

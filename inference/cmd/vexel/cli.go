@@ -113,7 +113,7 @@ func subcommandArgs(args []string) []string {
 // ServeFlags holds flags for the serve subcommand.
 type ServeFlags struct {
 	Port           int
-	GRPCPort       int    // Port for gRPC server (default 9090)
+	GRPCPort       int // Port for gRPC server (default 9090)
 	MaxTokens      int
 	MaxBatchSize   int
 	GRPCTLSCert    string // Path to TLS certificate for gRPC server

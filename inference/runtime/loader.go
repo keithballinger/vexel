@@ -51,7 +51,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 
 		// First, check the tensor type to decide loading strategy
 		info, found := loader.GetTensorInfo(ggufName)
-        // ...
+		// ...
 		if !found {
 			// Try alternative naming patterns
 			altNames := m.alternativeGGUFNames(ggufName)
@@ -70,7 +70,6 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			fmt.Printf("Warning: tensor %s (%s) not found\n", hfName, ggufName)
 			continue
 		}
-
 
 		var t tensor.Tensor
 
@@ -134,6 +133,24 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 				m.config.DType,
 				tensor.NewDevicePtr(tensor.CPU, uintptr(unsafe.Pointer(&rawData[0]))),
 				tensor.Q6_K,
+			)
+			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
+			q4Count++
+		// NOTE: Q5_0 GPU kernel exists but has dequantization bugs. Q5_0 weights
+		// are dequantized to F32 during loading (fall through to default path).
+		// The F32 path produces correct prefill logits matching llama.cpp.
+		} else if false && info.Type == gguf.TensorTypeQ5_0 {
+			// Q5_0 native GPU kernel (DISABLED — dequantization bug, TODO fix)
+			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
+			if err != nil {
+				fmt.Printf("Warning: failed to load raw Q5_0 tensor %s: %v\n", hfName, err)
+				continue
+			}
+			t = tensor.NewQuantTensor(
+				tensor.NewShape(dims...),
+				m.config.DType,
+				tensor.NewDevicePtr(tensor.CPU, uintptr(unsafe.Pointer(&rawData[0]))),
+				tensor.Q5_0,
 			)
 			m.keepAliveBytes = append(m.keepAliveBytes, rawData)
 			q4Count++
@@ -322,9 +339,9 @@ func (m *ModelRuntime) requiredTensorNames() []string {
 				prefix+"self_attn.v_proj.weight",
 				prefix+"self_attn.o_proj.weight",
 				prefix+"mlp.gate.weight",              // Router/gate layer
-				prefix+"mlp.experts.gate_proj.weight",  // Concatenated expert gate projections
-				prefix+"mlp.experts.up_proj.weight",    // Concatenated expert up projections
-				prefix+"mlp.experts.down_proj.weight",  // Concatenated expert down projections
+				prefix+"mlp.experts.gate_proj.weight", // Concatenated expert gate projections
+				prefix+"mlp.experts.up_proj.weight",   // Concatenated expert up projections
+				prefix+"mlp.experts.down_proj.weight", // Concatenated expert down projections
 				prefix+"input_layernorm.weight",
 				prefix+"post_attention_layernorm.weight",
 			)
@@ -404,17 +421,17 @@ func (m *ModelRuntime) LoadWeightsSafetensors(path string) error {
 		// We need "data_offsets" -> [start, end]
 		// "shape" -> []int
 		// "dtype" -> string
-		
+
 		info, ok := meta.(map[string]interface{})
 		if !ok {
 			continue // Should not happen for valid safetensors
 		}
-		
+
 		offsets, _ := info["data_offsets"].([]interface{})
 		if len(offsets) != 2 {
 			continue
 		}
-		
+
 		// Get shape
 		shapeList, _ := info["shape"].([]interface{})
 		dims := make([]int, len(shapeList))
@@ -423,7 +440,7 @@ func (m *ModelRuntime) LoadWeightsSafetensors(path string) error {
 			dims[i] = int(v.(float64))
 			numElements *= dims[i]
 		}
-		
+
 		start := uint64(offsets[0].(float64)) // JSON numbers are float64
 
 		// Calculate pointer
@@ -441,7 +458,7 @@ func (m *ModelRuntime) LoadWeightsSafetensors(path string) error {
 		// If our kernel expects F32, we must allocate and convert.
 
 		stDType := info["dtype"].(string)
-		
+
 		if stDType == "BF16" && m.config.DType == tensor.Float32 {
 			// Read raw bytes - start is offset within data section
 			numElements := 1
@@ -465,13 +482,13 @@ func (m *ModelRuntime) LoadWeightsSafetensors(path string) error {
 			// Zero-copy (if types match)
 			tensorPtr = tensor.NewDevicePtr(tensor.CPU, ptr)
 		}
-		
+
 		t := tensor.NewTensor(
 			tensor.NewShape(dims...),
 			dtype,
 			tensorPtr,
 		)
-		
+
 		// Map to struct
 		m.mapTensor(name, t)
 	}
@@ -514,6 +531,10 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 				// Q6_K: 210 bytes per 256 elements
 				numBlocks := (numElements + 255) / 256
 				sizeBytes = numBlocks * 210
+			case tensor.Q5_0:
+				// Q5_0: 22 bytes per 32 elements (2 byte f16 scale + 4 byte qh + 16 bytes qs)
+				numBlocks := (numElements + 31) / 32
+				sizeBytes = numBlocks * 22
 			case tensor.Q8_0:
 				// Q8_0: 34 bytes per 32 elements (2 byte f16 scale + 32 int8 values)
 				numBlocks := (numElements + 31) / 32
@@ -1002,8 +1023,8 @@ func (m *ModelRuntime) splitQKVWeight(layer *BlockRuntime, combined tensor.Tenso
 
 	// Calculate Q, K, V sizes based on head configuration
 	headDim := m.config.EffectiveHeadDim()
-	qRows := m.config.NumAttentionHeads * headDim    // Q uses all heads
-	kvRows := m.config.NumKeyValueHeads * headDim   // K, V may use fewer heads (GQA)
+	qRows := m.config.NumAttentionHeads * headDim // Q uses all heads
+	kvRows := m.config.NumKeyValueHeads * headDim // K, V may use fewer heads (GQA)
 
 	// Verify total matches
 	expectedRows := qRows + kvRows + kvRows
@@ -1032,6 +1053,8 @@ func (m *ModelRuntime) splitQKVWeight(layer *BlockRuntime, combined tensor.Tenso
 			blockSize, bytesPerBlock = 256, 176
 		case tensor.Q6_K:
 			blockSize, bytesPerBlock = 256, 210
+		case tensor.Q5_0:
+			blockSize, bytesPerBlock = 32, 22
 		case tensor.Q8_0:
 			blockSize, bytesPerBlock = 32, 34
 		case tensor.BF16:
@@ -1156,6 +1179,8 @@ func (m *ModelRuntime) splitGateUpWeight(layer *BlockRuntime, combined tensor.Te
 			blockSize, bytesPerBlock = 256, 176
 		case tensor.Q6_K:
 			blockSize, bytesPerBlock = 256, 210
+		case tensor.Q5_0:
+			blockSize, bytesPerBlock = 32, 22
 		case tensor.Q8_0:
 			blockSize, bytesPerBlock = 32, 34
 		case tensor.BF16:
@@ -1224,6 +1249,8 @@ func (m *ModelRuntime) splitGateUpGPU(layer *BlockRuntime) {
 			blockSize, bytesPerBlock = 256, 176
 		case tensor.Q6_K:
 			blockSize, bytesPerBlock = 256, 210
+		case tensor.Q5_0:
+			blockSize, bytesPerBlock = 32, 22
 		case tensor.Q8_0:
 			blockSize, bytesPerBlock = 32, 34
 		case tensor.BF16:
@@ -1284,6 +1311,8 @@ func (m *ModelRuntime) splitQKVGPU(layer *BlockRuntime) {
 			blockSize, bytesPerBlock = 256, 176
 		case tensor.Q6_K:
 			blockSize, bytesPerBlock = 256, 210
+		case tensor.Q5_0:
+			blockSize, bytesPerBlock = 32, 22
 		case tensor.Q8_0:
 			blockSize, bytesPerBlock = 32, 34
 		case tensor.BF16:

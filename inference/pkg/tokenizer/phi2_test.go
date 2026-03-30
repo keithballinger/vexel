@@ -46,7 +46,7 @@ func TestPhi2TokenizerParity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Encode failed: %v", err)
 			}
-			
+
 			t.Logf("Input: %q", tt.input)
 			t.Logf("IDs: %v", ids)
 			t.Logf("Length: %d", len(ids))

@@ -13,19 +13,19 @@ const InvalidBlockID BlockID = -1
 // Block holds KV data for a fixed number of tokens at one layer.
 // Layout: K [BlockSize, NumKVHeads, HeadDim] followed by V [BlockSize, NumKVHeads, HeadDim]
 type Block struct {
-	ID       BlockID
-	LayerIdx int
-	Data     []float32 // K and V concatenated
-	NumTokens int      // How many token slots are filled (0 to BlockSize)
+	ID        BlockID
+	LayerIdx  int
+	Data      []float32 // K and V concatenated
+	NumTokens int       // How many token slots are filled (0 to BlockSize)
 }
 
 // PagedKVConfig defines the configuration for paged attention.
 type PagedKVConfig struct {
-	NumLayers   int
-	NumKVHeads  int
-	HeadDim     int
-	BlockSize   int // Tokens per block (e.g., 16)
-	MaxBlocks   int // Maximum blocks in the pool
+	NumLayers  int
+	NumKVHeads int
+	HeadDim    int
+	BlockSize  int // Tokens per block (e.g., 16)
+	MaxBlocks  int // Maximum blocks in the pool
 }
 
 // BlockSizeFloats returns the number of float32s in one block (K + V).
@@ -43,9 +43,9 @@ func (c PagedKVConfig) KVSizeFloats() int {
 type BlockAllocator struct {
 	mu        sync.Mutex
 	config    PagedKVConfig
-	blocks    [][]*Block          // blocks[layer][blockIdx]
-	freeList  [][]BlockID         // freeList[layer] = stack of free block IDs
-	refCounts map[BlockID]int     // Reference counts for shared blocks
+	blocks    [][]*Block      // blocks[layer][blockIdx]
+	freeList  [][]BlockID     // freeList[layer] = stack of free block IDs
+	refCounts map[BlockID]int // Reference counts for shared blocks
 }
 
 // NewBlockAllocator creates a new block allocator.
@@ -62,9 +62,9 @@ func NewBlockAllocator(config PagedKVConfig) *BlockAllocator {
 		// Pre-allocate all blocks and add to free list
 		for i := 0; i < config.MaxBlocks; i++ {
 			blocks[layer][i] = &Block{
-				ID:       BlockID(i),
-				LayerIdx: layer,
-				Data:     make([]float32, blockFloats),
+				ID:        BlockID(i),
+				LayerIdx:  layer,
+				Data:      make([]float32, blockFloats),
 				NumTokens: 0,
 			}
 			// Push to free list (reversed so we pop 0 first)

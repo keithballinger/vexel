@@ -711,14 +711,14 @@ func TestParseInserts(t *testing.T) {
 			wantInsertName: "",
 		},
 		{
-			name:      "unclosed tag",
-			input:     `Hello <insert name="test" world`,
-			wantErr:   true,
+			name:    "unclosed tag",
+			input:   `Hello <insert name="test" world`,
+			wantErr: true,
 		},
 		{
-			name:      "missing name",
-			input:     `Hello <insert /> world`,
-			wantErr:   true,
+			name:    "missing name",
+			input:   `Hello <insert /> world`,
+			wantErr: true,
 		},
 		{
 			name:           "insert at start",

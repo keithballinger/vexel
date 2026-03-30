@@ -220,17 +220,17 @@ type BlockRuntime struct {
 	backend backend.Backend
 
 	// Config (needed for GQA)
-	NumAttentionHeads int
-	NumKeyValueHeads  int
-	HeadDim           int
-	HiddenSize        int
-	IntermediateSize  int
-	RoPETheta         float64
-	RoPEDim           int  // Dimensions to rotate (0 = full headDim). For partial RoPE like Phi-2.
-	RoPENeox          bool // NEOX-style RoPE (split pairs: i, i+dim/2) vs LLaMA-style (interleaved: 2i, 2i+1)
-	SlidingWindow       int                // Window size for sliding window attention (0 = infinite/full context)
+	NumAttentionHeads   int
+	NumKeyValueHeads    int
+	HeadDim             int
+	HiddenSize          int
+	IntermediateSize    int
+	RoPETheta           float64
+	RoPEDim             int                 // Dimensions to rotate (0 = full headDim). For partial RoPE like Phi-2.
+	RoPENeox            bool                // NEOX-style RoPE (split pairs: i, i+dim/2) vs LLaMA-style (interleaved: 2i, 2i+1)
+	SlidingWindow       int                 // Window size for sliding window attention (0 = infinite/full context)
 	AttentionWindowType AttentionWindowType // Window pattern: Global, Sliding, or Alternating
-	RMSNormEPS        float64
+	RMSNormEPS          float64
 
 	// Architecture-specific config
 	NormType         NormType // RMSNorm (LLaMA) vs LayerNorm (Phi)
@@ -239,10 +239,10 @@ type BlockRuntime struct {
 	ParallelResidual bool     // True: x + attn(norm(x)) + mlp(norm(x)), False: serial
 
 	// Weights (stored as DevicePtr for GPU execution)
-	AttnNorm     tensor.Tensor
-	Wq, Wk, Wv   tensor.Tensor
-	Wqkv         tensor.Tensor // Combined QKV projection (optional, for Phi-2 optimization)
-	Wo           tensor.Tensor
+	AttnNorm   tensor.Tensor
+	Wq, Wk, Wv tensor.Tensor
+	Wqkv       tensor.Tensor // Combined QKV projection (optional, for Phi-2 optimization)
+	Wo         tensor.Tensor
 
 	FFNNorm      tensor.Tensor
 	PostAttnNorm tensor.Tensor // Post-attention RMSNorm weight (Gemma 2)
@@ -311,10 +311,10 @@ type BlockRuntime struct {
 	// which thrashes the GPU's TLB and adds ~1.7ms of GPU execution overhead.
 	// These are allocated once at init and reused, matching the buffer reuse pattern that
 	// achieves 82.4 tok/s in isolated benchmarks.
-	fp16QBuf      tensor.DevicePtr // [numQHeads * headDim] in FP16
-	fp16KBuf      tensor.DevicePtr // [numKVHeads * headDim] in FP16
-	fp16VBuf      tensor.DevicePtr // [numKVHeads * headDim] in FP16
-	fp16AttnBuf   tensor.DevicePtr // [numQHeads * headDim] in FP16
+	fp16QBuf    tensor.DevicePtr // [numQHeads * headDim] in FP16
+	fp16KBuf    tensor.DevicePtr // [numKVHeads * headDim] in FP16
+	fp16VBuf    tensor.DevicePtr // [numKVHeads * headDim] in FP16
+	fp16AttnBuf tensor.DevicePtr // [numQHeads * headDim] in FP16
 
 	// Pre-computed RoPE inverse frequency buffer on device ([headDim/2] float32).
 	// Non-nil when using learned RoPE scaling (e.g. Gemma 2 with RoPEFreqScales).
@@ -337,22 +337,22 @@ func (b *BlockRuntime) SetPlan(plan *ExecutionPlan) {
 func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 	headDim := config.EffectiveHeadDim()
 	br := &BlockRuntime{
-		backend:           b,
-		NumAttentionHeads: config.NumAttentionHeads,
-		NumKeyValueHeads:  config.NumKeyValueHeads,
-		HeadDim:           headDim,
-		HiddenSize:        config.HiddenSize,
-		IntermediateSize:  config.IntermediateSize,
-		RoPETheta:         config.RoPETheta,
-		RoPEDim:           config.RoPEDim,  // 0 = full headDim (LLaMA), otherwise partial (Phi-2)
-		RoPENeox:          config.RoPENeox, // NEOX-style (Phi) vs LLaMA-style RoPE
+		backend:             b,
+		NumAttentionHeads:   config.NumAttentionHeads,
+		NumKeyValueHeads:    config.NumKeyValueHeads,
+		HeadDim:             headDim,
+		HiddenSize:          config.HiddenSize,
+		IntermediateSize:    config.IntermediateSize,
+		RoPETheta:           config.RoPETheta,
+		RoPEDim:             config.RoPEDim,  // 0 = full headDim (LLaMA), otherwise partial (Phi-2)
+		RoPENeox:            config.RoPENeox, // NEOX-style (Phi) vs LLaMA-style RoPE
 		SlidingWindow:       config.SlidingWindow,
 		AttentionWindowType: config.AttentionWindowType,
-		RMSNormEPS:        config.RMSNormEPS,
-		NormType:          config.NormType,
-		MLPType:           config.MLPType,
-		HasBias:           config.HasBias,
-		ParallelResidual:  config.ParallelResidual,
+		RMSNormEPS:          config.RMSNormEPS,
+		NormType:            config.NormType,
+		MLPType:             config.MLPType,
+		HasBias:             config.HasBias,
+		ParallelResidual:    config.ParallelResidual,
 	}
 
 	// Cache quantized matmul interface check
@@ -395,7 +395,7 @@ func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
 	if pa, ok := b.(permAllocator); ok && br.fp16Ops != nil {
 		qSize := config.NumAttentionHeads * headDim
 		kvSize := config.NumKeyValueHeads * headDim
-		br.fp16QBuf = pa.AllocPermanent(qSize * 2)    // FP16 = 2 bytes/element
+		br.fp16QBuf = pa.AllocPermanent(qSize * 2) // FP16 = 2 bytes/element
 		br.fp16KBuf = pa.AllocPermanent(kvSize * 2)
 		br.fp16VBuf = pa.AllocPermanent(kvSize * 2)
 		br.fp16AttnBuf = pa.AllocPermanent(qSize * 2)
@@ -473,6 +473,10 @@ func (b *BlockRuntime) matMulTransposed(a tensor.DevicePtr, w tensor.Tensor, out
 		case tensor.Q5_K:
 			// Use GPU-native Q5_K kernel (only M=1 for now)
 			b.quantMatMul.MatMulQ5_K(a, w.DevicePtr(), out, m, n, k)
+			return
+		case tensor.Q5_0:
+			// Use GPU-native Q5_0 kernel
+			b.quantMatMul.MatMulQ5_0(a, w.DevicePtr(), out, m, n, k)
 			return
 		case tensor.Q8_0:
 			// Use GPU-native Q8_0 kernel
@@ -696,10 +700,10 @@ func (b *BlockRuntime) Execute(x, scratch tensor.Tensor, kvCache *kv.KVCache, la
 		b.backend.Add(xPtr, normOutPtr, xPtr, seqLen*hiddenSize)
 	}
 
-		return x, nil
-	}
-	
-	// ExecuteWithPagedKV performs the forward pass using paged KV cache.
+	return x, nil
+}
+
+// ExecuteWithPagedKV performs the forward pass using paged KV cache.
 // This version stores K/V during prefill and retrieves them during decode.
 // When gpuPool is non-nil and seqLen==1 (decode), K/V operations stay entirely
 // on GPU using paged attention. Falls back to CPU path otherwise.
@@ -1475,24 +1479,24 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				// AppendKV uses CopyBufferBatched which integrates with command batching
 				fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kF16Ptr, vF16Ptr, tensor.Float16, seqLen)
 			} else if useFP16KVCache {
-			// Explicitly convert F32->F16 here so we have dense F16 buffers for SDPAPrefillF16
-			// This is required because SDPAPrefillF16 needs [seqLen, numKVHeads, headDim] in F16
-			b.fp16Ops.ConvertF32ToF16(kPtr, kF16Ptr, kvSize)
-			b.fp16Ops.ConvertF32ToF16(vPtr, vF16Ptr, kvSize)
-			
-			// Use F16 scatter (since we now have F16 source)
-			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kF16Ptr, vF16Ptr, tensor.Float16, seqLen)
-		} else if useQ8KVCache {
-			// Quantize FP32 K/V to Q8_0 before storing in cache
-			b.q8Ops.QuantizeF32ToQ8_0(kPtr, kQ8Ptr, kvSize)
-			b.q8Ops.QuantizeF32ToQ8_0(vPtr, vQ8Ptr, kvSize)
-			// AppendKV uses CopyBufferBatched - no explicit sync needed
-			// Q8 path handles its own types implicitly via buffer size
-			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kQ8Ptr, vQ8Ptr, tensor.Uint8, seqLen)
-		} else {
-			fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kPtr, vPtr, tensor.Float32, seqLen)
-		}
-	})
+				// Explicitly convert F32->F16 here so we have dense F16 buffers for SDPAPrefillF16
+				// This is required because SDPAPrefillF16 needs [seqLen, numKVHeads, headDim] in F16
+				b.fp16Ops.ConvertF32ToF16(kPtr, kF16Ptr, kvSize)
+				b.fp16Ops.ConvertF32ToF16(vPtr, vF16Ptr, kvSize)
+
+				// Use F16 scatter (since we now have F16 source)
+				fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kF16Ptr, vF16Ptr, tensor.Float16, seqLen)
+			} else if useQ8KVCache {
+				// Quantize FP32 K/V to Q8_0 before storing in cache
+				b.q8Ops.QuantizeF32ToQ8_0(kPtr, kQ8Ptr, kvSize)
+				b.q8Ops.QuantizeF32ToQ8_0(vPtr, vQ8Ptr, kvSize)
+				// AppendKV uses CopyBufferBatched - no explicit sync needed
+				// Q8 path handles its own types implicitly via buffer size
+				fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kQ8Ptr, vQ8Ptr, tensor.Uint8, seqLen)
+			} else {
+				fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kPtr, vPtr, tensor.Float32, seqLen)
+			}
+		})
 	} // end !didFuseRoPEScatter
 
 	// Debug: check KV cache fullSeqLen
@@ -1748,7 +1752,7 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 	var didFuseW2Add2Ptr matMulQ4Add
 	var didFuseW2Add2Q4KPtr matMulQ4KAdd
 	var didFuseW2Add2Q4KF16InPtr matMulQ4KF16InAdd // FP16 intermediate: W2+Add reads FP16 from MLP output
-	var didFuseW2Add2ResidualPtr matMulQ4Add2       // non-nil when using FusedAddRMSNormMLP path
+	var didFuseW2Add2ResidualPtr matMulQ4Add2      // non-nil when using FusedAddRMSNormMLP path
 	var didFuseW2Add2 bool
 	var useQ4KF16Intermediate bool // true when FusedRMSNormMLP outputs FP16 and W2+Add reads FP16
 	if seqLen == 1 && !b.ParallelResidual && !b.HasPostNorms && b.W2.IsQuantized() {

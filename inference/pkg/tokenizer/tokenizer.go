@@ -286,7 +286,7 @@ func LoadFromGGUF(path string) (*Tokenizer, error) {
 		addSpacePrefix: addSpacePrefix,
 		specialTokens:  specialTokens,
 		useByteLevel:   useByteLevel,
-		mergeRanks:    mergeRanks,
+		mergeRanks:     mergeRanks,
 	}, nil
 }
 
@@ -736,9 +736,9 @@ func decodeSpecialChars(s string) string {
 	return s
 }
 
-func (t *Tokenizer) BOS() int { return t.bos }
-func (t *Tokenizer) EOS() int { return t.eos }
-func (t *Tokenizer) AddBOS() bool { return t.addBos }
+func (t *Tokenizer) BOS() int       { return t.bos }
+func (t *Tokenizer) EOS() int       { return t.eos }
+func (t *Tokenizer) AddBOS() bool   { return t.addBos }
 func (t *Tokenizer) VocabSize() int { return len(t.vocab) }
 
 // ChatMessage represents a single message in a conversation.

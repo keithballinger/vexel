@@ -32,25 +32,31 @@ func TestPhi2BlockLogic(t *testing.T) {
 	}
 
 	block := NewBlockRuntime(b, config)
-	
+
 	// Initialize weights as identity or simple values
 	// We want to verify that bias is added and parallel residual works
-	
+
 	// Mock weights
 	wShape := tensor.NewShape(hiddenSize, hiddenSize)
 	ones := make([]float32, hiddenSize*hiddenSize)
-	for i := range ones { ones[i] = 0 }
-	for i := 0; i < hiddenSize; i++ { ones[i*hiddenSize+i] = 1.0 } // Identity
-	
+	for i := range ones {
+		ones[i] = 0
+	}
+	for i := 0; i < hiddenSize; i++ {
+		ones[i*hiddenSize+i] = 1.0
+	} // Identity
+
 	initWeight := func(name string) tensor.Tensor {
 		ptr := b.Alloc(len(ones) * 4)
 		b.ToDevice(ptr, float32ToBytes(ones))
 		return tensor.NewTensor(wShape, tensor.Float32, ptr)
 	}
-	
+
 	initBias := func(name string, val float32) tensor.Tensor {
 		data := make([]float32, hiddenSize)
-		for i := range data { data[i] = val }
+		for i := range data {
+			data[i] = val
+		}
 		ptr := b.Alloc(len(data) * 4)
 		b.ToDevice(ptr, float32ToBytes(data))
 		return tensor.NewTensor(tensor.NewShape(hiddenSize), tensor.Float32, ptr)
@@ -64,7 +70,7 @@ func TestPhi2BlockLogic(t *testing.T) {
 	block.Wv = initWeight("Wv")
 	block.Wo = initWeight("Wo")
 	block.WoBias = initBias("WoBias", 0.2) // Add 0.2 bias
-	
+
 	block.W1 = initWeight("W1")
 	block.W1Bias = initBias("W1Bias", 0.3) // Add 0.3 bias
 	block.W2 = initWeight("W2")
@@ -75,7 +81,7 @@ func TestPhi2BlockLogic(t *testing.T) {
 	inputPtr := b.Alloc(len(inputData) * 4)
 	b.ToDevice(inputPtr, float32ToBytes(inputData))
 	input := tensor.NewTensor(tensor.NewShape(1, hiddenSize), tensor.Float32, inputPtr)
-	
+
 	scratchPtr := b.Alloc(1024 * 1024 * 4)
 	scratch := tensor.NewTensor(tensor.NewShape(1024*1024), tensor.Float32, scratchPtr)
 

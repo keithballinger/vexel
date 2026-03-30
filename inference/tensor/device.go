@@ -6,8 +6,8 @@ package tensor
 // For CPU: addr is a raw memory pointer, offset is always 0 (pointer arithmetic is done on addr)
 // For GPU: addr is the buffer handle (e.g., MTLBuffer*), offset is the position within the buffer
 type DevicePtr struct {
-	addr   uintptr  // For CPU: raw pointer. For GPU: buffer handle
-	offset int      // Offset within the buffer (used for GPU sub-allocations)
+	addr   uintptr // For CPU: raw pointer. For GPU: buffer handle
+	offset int     // Offset within the buffer (used for GPU sub-allocations)
 	loc    Location
 }
 

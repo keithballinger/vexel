@@ -46,7 +46,7 @@ func TestGPUBlockPoolStoreAndAttend(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			numLayers := 1
 			blockSize := 16
-			maxBlocks := (tc.kvLen + blockSize - 1) / blockSize + 2
+			maxBlocks := (tc.kvLen+blockSize-1)/blockSize + 2
 
 			pool := NewGPUBlockPool(b, pagedOps, numLayers, tc.numKVHeads, tc.headDim, blockSize, maxBlocks, false)
 			defer pool.Close()

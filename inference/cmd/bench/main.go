@@ -14,11 +14,11 @@ import (
 func main() {
 	// 1. CLI Arguments
 
-batchSize := flag.Int("batch", 128, "Max batch size")
-seqLen := flag.Int("seq-len", 128, "Sequence length (input + output)")
-numSeqs := flag.Int("num-seqs", 256, "Total number of sequences to process")
-device := flag.String("device", "cpu", "Device (cpu, cuda, metal)")
-flag.Parse()
+	batchSize := flag.Int("batch", 128, "Max batch size")
+	seqLen := flag.Int("seq-len", 128, "Sequence length (input + output)")
+	numSeqs := flag.Int("num-seqs", 256, "Total number of sequences to process")
+	device := flag.String("device", "cpu", "Device (cpu, cuda, metal)")
+	flag.Parse()
 
 	log.Printf("Starting benchmark on %s with Batch=%d, SeqLen=%d, TotalSeqs=%d", *device, *batchSize, *seqLen, *numSeqs)
 
@@ -55,13 +55,13 @@ flag.Parse()
 	if err := sched.Run(ctx); err != nil {
 		log.Printf("Scheduler finished with: %v", err)
 	}
-	
-duration := time.Since(start)
-	
+
+	duration := time.Since(start)
+
 	// 6. Report
 	metrics := sched.Metrics()
 	throughput := float64(metrics.TotalTokens) / duration.Seconds()
-	
+
 	fmt.Printf("\nResults:\n")
 	fmt.Printf(" Duration: %v\n", duration)
 	fmt.Printf(" Total Tokens: %d\n", metrics.TotalTokens)

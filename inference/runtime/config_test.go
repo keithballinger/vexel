@@ -25,7 +25,7 @@ func TestModelConfig(t *testing.T) {
 	if cfg.HiddenSize != 4096 {
 		t.Error("HiddenSize mismatch")
 	}
-	
+
 	// Test standard constructor/factory if applicable
 	// For now, the plan mentions "Llama3_8B configuration", which implies a helper.
 	llama3 := runtime.Llama3_8B()

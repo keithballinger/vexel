@@ -59,6 +59,7 @@ func PrintDecodeTiming() {
 func isDebugDecode() bool {
 	return os.Getenv("DEBUG_DECODE") == "1"
 }
+
 var debugDecode = isDebugDecode()
 
 // debugTensor prints stats about a tensor (min, max, mean, first values)

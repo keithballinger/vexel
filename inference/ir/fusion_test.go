@@ -15,12 +15,12 @@ func TestFusionPass(t *testing.T) {
 	out := ir.TensorID(5)
 
 	graph.AddInput(in)
-	
+
 	// Matmul: in, weight -> mid
 	graph.AddNode(ir.NewOpNode(ir.OpMatmul, []ir.TensorID{in, weight}, []ir.TensorID{mid}))
 	// Add: mid, bias -> out
 	graph.AddNode(ir.NewOpNode(ir.OpAdd, []ir.TensorID{mid, bias}, []ir.TensorID{out}))
-	
+
 	graph.AddOutput(out)
 
 	// Apply fusion pass
@@ -28,7 +28,7 @@ func TestFusionPass(t *testing.T) {
 	// Even if it does nothing yet, we need to verify the mechanism exists.
 	// Let's assume we implement a "LinearFusion" pass that looks for Matmul+Add
 	// and conceptually marks them (or we just test the Pass interface).
-	
+
 	pass := ir.NewFusionPass()
 	optimizedGraph := pass.Run(graph)
 
@@ -47,12 +47,12 @@ func TestFusionMatmulSiLU(t *testing.T) {
 	out := ir.TensorID(4)
 
 	graph.AddInput(in)
-	
+
 	// Matmul: in, weight -> mid
 	graph.AddNode(ir.NewOpNode(ir.OpMatmul, []ir.TensorID{in, weight}, []ir.TensorID{mid}))
 	// SiLU: mid -> out
 	graph.AddNode(ir.NewOpNode(ir.OpSiLU, []ir.TensorID{mid}, []ir.TensorID{out}))
-	
+
 	graph.AddOutput(out)
 
 	// Run Pass

@@ -10,7 +10,7 @@ func TestDevicePtr(t *testing.T) {
 	// We simulate a pointer address using a uintptr
 	addr := uintptr(0x12345678)
 	loc := tensor.CUDA
-	
+
 	ptr := tensor.NewDevicePtr(loc, addr)
 
 	if ptr.Addr() != addr {

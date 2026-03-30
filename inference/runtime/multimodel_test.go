@@ -102,16 +102,16 @@ func TestGGUFConfigAutoDetection_LLaMA2(t *testing.T) {
 // Track 5: Multi-Model Validation, Phase 1-2.
 func TestModelConfigFromGGUF_ArchitectureDetection(t *testing.T) {
 	tests := []struct {
-		name             string
-		arch             string
-		wantNorm         NormType
-		wantMLP          MLPType
-		wantBias         bool
-		wantParallel     bool
-		wantRoPENeox     bool
-		wantSoftCap      float32
-		wantWindowType   AttentionWindowType
-		wantPostNorms    bool
+		name           string
+		arch           string
+		wantNorm       NormType
+		wantMLP        MLPType
+		wantBias       bool
+		wantParallel   bool
+		wantRoPENeox   bool
+		wantSoftCap    float32
+		wantWindowType AttentionWindowType
+		wantPostNorms  bool
 	}{
 		{
 			name:     "llama",
@@ -472,22 +472,22 @@ func TestAlternatingWindowSelection(t *testing.T) {
 	// Test effectiveKVLen for alternating pattern
 	t.Run("effectiveKVLen_alternating", func(t *testing.T) {
 		tests := []struct {
-			layerIdx    int
-			totalKVLen  int
-			wantKVLen   int
+			layerIdx     int
+			totalKVLen   int
+			wantKVLen    int
 			wantStartPos int
 		}{
 			// Even layers (global) - always use full context
 			{0, 200, 200, 0},
-			{0, 50, 50, 0},   // Below window - no change
+			{0, 50, 50, 0}, // Below window - no change
 			{2, 1000, 1000, 0},
 
 			// Odd layers (sliding) - cap at window size
-			{1, 200, 128, 72},   // 200 > 128, so window=128, startPos=72
-			{3, 500, 128, 372},  // 500 > 128, so window=128, startPos=372
-			{1, 50, 50, 0},      // 50 < 128, no truncation needed
-			{1, 128, 128, 0},    // Exactly window size, no truncation
-			{1, 129, 128, 1},    // Just over, trim 1
+			{1, 200, 128, 72},  // 200 > 128, so window=128, startPos=72
+			{3, 500, 128, 372}, // 500 > 128, so window=128, startPos=372
+			{1, 50, 50, 0},     // 50 < 128, no truncation needed
+			{1, 128, 128, 0},   // Exactly window size, no truncation
+			{1, 129, 128, 1},   // Just over, trim 1
 		}
 		for _, tt := range tests {
 			gotKVLen, gotStartPos := br.effectiveKVLen(tt.layerIdx, tt.totalKVLen)

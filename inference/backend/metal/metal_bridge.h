@@ -921,6 +921,20 @@ void metal_sdpa_flash_decode_f16_tiled(void* queue,
                                         int kvLen, int numQHeads, int numKVHeads, int headDim,
                                         float scale, int kvHeadStride);
 
+// Q5_0 NR2 matvec: C = A @ B^T where A is [1,K] F32, B is [N,K] Q5_0
+void metal_matvec_q5_0_nr2_f32(void* queue, void* pipeline,
+                                void* A, uint64_t aOff,
+                                void* B, uint64_t bOff,
+                                void* C, uint64_t cOff,
+                                int N, int K);
+
+// Q5_0 batched matmul: C = A @ B^T where A is [M,K] F32, B is [N,K] Q5_0, C is [M,N]
+void metal_matmul_q5_0_batched_f32(void* queue, void* pipeline,
+                                    void* A, uint64_t aOff,
+                                    void* B, uint64_t bOff,
+                                    void* C, uint64_t cOff,
+                                    int M, int N, int K);
+
 // Q8_0 NR2 matvec: C = A @ B^T where A is [1,K] F32, B is [N,K] Q8_0
 void metal_matvec_q8_0_nr2_f32(void* queue, void* pipeline,
                                 void* A, uint64_t aOff,

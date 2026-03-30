@@ -234,8 +234,8 @@ func (h *Heads) Save(path string) error {
 func (h *Heads) WriteTo(w io.Writer) error {
 	// Header
 	header := make([]byte, 20)
-	copy(header[0:4], []byte("MDSA"))                            // magic
-	binary.LittleEndian.PutUint32(header[4:8], 1)                 // version
+	copy(header[0:4], []byte("MDSA"))             // magic
+	binary.LittleEndian.PutUint32(header[4:8], 1) // version
 	binary.LittleEndian.PutUint32(header[8:12], uint32(h.NumHeads))
 	binary.LittleEndian.PutUint32(header[12:16], uint32(h.HiddenSize))
 	binary.LittleEndian.PutUint32(header[16:20], uint32(h.VocabSize))

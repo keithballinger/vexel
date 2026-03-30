@@ -14,14 +14,14 @@ func TestModelRuntime(t *testing.T) {
 	backend := cpu.NewCPUBackend()
 	loc := tensor.CPU
 	ctx := memory.NewInferenceContext(loc)
-	
+
 	// Need KV arena for cache
 	ctx.AddArena(memory.KV, 1024*1024)
-	
+
 	// Configs
 	kvCfg := kv.NewKVConfig(tensor.Float16, 64, 16)
 	modelCfg := runtime.Llama3_8B()
-	
+
 	cache, err := kv.NewKVCache(ctx, kvCfg, 100)
 	if err != nil {
 		t.Fatalf("Failed to create KV cache: %v", err)

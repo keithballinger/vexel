@@ -51,29 +51,29 @@ func TestPerformanceMetrics(t *testing.T) {
 	// 1. Time to First Token (TTFT)
 	// 2. Tokens Per Second (TPS)
 	// 3. Active Sequences
-	
+
 	// This likely requires a Metrics struct in the Scheduler or Server.
 	// Let's assume Scheduler has a Metrics() method.
-	
+
 	cfg := scheduler.Config{MaxBatchSize: 8, MaxSequences: 16}
 	rt := &runtime.ModelRuntime{}
 	sched, _ := scheduler.NewScheduler(rt, nil, cfg)
-	
+
 	seq := scheduler.NewSequence(1, "Test")
 	sched.AddSequence(seq)
-	
+
 	// Run one cycle (simulating prefill)
 	ctx := context.Background()
 	go sched.Run(ctx)
 	time.Sleep(50 * time.Millisecond) // Allow it to run a bit
-	
+
 	// Check metrics
 	metrics := sched.Metrics()
-	
+
 	if metrics.ActiveSequences != 1 {
 		t.Errorf("Expected 1 active sequence, got %d", metrics.ActiveSequences)
 	}
-	
+
 	// If prefill happened, TTFT should be recorded > 0
 	// if metrics.AverageTTFT == 0 { t.Error("Expected recorded TTFT") }
 }

@@ -13,7 +13,7 @@ func TestParameterCalculation(t *testing.T) {
 	// 8B model should have ~8 billion params.
 	// Allowing some margin for error in estimation.
 	params := cfg.ApproxParams()
-	
+
 	if params < 7_500_000_000 || params > 8_500_000_000 {
 		t.Errorf("Expected ~8B params, got %d", params)
 	}

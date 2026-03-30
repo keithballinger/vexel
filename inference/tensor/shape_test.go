@@ -59,7 +59,7 @@ func TestShape(t *testing.T) {
 			if got := s.StridesRowMajor(); !reflect.DeepEqual(got, tt.wantStrides) {
 				t.Errorf("Shape.StridesRowMajor() = %v, want %v", got, tt.wantStrides)
 			}
-			
+
 			// Test Equality
 			s2 := tensor.NewShape(tt.dims...)
 			if !s.Equal(s2) {

@@ -7,8 +7,8 @@ import (
 
 func TestDType(t *testing.T) {
 	tests := []struct {
-		name     string
-		dtype    tensor.DType
+		name      string
+		dtype     tensor.DType
 		wantBytes int
 		wantBits  int
 	}{

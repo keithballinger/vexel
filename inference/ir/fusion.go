@@ -16,7 +16,7 @@ func (p *FusionPass) Run(graph *BlockIR) *BlockIR {
 
 	nodes := graph.Nodes()
 	fusedNodes := make([]OpNode, 0, len(nodes))
-	
+
 	// Track which nodes have been consumed by fusion
 	consumed := make(map[int]bool)
 
@@ -32,9 +32,9 @@ func (p *FusionPass) Run(graph *BlockIR) *BlockIR {
 			// Look ahead for SiLU
 			// Limitation: This assumes topological sort where SiLU follows immediately or we search.
 			// BlockIR nodes are strictly ordered list.
-			
+
 			// We need to check if any subsequent node is a SiLU that consumes *only* this Matmul's output.
-			
+
 			foundFusion := false
 			matmulOut := node.Outputs()[0] // Matmul has 1 output
 
@@ -43,19 +43,19 @@ func (p *FusionPass) Run(graph *BlockIR) *BlockIR {
 					continue
 				}
 				candidate := nodes[j]
-				
+
 				// Check if candidate is SiLU
 				if candidate.Kind() == OpSiLU {
 					// Check if SiLU input matches Matmul output
 					if len(candidate.Inputs()) == 1 && candidate.Inputs()[0] == matmulOut {
 						// Found match!
-						
+
 						// Create new fused node
 						// Inputs: Matmul inputs
 						// Outputs: SiLU outputs (since Matmul output is internal now)
 						fusedNode := NewOpNode(OpMatmulSiLU, node.Inputs(), candidate.Outputs())
 						fusedNodes = append(fusedNodes, fusedNode)
-						
+
 						consumed[j] = true // Mark SiLU as consumed
 						foundFusion = true
 						break

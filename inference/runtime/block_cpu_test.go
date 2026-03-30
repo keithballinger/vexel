@@ -29,7 +29,7 @@ func TestPhi2BlockLogicCPU(t *testing.T) {
 	}
 
 	block := NewBlockRuntime(b, config)
-	
+
 	// Initialize weights as identity or simple values
 	initWeight := func(name string, rows, cols int) tensor.Tensor {
 		data := make([]float32, rows*cols)
@@ -41,10 +41,12 @@ func TestPhi2BlockLogicCPU(t *testing.T) {
 		b.ToDevice(ptr, float32ToBytes(data))
 		return tensor.NewTensor(tensor.NewShape(rows, cols), tensor.Float32, ptr)
 	}
-	
+
 	initBias := func(name string, size int, val float32) tensor.Tensor {
 		data := make([]float32, size)
-		for i := range data { data[i] = val }
+		for i := range data {
+			data[i] = val
+		}
 		ptr := b.Alloc(len(data) * 4)
 		b.ToDevice(ptr, float32ToBytes(data))
 		return tensor.NewTensor(tensor.NewShape(size), tensor.Float32, ptr)
@@ -58,7 +60,7 @@ func TestPhi2BlockLogicCPU(t *testing.T) {
 	block.Wv = initWeight("Wv", hiddenSize, hiddenSize)
 	block.Wo = initWeight("Wo", hiddenSize, hiddenSize)
 	block.WoBias = initBias("WoBias", hiddenSize, 0.2)
-	
+
 	block.W1 = initWeight("W1", intermediateSize, hiddenSize)
 	block.W1Bias = initBias("W1Bias", intermediateSize, 0.3)
 	block.W2 = initWeight("W2", hiddenSize, intermediateSize)
@@ -69,7 +71,7 @@ func TestPhi2BlockLogicCPU(t *testing.T) {
 	inputPtr := b.Alloc(len(inputData) * 4)
 	b.ToDevice(inputPtr, float32ToBytes(inputData))
 	input := tensor.NewTensor(tensor.NewShape(1, hiddenSize), tensor.Float32, inputPtr)
-	
+
 	scratchPtr := b.Alloc(1024 * 1024 * 4)
 	scratch := tensor.NewTensor(tensor.NewShape(1024*1024), tensor.Float32, scratchPtr)
 

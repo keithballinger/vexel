@@ -21,7 +21,7 @@ func main() {
 	fmt.Println("--- Simple Generation ---")
 	prompt := "What is the capital of France?"
 	fmt.Printf("Prompt: %s\n", prompt)
-	
+
 	resp, err := c.Generate(ctx, prompt, &client.GenerateOptions{
 		Temperature: 0.7,
 		MaxTokens:   50,

@@ -2,7 +2,7 @@ package vexel_test
 
 import (
 	"testing"
-	
+
 	// Import all expected packages to verify existence
 	_ "vexel/inference/backend/cpu"
 	_ "vexel/inference/cmd"

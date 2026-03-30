@@ -16,10 +16,10 @@ func (b *cudaBackend) CompileBlockGraph(graph *ir.BlockIR) (interface{}, error) 
 	// 3. Create CUDA Graph (cudaGraphCreate)
 	// 4. Record nodes (cudaGraphAddKernelNode for each op)
 	// 5. Instantiate Executable Graph (cudaGraphInstantiate)
-	
+
 	// Since we don't have CGO bindings yet, we return a mock object.
 	// In a real implementation, this would return a *C.cudaGraphExec_t wrapper.
-	
+
 	if graph == nil {
 		return nil, fmt.Errorf("graph cannot be nil")
 	}
@@ -46,7 +46,7 @@ func (b *cudaBackend) RunGraph(graphExec interface{}, inputs []tensor.Tensor, st
 	// 1. Verify graphExec is valid (and convert from interface{})
 	// 2. Update graph parameters (pointers) if needed (cudaGraphExecKernelNodeSetParams)
 	// 3. Launch graph (cudaGraphLaunch)
-	
+
 	if graphExec == nil {
 		return fmt.Errorf("graphExec cannot be nil")
 	}
@@ -54,6 +54,6 @@ func (b *cudaBackend) RunGraph(graphExec interface{}, inputs []tensor.Tensor, st
 	// In a real implementation:
 	// exec := graphExec.(C.cudaGraphExec_t)
 	// cudaGraphLaunch(exec, stream)
-	
+
 	return nil
 }

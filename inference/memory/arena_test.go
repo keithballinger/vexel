@@ -48,7 +48,7 @@ func TestArena(t *testing.T) {
 
 func TestArenaOOM(t *testing.T) {
 	arena := memory.NewArena(tensor.CPU, 100, memory.Scratch)
-	
+
 	// Allocate more than capacity
 	_, err := arena.Alloc(200)
 	if err == nil {

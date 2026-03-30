@@ -9,7 +9,7 @@ import (
 func TestTokenizerLoad(t *testing.T) {
 	// Create a mock tokenizer.json
 	// Minimal structure: {"model": {"vocab": {"hello": 1, "world": 2}}}
-	
+
 	// But let's verify with the REAL TinyLlama file if present, as per our goal.
 	path := "../../../models/tiny_tokenizer.json"
 	if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -27,7 +27,7 @@ func TestTokenizerLoad(t *testing.T) {
 	if tok == nil {
 		t.Fatal("Tokenizer is nil")
 	}
-	
+
 	// Check basic encode (mocked or real)
 	ids, err := tok.Encode("Hello")
 	if err != nil {
@@ -36,7 +36,7 @@ func TestTokenizerLoad(t *testing.T) {
 	if len(ids) == 0 {
 		t.Error("Encoded ids empty")
 	}
-	
+
 	// Check basic decode
 	text, err := tok.Decode(ids)
 	if err != nil {

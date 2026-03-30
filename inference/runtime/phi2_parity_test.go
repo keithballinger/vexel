@@ -23,7 +23,7 @@ func TestPhi2Parity(t *testing.T) {
 	b := cpu.NewCPUBackend()
 	ctx := memory.NewInferenceContext(tensor.CPU)
 	ctx.AddArena(memory.Scratch, 256*1024*1024)
-	
+
 	// 2. Load Config, Weights and Tokenizer
 	gf, err := gguf.Open(modelPath)
 	if err != nil {
@@ -36,7 +36,7 @@ func TestPhi2Parity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create model runtime: %v", err)
 	}
-	
+
 	err = m.LoadWeightsF32(modelPath)
 	if err != nil {
 		t.Fatalf("Failed to load weights: %v", err)
@@ -58,7 +58,7 @@ func TestPhi2Parity(t *testing.T) {
 	// 4. Run Inference (Greedy)
 	generated := []int{}
 	currentTokens := tokens
-	
+
 	for i := 0; i < 20; i++ {
 		// Run DecodeStep
 		inputs := runtime.NewBatchRuntimeInputs(currentTokens, nil)
@@ -66,7 +66,7 @@ func TestPhi2Parity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Step %d failed: %v", i, err)
 		}
-		
+
 		// Greedy select
 		nextToken := greedySelect(logits)
 		generated = append(generated, nextToken)
@@ -76,7 +76,7 @@ func TestPhi2Parity(t *testing.T) {
 	decoded, _ := tok.Decode(generated)
 	fmt.Printf("Generated (20 tokens): %q\n", decoded)
 	fmt.Printf("Token IDs: %v\n", generated)
-	
+
 	// Example: "Hello!" -> " I am a student"
 	if len(decoded) == 0 {
 		t.Errorf("Decoded output is empty")
@@ -106,11 +106,11 @@ func greedySelect(logits tensor.Tensor) int {
 	if len(data) == 0 {
 		return 0
 	}
-	
+
 	// Argmax of the LAST row
 	vocabSize := logits.Shape().Dims()[1]
 	lastRow := data[len(data)-vocabSize:]
-	
+
 	maxIdx := 0
 	maxVal := lastRow[0]
 	for i, v := range lastRow {

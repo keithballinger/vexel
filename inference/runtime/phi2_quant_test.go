@@ -68,7 +68,7 @@ func TestPhi2QuantizedParity(t *testing.T) {
 		t.Fatalf("Failed to load tokenizer: %v", err)
 	}
 	tokens, _ := tok.Encode("Hello!")
-	
+
 	// Use DecodeStep (prefill)
 	inputs := NewBatchRuntimeInputs(tokens, nil)
 	logits, err := m.DecodeStep(inputs)
@@ -97,7 +97,7 @@ func TestPhi2QuantizedParity(t *testing.T) {
 	}
 
 	fmt.Printf("Max logit value: %f at index %d\n", maxVal, maxIdx)
-	
+
 	// Expected next token for "Hello!" is 314 (" I") or similar
 	if maxIdx == 314 {
 		t.Logf("Success! Produced correct token %d", maxIdx)
@@ -107,5 +107,5 @@ func TestPhi2QuantizedParity(t *testing.T) {
 
 	if allZeros {
 		t.Log("Reproduced failure: All logits are zero with Q4_K weights")
-	} 
+	}
 }

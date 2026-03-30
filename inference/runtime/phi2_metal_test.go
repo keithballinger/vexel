@@ -77,13 +77,13 @@ func TestPhi2MetalParity(t *testing.T) {
 
 	// 4. Run Inference (Greedy)
 	generated := []int{}
-	
+
 	// A. Prefill
 	logits, err := m.DecodeWithGPUKV(tokens, 0)
 	if err != nil {
 		t.Fatalf("Prefill failed: %v", err)
 	}
-	
+
 	sampleNext := func(logits tensor.Tensor) int {
 		vocabSize := modelCfg.VocabSize
 		logitsBytes := make([]byte, vocabSize*4)
@@ -130,7 +130,7 @@ func TestPhi2MetalParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prompt 2 prefill failed: %v", err)
 	}
-	
+
 	maxIdx2 := sampleNext(logits2)
 	decoded2, _ := tok.Decode([]int{maxIdx2})
 	fmt.Printf("Next token 2: %d (%q)\n", maxIdx2, decoded2)
@@ -151,10 +151,10 @@ func BenchmarkPhi2Metal(b *testing.B) {
 		b.Fatal(err)
 	}
 	defer backend.Close()
-	
+
 	ctx := memory.NewInferenceContext(tensor.Metal)
 	ctx.AddArenaWithBackend(memory.Scratch, 512*1024*1024, backend.Alloc)
-	
+
 	gf, err := gguf.Open(modelPath)
 	if err != nil {
 		b.Fatal(err)
@@ -166,13 +166,13 @@ func BenchmarkPhi2Metal(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	// Use quantized weights for benchmark
 	err = m.LoadWeights(modelPath)
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	err = m.CopyWeightsToDevice()
 	if err != nil {
 		b.Fatal(err)

@@ -17,7 +17,7 @@ func TestGenerateEndpoint(t *testing.T) {
 	rt := &runtime.ModelRuntime{}
 	cfg := scheduler.Config{MaxBatchSize: 1, MaxSequences: 1}
 	sched, _ := scheduler.NewScheduler(rt, nil, cfg)
-	
+
 	server := serve.NewServer(sched)
 
 	// Create request payload

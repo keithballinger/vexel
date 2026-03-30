@@ -15,7 +15,7 @@ func TestBatchRuntimeInputs(t *testing.T) {
 		kv.NewSeqKVHandle([]kv.PageIndex{2}),
 		kv.NewSeqKVHandle([]kv.PageIndex{3}),
 	}
-	
+
 	// Create Inputs
 	inputs := runtime.NewBatchRuntimeInputs(inputTokens, handles)
 

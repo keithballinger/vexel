@@ -13,7 +13,7 @@ func TestMmap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Remove(f.Name())
-	
+
 	// Write some data
 	data := []byte("Hello Mmap World")
 	f.Write(data)

@@ -12,8 +12,8 @@ import (
 // Config specifies what to debug during inference.
 type Config struct {
 	// Targeting - what to capture
-	Layers    []int  // Empty = all layers, or specific layer indices
-	Positions []int  // Empty = all positions, or specific positions
+	Layers    []int    // Empty = all layers, or specific layer indices
+	Positions []int    // Empty = all positions, or specific positions
 	Ops       []string // Empty = all ops, or specific: "norm", "qkv", "rope", "sdpa", "wo", "mlp", "add"
 
 	// Output control
@@ -30,24 +30,24 @@ type Config struct {
 
 // TensorSnapshot captures tensor state at a point in inference.
 type TensorSnapshot struct {
-	Layer    int       `json:"layer"`
-	Position int       `json:"position"`
-	Op       string    `json:"op"`
-	Name     string    `json:"name"`
-	Size     int       `json:"size"`
+	Layer    int         `json:"layer"`
+	Position int         `json:"position"`
+	Op       string      `json:"op"`
+	Name     string      `json:"name"`
+	Size     int         `json:"size"`
 	Stats    TensorStats `json:"stats"`
-	Values   []float32 `json:"values,omitempty"` // First N values
-	Flags    []string  `json:"flags,omitempty"`  // Any warnings
+	Values   []float32   `json:"values,omitempty"` // First N values
+	Flags    []string    `json:"flags,omitempty"`  // Any warnings
 }
 
 // TensorStats holds summary statistics for a tensor.
 type TensorStats struct {
-	Min    float32 `json:"min"`
-	Max    float32 `json:"max"`
-	Mean   float32 `json:"mean"`
-	NaN    int     `json:"nan"`
-	Inf    int     `json:"inf"`
-	Zero   int     `json:"zero"`
+	Min  float32 `json:"min"`
+	Max  float32 `json:"max"`
+	Mean float32 `json:"mean"`
+	NaN  int     `json:"nan"`
+	Inf  int     `json:"inf"`
+	Zero int     `json:"zero"`
 }
 
 // Trace holds all snapshots for a single inference run.
@@ -59,11 +59,11 @@ type Trace struct {
 
 // Harness is the main debug controller.
 type Harness struct {
-	config    Config
-	trace     Trace
-	mu        sync.Mutex
-	enabled   bool
-	outFile   *os.File
+	config  Config
+	trace   Trace
+	mu      sync.Mutex
+	enabled bool
+	outFile *os.File
 }
 
 var (

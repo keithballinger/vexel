@@ -22,7 +22,7 @@ func TestRunGraph(t *testing.T) {
 
 	// Create dummy inputs
 	inputs := []tensor.Tensor{} // Mock inputs
-	
+
 	// Create dummy stream
 	stream, _ := b.CreateStream()
 

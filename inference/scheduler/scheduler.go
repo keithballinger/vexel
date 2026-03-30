@@ -68,8 +68,8 @@ type Scheduler struct {
 	config    Config
 	sequences map[SequenceID]*Sequence
 	metrics   SchedulerMetrics
-	cond     *sync.Cond     // Condition variable for reliable concurrent wakeup
-	readyBuf []*Sequence    // Reused buffer for collectReady to avoid per-step allocation
+	cond      *sync.Cond  // Condition variable for reliable concurrent wakeup
+	readyBuf  []*Sequence // Reused buffer for collectReady to avoid per-step allocation
 }
 
 // NewScheduler creates a new Scheduler instance.
@@ -95,7 +95,7 @@ func NewScheduler(rt *runtime.ModelRuntime, tok *tokenizer.Tokenizer, config Con
 		sampler:   s,
 		config:    config,
 		sequences: make(map[SequenceID]*Sequence),
-		cond: sync.NewCond(&sync.Mutex{}),
+		cond:      sync.NewCond(&sync.Mutex{}),
 	}, nil
 }
 
@@ -217,16 +217,16 @@ func (s *Scheduler) formBatches(ready []*Sequence) []*Sequence {
 	if len(ready) == 0 {
 		return nil
 	}
-	
-	// Prioritize: 
+
+	// Prioritize:
 	// 1. Sequences that need prefill (StatePending with prompt)
 	// 2. Decoding sequences
-	
+
 	// Simple FIFO/Round-robin for now
 	if len(ready) <= s.config.MaxBatchSize {
 		return ready
 	}
-	
+
 	return ready[:s.config.MaxBatchSize]
 }
 
@@ -662,7 +662,7 @@ func (s *Scheduler) AddSequence(seq *Sequence) {
 	s.mu.Lock()
 	s.sequences[seq.ID()] = seq
 	s.mu.Unlock()
-	
+
 	// Notify scheduler loop
 	s.wakeUp()
 }

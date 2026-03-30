@@ -17,9 +17,9 @@ func TestCollectReady(t *testing.T) {
 	// Create sequences
 	s1 := NewSequence(1, "Prompt 1") // Pending
 	s2 := NewSequence(2, "Prompt 2")
-	s2.SetState(StateDecoding)       // Decoding
+	s2.SetState(StateDecoding) // Decoding
 	s3 := NewSequence(3, "Prompt 3")
-	s3.SetState(StateFinished)       // Finished
+	s3.SetState(StateFinished) // Finished
 
 	// Add to scheduler directly (simulating admission)
 	if sched.sequences == nil {

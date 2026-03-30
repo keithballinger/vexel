@@ -290,8 +290,8 @@ func TestDequantizeQ5_1(t *testing.T) {
 	// Test 3: scale=0.5, min=1.0, first half q5=2 → dequant = 2*0.5+1 = 2
 	t.Run("with_scale_and_min", func(t *testing.T) {
 		data := make([]byte, 24)
-		binary.LittleEndian.PutUint16(data[0:], 0x3800) // d = 0.5
-		binary.LittleEndian.PutUint16(data[2:], 0x3C00) // m = 1.0
+		binary.LittleEndian.PutUint16(data[0:], 0x3800)     // d = 0.5
+		binary.LittleEndian.PutUint16(data[2:], 0x3C00)     // m = 1.0
 		binary.LittleEndian.PutUint32(data[4:], 0x00000000) // no high bits
 		// qs[0]: low nibble = 2 → q5 for position 0 = 2
 		data[8] = 0x02

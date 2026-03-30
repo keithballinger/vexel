@@ -11,10 +11,10 @@ import (
 // CandidateNode represents a node in the candidate prediction tree.
 // Each node corresponds to a token predicted by a Medusa head.
 type CandidateNode struct {
-	TokenID    int       // predicted token ID
-	Confidence float32   // logit value (before softmax)
-	HeadIdx    int       // which Medusa head predicted this (-1 for root)
-	Depth      int       // depth in tree (0 for root children)
+	TokenID    int     // predicted token ID
+	Confidence float32 // logit value (before softmax)
+	HeadIdx    int     // which Medusa head predicted this (-1 for root)
+	Depth      int     // depth in tree (0 for root children)
 	Children   []*CandidateNode
 	Parent     *CandidateNode
 }

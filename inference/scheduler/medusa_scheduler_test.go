@@ -393,9 +393,9 @@ func TestSelectBestTreePathFullAccept(t *testing.T) {
 
 	// Create 3 candidate paths sorted by confidence
 	paths := []medusa.CandidatePath{
-		{Tokens: []int{3, 1}, Confidence: 9.0},  // best
-		{Tokens: []int{3, 5}, Confidence: 7.0},  // shares prefix
-		{Tokens: []int{7, 1}, Confidence: 5.0},  // different start
+		{Tokens: []int{3, 1}, Confidence: 9.0}, // best
+		{Tokens: []int{3, 5}, Confidence: 7.0}, // shares prefix
+		{Tokens: []int{7, 1}, Confidence: 5.0}, // different start
 	}
 
 	// Verification logits: target confirms [3, 1] + bonus token 6

@@ -34,15 +34,15 @@ func TestThroughputPrefill(t *testing.T) {
 			tokens: []int{1, 15043, 29892, 920, 526}, // BOS + "Hello, how are"
 		},
 		{
-			name: "32_tokens",
+			name:   "32_tokens",
 			tokens: generateTokenSequence(32), // BOS + 31 repeated tokens
 		},
 		{
-			name: "128_tokens",
+			name:   "128_tokens",
 			tokens: generateTokenSequence(128), // BOS + 127 repeated tokens
 		},
 		{
-			name: "385_tokens",
+			name:   "385_tokens",
 			tokens: generateTokenSequence(385), // BOS + 384 repeated tokens
 		},
 	}
@@ -103,8 +103,8 @@ func TestThroughputPrefill(t *testing.T) {
 			)
 
 			results = append(results, prefillResult{
-				seqLen:   seqLen,
-				avgMs:    float64(avgTime.Microseconds()) / 1000,
+				seqLen:    seqLen,
+				avgMs:     float64(avgTime.Microseconds()) / 1000,
 				tokPerSec: tokPerSec,
 			})
 		})
@@ -472,8 +472,8 @@ func TestFusionABComparison(t *testing.T) {
 		fuseMLP        string
 		fuseAddRMSNorm string
 	}{
-		{"fused (FusedMLP+AddRMSNorm)", "", ""},          // default: fusions enabled
-		{"unfused (baseline)", "0", "0"},                   // fusions disabled
+		{"fused (FusedMLP+AddRMSNorm)", "", ""}, // default: fusions enabled
+		{"unfused (baseline)", "0", "0"},        // fusions disabled
 	}
 
 	var results []fusionResult

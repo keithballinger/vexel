@@ -77,21 +77,21 @@ func TestGenerate(t *testing.T) {
 
 func TestGenerate_ServerErrors(t *testing.T) {
 	tests := []struct {
-		name       string
-		status     int
-		respBody   string
+		name        string
+		status      int
+		respBody    string
 		expectedErr string
 	}{
 		{
-			name:       "InternalServerError",
-			status:     http.StatusInternalServerError,
-			respBody:   "Internal error",
+			name:        "InternalServerError",
+			status:      http.StatusInternalServerError,
+			respBody:    "Internal error",
 			expectedErr: "server returned status 500",
 		},
 		{
-			name:       "InvalidJSON",
-			status:     http.StatusOK,
-			respBody:   "{invalid-json}",
+			name:        "InvalidJSON",
+			status:      http.StatusOK,
+			respBody:    "{invalid-json}",
 			expectedErr: "failed to decode response",
 		},
 	}
@@ -164,13 +164,13 @@ func TestStream(t *testing.T) {
 
 func TestStream_ServerErrors(t *testing.T) {
 	tests := []struct {
-		name       string
-		status     int
+		name        string
+		status      int
 		expectedErr string
 	}{
 		{
-			name:       "InternalServerError",
-			status:     http.StatusInternalServerError,
+			name:        "InternalServerError",
+			status:      http.StatusInternalServerError,
 			expectedErr: "server returned status 500",
 		},
 	}

@@ -16,7 +16,7 @@ func TestSchedulerRunLoop(t *testing.T) {
 	}
 	// Note: In a real test, we would mock the runtime's behavior (e.g., verifying DecodeStep is called).
 	// For this loop test, we just want to ensure it starts and stops cleanly via context.
-	rt := &runtime.ModelRuntime{} 
+	rt := &runtime.ModelRuntime{}
 	sched, _ := scheduler.NewScheduler(rt, nil, cfg)
 
 	// Create context with timeout to stop the loop

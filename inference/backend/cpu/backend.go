@@ -38,7 +38,7 @@ func (b *cpuBackend) Matmul(a, bData, out []float32, m, n, k int) {
 	if m < numWorkers {
 		numWorkers = m
 	}
-	
+
 	var wg sync.WaitGroup
 	chunkSize := (m + numWorkers - 1) / numWorkers
 
@@ -48,7 +48,7 @@ func (b *cpuBackend) Matmul(a, bData, out []float32, m, n, k int) {
 		if endRow > m {
 			endRow = m
 		}
-		
+
 		wg.Add(1)
 		go func(start, end int) {
 			defer wg.Done()
@@ -77,7 +77,7 @@ func (b *cpuBackend) MatmulTransposeB(a, bData, out []float32, m, n, k int) {
 	if m < numWorkers {
 		numWorkers = m
 	}
-	
+
 	var wg sync.WaitGroup
 	chunkSize := (m + numWorkers - 1) / numWorkers
 
@@ -87,7 +87,7 @@ func (b *cpuBackend) MatmulTransposeB(a, bData, out []float32, m, n, k int) {
 		if endRow > m {
 			endRow = m
 		}
-		
+
 		wg.Add(1)
 		go func(start, end int) {
 			defer wg.Done()
@@ -121,7 +121,7 @@ func (b *cpuBackend) RMSNorm(x, weight, out []float32, rows, cols int, eps float
 
 		mean := sumSquares / float32(cols)
 		rms := float32(math.Sqrt(float64(mean + eps)))
-		
+
 		for j := 0; j < cols; j++ {
 			out[offset+j] = (x[offset+j] / rms) * weight[j]
 		}

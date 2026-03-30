@@ -21,7 +21,7 @@ func TestHandle(t *testing.T) {
 	if handle.NumPages() != 3 {
 		t.Errorf("Handle should have 3 pages, got %d", handle.NumPages())
 	}
-	
+
 	if handle.Pages()[1] != 2 {
 		t.Errorf("Handle page mismatch")
 	}

@@ -165,6 +165,10 @@ type Backend struct {
 	dequantizeQ8_0ToF32Pipeline unsafe.Pointer
 	sdpaDecodeQ8_0Pipeline      unsafe.Pointer
 
+	// Q5_0 Matmul pipelines (for weight matrices)
+	matvecQ5_0NR2Pipeline       unsafe.Pointer
+	matmulQ5_0BatchedPipeline   unsafe.Pointer
+
 	// Q8_0 Matmul pipelines (for weight matrices)
 	matvecQ8_0NR2Pipeline       unsafe.Pointer
 	matmulQ8_0BatchedPipeline   unsafe.Pointer
@@ -315,6 +319,10 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matvecQ4KF16InPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_f16in_f32"))
 	b.matvecQ4KF16InAddPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_f16in_add_f32"))
 	b.matvecQ4KAddPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_add_f32"))
+
+	// Q5_0 matmul pipelines
+	b.matvecQ5_0NR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q5_0_nr2_f32"))
+	b.matmulQ5_0BatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q5_0_batched_f32"))
 
 	// Q8_0 matmul pipelines
 	b.matvecQ8_0NR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q8_0_nr2_f32"))
@@ -1209,6 +1217,23 @@ func (b *Backend) MatMulQ5_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 				C.int(n), C.int(k))
 		}
 	}
+}
+
+// MatMulQ5_0 performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q5_0 format.
+// B contains raw Q5_0 data (22 bytes per 32 elements: 2 byte f16 scale + 4 byte qh + 16 bytes qs).
+func (b *Backend) MatMulQ5_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	b.profiler.RecordDispatch("MatMulQ5_0")
+	// Always use the batched kernel for ALL batch sizes (including M=1).
+	// Using different kernels for M=1 vs M>1 causes FP32 precision divergence
+	// that compounds through layers for models with large QKV bias (Qwen).
+	if b.matmulQ5_0BatchedPipeline == nil {
+		panic("MatMulQ5_0 called but no matmulQ5_0BatchedPipeline available")
+	}
+	C.metal_matmul_q5_0_batched_f32(b.queue, b.matmulQ5_0BatchedPipeline,
+		unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+		unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
+		unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+		C.int(m), C.int(n), C.int(k))
 }
 
 // MatMulQ8_0 performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q8_0 format.

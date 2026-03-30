@@ -34,8 +34,8 @@ func New(cfg Config) *Client {
 	}
 
 	return &Client{
-		baseURL: cfg.BaseURL,
-		timeout: cfg.Timeout,
+		baseURL:    cfg.BaseURL,
+		timeout:    cfg.Timeout,
 		httpClient: &http.Client{
 			// Timeout: cfg.Timeout, // Don't set timeout on client for streaming
 		},

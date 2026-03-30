@@ -13,7 +13,7 @@ func TestKVCachePaging(t *testing.T) {
 	blockLen := 16
 	maxBlocks := 10
 	config := NewKVConfig(tensor.Float32, headDim, blockLen)
-	
+
 	// Pre-calculate size and add arena
 	totalBytes := config.BlockBytes() * maxBlocks
 	ctx.AddArena(memory.KV, totalBytes)

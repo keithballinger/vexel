@@ -14,8 +14,8 @@ type KVPrecision int
 
 const (
 	KVPrecisionFP32 KVPrecision = iota // 4 bytes per element
-	KVPrecisionFP16                     // 2 bytes per element (2x savings)
-	KVPrecisionQ8_0                     // 34 bytes per 32 elements (4x savings)
+	KVPrecisionFP16                    // 2 bytes per element (2x savings)
+	KVPrecisionQ8_0                    // 34 bytes per 32 elements (4x savings)
 )
 
 // Q8_0 format constants
@@ -226,9 +226,9 @@ func (c *GPUKVCache) AppendKV(layerIdx int, kPtr, vPtr tensor.DevicePtr, srcDTyp
 	//   src offset: t * numKVHeads * headDim + h * headDim
 	//   dst offset: h * maxSeqLen * headDim + (seqLen + t) * headDim
 
-	headSize := c.headDim * bytesPerElement           // bytes per head per position
-	srcHeadStride := c.numKVHeads * c.headDim         // elements between same head in different tokens
-	dstHeadStride := c.maxSeqLen * c.headDim          // elements between heads in cache (in elements)
+	headSize := c.headDim * bytesPerElement   // bytes per head per position
+	srcHeadStride := c.numKVHeads * c.headDim // elements between same head in different tokens
+	dstHeadStride := c.maxSeqLen * c.headDim  // elements between heads in cache (in elements)
 	dstHeadStrideBytes := dstHeadStride * bytesPerElement
 
 	for t := 0; t < newTokens; t++ {

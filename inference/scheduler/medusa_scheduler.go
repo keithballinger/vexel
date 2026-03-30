@@ -632,7 +632,6 @@ func (ms *MedusaScheduler) runMedusaDecodeStep(ctx context.Context, batch []*Seq
 		finalToken = ms.sampler.Sample(targetLogits)
 	}
 
-
 	ms.recordAcceptance(numAccepted)
 
 	// Step 6: Truncate KV cache to only keep accepted tokens

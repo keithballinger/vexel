@@ -79,10 +79,10 @@ func TimeOp(name string) func() {
 
 // ProfileEntry represents timing data for a single operation.
 type ProfileEntry struct {
-	Name    string
-	Total   time.Duration
-	Count   int
-	AvgUs   float64
+	Name  string
+	Total time.Duration
+	Count int
+	AvgUs float64
 }
 
 // GetProfileData returns a copy of the current profiling data.

@@ -8,7 +8,7 @@ import (
 
 func TestInferenceContext(t *testing.T) {
 	loc := tensor.CPU
-	
+
 	// Create context
 	ctx := memory.NewInferenceContext(loc)
 

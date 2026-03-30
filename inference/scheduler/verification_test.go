@@ -158,8 +158,8 @@ func TestVerifyDraftProbabilityAcceptance(t *testing.T) {
 	// probs ≈ [0.681, 0.251, 0.034, 0.034]
 	// argmax = token 0 (not 1!), but prob(1) = 0.251 >= draftProb 0.1 → ACCEPT
 	allLogits := make([]float32, 2*vocabSize)
-	allLogits[0*vocabSize+0] = 3.0 // target prefers token 0
-	allLogits[0*vocabSize+1] = 2.0 // token 1 has decent probability
+	allLogits[0*vocabSize+0] = 3.0            // target prefers token 0
+	allLogits[0*vocabSize+1] = 2.0            // token 1 has decent probability
 	allLogits[1*vocabSize+7%vocabSize] = 10.0 // bonus
 
 	s := sampler.New(sampler.Config{Temperature: 0}, 42)
@@ -519,18 +519,18 @@ func TestSpeedupCalculation(t *testing.T) {
 		steps    int
 		want     float64
 	}{
-		{"no_steps", 0, 0, 1.0},           // no speculation = 1x
-		{"all_rejected", 0, 5, 1.0},        // 0+5/5 = 1.0x
-		{"2x_speedup", 5, 5, 2.0},          // 5+5/5 = 2.0x
-		{"3x_speedup", 20, 10, 3.0},        // 20+10/10 = 3.0x
-		{"near_perfect", 36, 4, 10.0},       // 36+4/4 = 10.0x
+		{"no_steps", 0, 0, 1.0},       // no speculation = 1x
+		{"all_rejected", 0, 5, 1.0},   // 0+5/5 = 1.0x
+		{"2x_speedup", 5, 5, 2.0},     // 5+5/5 = 2.0x
+		{"3x_speedup", 20, 10, 3.0},   // 20+10/10 = 3.0x
+		{"near_perfect", 36, 4, 10.0}, // 36+4/4 = 10.0x
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := SpeculativeMetrics{
-				DraftTokensAccepted:  tt.accepted,
-				VerificationSteps:    tt.steps,
+				DraftTokensAccepted: tt.accepted,
+				VerificationSteps:   tt.steps,
 			}
 			got := m.Speedup()
 			if math.Abs(got-tt.want) > 1e-6 {

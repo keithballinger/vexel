@@ -23,7 +23,7 @@ func TestKVConfig(t *testing.T) {
 	if cfg.BlockLen != blockLen {
 		t.Errorf("KVConfig.BlockLen = %v, want %v", cfg.BlockLen, blockLen)
 	}
-	
+
 	// Test BlockBytes calculation
 	// 2 for FP16 * 128 head dim * 16 block len * 2 (K and V) = 8192 bytes
 	expectedBytes := 2 * headDim * blockLen * 2

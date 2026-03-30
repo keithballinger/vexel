@@ -114,11 +114,11 @@ type ModelConfig struct {
 	HasBias          bool     // Whether model has bias terms in all projections (Phi-2)
 	HasQKVBias       bool     // Whether model has bias terms in Q/K/V projections only (Qwen2)
 	ParallelResidual bool     // True for parallel residual (Phi): x + attn(norm(x)) + mlp(norm(x))
-	                          // False for serial residual (LLaMA): x + attn(norm1(x)), then x + mlp(norm2(x))
-	RoPEDim          int      // Dimensions to apply RoPE to (0 = full headDim for LLaMA-style)
-	                          // Phi-2 uses partial RoPE where only first 32 dims of 80 are rotated
-	RoPENeox         bool     // Use NEOX-style RoPE (split pairs: i, i+dim/2) vs LLaMA-style (interleaved: 2i, 2i+1)
-	SlidingWindow       int                // Sliding window size for attention (0 = infinite/full context)
+	// False for serial residual (LLaMA): x + attn(norm1(x)), then x + mlp(norm2(x))
+	RoPEDim int // Dimensions to apply RoPE to (0 = full headDim for LLaMA-style)
+	// Phi-2 uses partial RoPE where only first 32 dims of 80 are rotated
+	RoPENeox            bool                // Use NEOX-style RoPE (split pairs: i, i+dim/2) vs LLaMA-style (interleaved: 2i, 2i+1)
+	SlidingWindow       int                 // Sliding window size for attention (0 = infinite/full context)
 	AttentionWindowType AttentionWindowType // Window pattern: Global (default), Sliding (all layers), Alternating (even=global, odd=sliding)
 
 	// Head dimension override (0 = hiddenSize/numAttentionHeads).
@@ -247,7 +247,7 @@ func (c ModelConfig) ApproxParams() int64 {
 	// K: Hidden * (Hidden * KV / Heads) -> Hidden * HeadDim * KV
 	// V: Hidden * HeadDim * KV
 	// O: Hidden * Hidden
-	
+
 	headDim := int64(c.EffectiveHeadDim())
 	kvSize := headDim * int64(c.NumKeyValueHeads)
 	qSize2 := headDim * int64(c.NumAttentionHeads)
@@ -255,14 +255,14 @@ func (c ModelConfig) ApproxParams() int64 {
 	attn := int64(c.HiddenSize)*qSize2 + // Q
 		int64(c.HiddenSize)*kvSize + // K
 		int64(c.HiddenSize)*kvSize + // V
-		qSize2*int64(c.HiddenSize)   // O
+		qSize2*int64(c.HiddenSize) // O
 
 	// MLP:
 	// Gate, Up, Down
 	// Gate: Hidden * Intermediate
 	// Up: Hidden * Intermediate
 	// Down: Intermediate * Hidden
-	mlp := int64(c.HiddenSize)*int64(c.IntermediateSize)*3
+	mlp := int64(c.HiddenSize) * int64(c.IntermediateSize) * 3
 
 	// Norms (RMSNorm is usually just Hidden size per layer x 2 for Attn/MLP norm)
 	// We ignore small params like norms for "Approx" usually, but let's add them for fun.
@@ -279,7 +279,7 @@ func (c ModelConfig) ApproxParams() int64 {
 // WeightsBytes calculates the memory required for weights given a quantization profile.
 func (c ModelConfig) WeightsBytes(profile tensor.QuantProfile) int64 {
 	params := c.ApproxParams()
-	
+
 	switch profile {
 	case tensor.QuantNone:
 		return params * 2
@@ -299,11 +299,11 @@ func (c ModelConfig) KVBytes(activeSequences int, contextLen int, profile tensor
 
 	// Elements per token = 2 (Key + Value) * Layers * KVHeads * HeadDim
 	elementsPerToken := 2 * int64(c.NumHiddenLayers) * int64(c.NumKeyValueHeads) * headDim
-	
+
 	totalTokens := int64(activeSequences) * int64(contextLen)
-	
+
 	var bytesPerElem int64 = 2 // Default BF16
-	
+
 	return elementsPerToken * totalTokens * bytesPerElem
 }
 
@@ -316,18 +316,18 @@ func (c ModelConfig) ScratchBytes(maxBatchSize int) int64 {
 
 	// Calculate GQA-aware sizes (headDim may differ from hiddenSize/numHeads for Gemma 2)
 	headDim := int64(c.EffectiveHeadDim())
-	qSize := int64(maxBatchSize) * int64(c.NumAttentionHeads) * headDim     // Q buffer
-	kvSize := int64(maxBatchSize) * int64(c.NumKeyValueHeads) * headDim     // K and V buffers (each)
+	qSize := int64(maxBatchSize) * int64(c.NumAttentionHeads) * headDim // Q buffer
+	kvSize := int64(maxBatchSize) * int64(c.NumKeyValueHeads) * headDim // K and V buffers (each)
 
 	// Scratch layout for BlockRuntime.Execute:
 	// [normOut][Q][K][V][attnOut][scores][gate][up][fusedMLPTemp]
 	// All buffers are allocated at once (no reuse during execution)
 	normOut := int64(maxBatchSize) * int64(c.HiddenSize)
-	attnOut := qSize                                                         // Same size as Q
-	scores := int64(maxBatchSize) * int64(maxBatchSize)                      // seqLen x seqLen per head (reused)
+	attnOut := qSize                                    // Same size as Q
+	scores := int64(maxBatchSize) * int64(maxBatchSize) // seqLen x seqLen per head (reused)
 	gate := int64(maxBatchSize) * int64(c.IntermediateSize)
 	up := int64(maxBatchSize) * int64(c.IntermediateSize)
-	fusedMLPTemp := int64(maxBatchSize) * int64(c.IntermediateSize) * 2      // Fused W1W3 output before deinterleave
+	fusedMLPTemp := int64(maxBatchSize) * int64(c.IntermediateSize) * 2 // Fused W1W3 output before deinterleave
 
 	// Total scratch needed for BlockRuntime.Execute
 	blockScratch := normOut + qSize + kvSize + kvSize + attnOut + scores + gate + up + fusedMLPTemp
@@ -357,10 +357,10 @@ func (c ModelConfig) ScratchBytes(maxBatchSize int) int64 {
 // The maxBatchSize should be the maximum number of tokens in any single forward pass,
 // including prefill (where batchSize = prompt length). Use max(maxPromptLen, maxGenBatch).
 func (c ModelConfig) TotalArenaBytes(maxBatchSize int) int64 {
-	tokenBytes := int64(maxBatchSize) * 4                          // int32 token IDs
-	stateBytes := int64(maxBatchSize) * int64(c.HiddenSize) * 4   // [batch, hidden] float32
-	scratchBytes := c.ScratchBytes(maxBatchSize)                   // layer scratch (Q/K/V/scores/gate/up)
-	logitsBytes := int64(c.VocabSize) * 4                          // [1, vocab] float32 output logits
+	tokenBytes := int64(maxBatchSize) * 4                       // int32 token IDs
+	stateBytes := int64(maxBatchSize) * int64(c.HiddenSize) * 4 // [batch, hidden] float32
+	scratchBytes := c.ScratchBytes(maxBatchSize)                // layer scratch (Q/K/V/scores/gate/up)
+	logitsBytes := int64(c.VocabSize) * 4                       // [1, vocab] float32 output logits
 
 	total := tokenBytes + stateBytes + scratchBytes + logitsBytes
 
@@ -403,11 +403,11 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 	mlpType := MLPSwiGLU
 	hasBias := false
 	parallelResidual := false
-	ropeNeox := false         // Default to LLaMA-style (interleaved pairs)
-	attnLogitSoftCap := float32(0)         // 0 = disabled, typically 30.0 for Gemma 2
-	attnWindowType := WindowGlobal         // Default: full context on every layer
-	hasPostNorms := false                  // Default: no post-norms
-	embeddingScale := float32(0)           // 0 = disabled, Gemma uses sqrt(hiddenSize)
+	ropeNeox := false              // Default to LLaMA-style (interleaved pairs)
+	attnLogitSoftCap := float32(0) // 0 = disabled, typically 30.0 for Gemma 2
+	attnWindowType := WindowGlobal // Default: full context on every layer
+	hasPostNorms := false          // Default: no post-norms
+	embeddingScale := float32(0)   // 0 = disabled, Gemma uses sqrt(hiddenSize)
 
 	hasQKVBias := false
 
@@ -488,26 +488,26 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 	}
 
 	return ModelConfig{
-		HiddenSize:        g.HiddenSize,
-		IntermediateSize:  g.IntermediateSize,
-		NumHiddenLayers:   g.NumLayers,
-		NumAttentionHeads: g.NumHeads,
-		NumKeyValueHeads:  g.NumKVHeads,
-		VocabSize:         g.VocabSize,
-		MaxSeqLen:         maxSeqLen,
-		RoPETheta:         ropeTheta,
-		RMSNormEPS:        rmsNormEPS,
-		DType:             tensor.Float32, // We dequantize to F32 for CPU
-		NormType:          normType,
-		MLPType:           mlpType,
-		HasBias:           hasBias,
-		HasQKVBias:        hasQKVBias,
-		ParallelResidual:  parallelResidual,
-		RoPEDim:           g.RoPEDimCount, // 0 = full headDim, otherwise partial RoPE
+		HiddenSize:            g.HiddenSize,
+		IntermediateSize:      g.IntermediateSize,
+		NumHiddenLayers:       g.NumLayers,
+		NumAttentionHeads:     g.NumHeads,
+		NumKeyValueHeads:      g.NumKVHeads,
+		VocabSize:             g.VocabSize,
+		MaxSeqLen:             maxSeqLen,
+		RoPETheta:             ropeTheta,
+		RMSNormEPS:            rmsNormEPS,
+		DType:                 tensor.Float32, // We dequantize to F32 for CPU
+		NormType:              normType,
+		MLPType:               mlpType,
+		HasBias:               hasBias,
+		HasQKVBias:            hasQKVBias,
+		ParallelResidual:      parallelResidual,
+		RoPEDim:               g.RoPEDimCount, // 0 = full headDim, otherwise partial RoPE
 		RoPENeox:              ropeNeox,       // NEOX-style (split) vs LLaMA-style (interleaved) RoPE
 		SlidingWindow:         g.SlidingWindow,
 		AttentionWindowType:   attnWindowType,
-		HeadDim:               g.HeadDim,         // 0 = derive from hiddenSize/numHeads
+		HeadDim:               g.HeadDim, // 0 = derive from hiddenSize/numHeads
 		AttentionLogitSoftCap: attnLogitSoftCap,
 		FinalLogitSoftCap:     g.FinalLogitSoftCap,
 		HasPostNorms:          hasPostNorms,

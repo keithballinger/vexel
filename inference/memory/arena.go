@@ -13,16 +13,16 @@ type AllocFunc func(bytes int) tensor.DevicePtr
 // For CPU: uses a single contiguous buffer with offset-based sub-allocation.
 // For GPU: allocates individual buffers per request (like candle's approach).
 type Arena struct {
-	loc        tensor.Location
-	kind       ArenaKind
-	basePtr    uintptr
-	size       int
-	offset     int
+	loc     tensor.Location
+	kind    ArenaKind
+	basePtr uintptr
+	size    int
+	offset  int
 	// For CPU simulation, we keep the slice alive
-	cpuBuffer  []byte
+	cpuBuffer []byte
 	// For GPU, we store the DevicePtr and allocator function
-	devicePtr  tensor.DevicePtr
-	allocFunc  AllocFunc
+	devicePtr tensor.DevicePtr
+	allocFunc AllocFunc
 }
 
 // NewArena creates a new memory arena for CPU.

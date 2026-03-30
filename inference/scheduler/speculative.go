@@ -166,7 +166,7 @@ func (sd *SpeculativeDecoder) VerifyDraftTokens(
 
 	// Run target model on all tokens at once
 	// No reset needed - we append to the existing cache context
-	
+
 	logits, err := sd.targetModel.DecodeWithGPUKV(verifyTokens, startPos)
 	if err != nil {
 		return 0, 0, nil, err
@@ -326,7 +326,7 @@ type SelfSpeculativeConfig struct {
 // DefaultSelfSpeculativeConfig returns reasonable defaults for self-speculation.
 func DefaultSelfSpeculativeConfig() SelfSpeculativeConfig {
 	return SelfSpeculativeConfig{
-		DraftLayers:    8,  // Use first 8 layers for draft
-		NumDraftTokens: 4,  // Generate 4 draft tokens
+		DraftLayers:    8, // Use first 8 layers for draft
+		NumDraftTokens: 4, // Generate 4 draft tokens
 	}
 }

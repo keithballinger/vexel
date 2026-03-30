@@ -12,7 +12,7 @@ func TestTensor(t *testing.T) {
 	// For testing, we use a dummy pointer address
 	ptrAddr := uintptr(0xDEADBEEF)
 	devicePtr := tensor.NewDevicePtr(tensor.CPU, ptrAddr)
-	
+
 	// Test creating a new Tensor
 	// Ideally, we'd have a factory method or a direct struct initializer
 	// Let's assume a NewTensor function for now

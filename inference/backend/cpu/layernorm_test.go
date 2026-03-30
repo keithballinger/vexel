@@ -9,7 +9,7 @@ import (
 
 func TestLayerNorm(t *testing.T) {
 	b := cpu.NewCPUBackend()
-	
+
 	rows, cols := 2, 4
 	eps := float32(1e-5)
 
@@ -24,13 +24,13 @@ func TestLayerNorm(t *testing.T) {
 	wPtr := b.Alloc(len(weight) * 4)
 	bPtr := b.Alloc(len(bias) * 4)
 	outPtr := b.Alloc(len(input) * 4)
-	
+
 	b.ToDevice(xPtr, tensor.Float32ToBytes(input))
 	b.ToDevice(wPtr, tensor.Float32ToBytes(weight))
 	b.ToDevice(bPtr, tensor.Float32ToBytes(bias))
 
 	b.LayerNorm(xPtr, wPtr, bPtr, outPtr, rows, cols, eps)
-	
+
 	resultBytes := make([]byte, len(input)*4)
 	b.ToHost(resultBytes, outPtr)
 	result := tensor.BytesToFloat32(resultBytes)
@@ -40,12 +40,12 @@ func TestLayerNorm(t *testing.T) {
 	// Var = ((1-2.5)^2 + (2-2.5)^2 + (3-2.5)^2 + (4-2.5)^2)/4 = (2.25 + 0.25 + 0.25 + 2.25)/4 = 1.25
 	// Out[0] = (1 - 2.5) / sqrt(1.25 + 1e-5) * weight[0] + bias[0]
 	// Out[0] = -1.5 / 1.11803 * 1.0 + 0.1 = -1.34164 + 0.1 = -1.24164
-	
+
 	expected0 := float32((1.0-2.5)/math.Sqrt(1.25+1e-5)*1.0 + 0.1)
 	if math.Abs(float64(result[0]-expected0)) > 1e-5 {
 		t.Errorf("LayerNorm row 0 mismatch: got %f, want %f", result[0], expected0)
 	}
-	
+
 	// Check row 1
 	// Mean = (-1+0+1+2)/4 = 0.5
 	// Var = ((-1-0.5)^2 + (0-0.5)^2 + (1-0.5)^2 + (2-0.5)^2)/4 = (2.25 + 0.25 + 0.25 + 2.25)/4 = 1.25

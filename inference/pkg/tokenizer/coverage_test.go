@@ -24,12 +24,12 @@ func TestTinyLlamaTokenizer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode failed: %v", err)
 	}
-	
+
 	decoded, err := tok.Decode(ids)
 	if err != nil {
 		t.Fatalf("Decode failed: %v", err)
 	}
-	
+
 	if decoded != input {
 		t.Errorf("Round trip failed. Got %q, want %q", decoded, input)
 	}
@@ -70,15 +70,15 @@ func TestTinyLlamaTokenizer(t *testing.T) {
 	// if it's not in vocab, it should be encoded as <0x07>
 	// Actually most BPE vocabularies include all 256 bytes or handle them.
 	// But let's try to verify decoding of <0x0A> manually to hit decodeSpecialChars regex.
-	
+
 	// Manually construct IDs for <0x0A> if possible, or just test the decodeSpecialChars function indirectly via Decode
 	// if we can force it.
 	// Let's rely on Decode test for regex coverage.
 	// "Hello\nWorld" -> \n might be encoded as <0x0A> or as a token containing newline.
-	
+
 	// Test byte token decoding directly by injecting a byte token into Decode if possible.
 	// We can't easily inject arbitrary IDs that aren't in vocab without mocking, but Load() fills vocab from file.
-	
+
 	// Let's try to encode a string with newline and see if it hits the byte logic or vocab match.
 	newlineInput := "Line1\nLine2"
 	nlIds, _ := tok.Encode(newlineInput)

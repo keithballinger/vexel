@@ -19,7 +19,7 @@ func TestDecodeStepSignature(t *testing.T) {
 
 	// Create inputs
 	inputs := runtime.NewBatchRuntimeInputs(
-		[]int{1}, 
+		[]int{1},
 		[]*kv.SeqKVHandle{kv.NewSeqKVHandle([]kv.PageIndex{0})},
 	)
 

@@ -11,7 +11,7 @@ func ToFloat32Slice(t Tensor) []float32 {
 	if t.DevicePtr().IsNil() {
 		return nil
 	}
-	
+
 	// Create slice header
 	count := t.NumElements()
 	var sl = struct {

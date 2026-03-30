@@ -11,7 +11,7 @@ func TestRealModelLoading(t *testing.T) {
 	// Check if model exists
 	cwd, _ := os.Getwd()
 	// Navigate up to root from inference/runtime
-	root := filepath.Join(cwd, "../..") 
+	root := filepath.Join(cwd, "../..")
 	modelPath := filepath.Join(root, "models", "tiny_model.safetensors")
 
 	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
@@ -29,6 +29,6 @@ func TestRealModelLoading(t *testing.T) {
 	if err := rt.LoadWeights(modelPath); err != nil {
 		t.Fatalf("Failed to load real weights: %v", err)
 	}
-	
+
 	t.Log("Successfully parsed TinyLlama safetensors header!")
 }

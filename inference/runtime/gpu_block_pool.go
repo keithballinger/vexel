@@ -533,8 +533,8 @@ func (g *GPUBlockPool) GatherKV(layerIdx int, seqID int64, totalTokens int) (kOu
 	}
 
 	kvElems := g.numKVHeads * g.headDim                       // elements per token
-	blockKVBytes := g.blockSize * kvElems * g.bytesPerElement  // bytes for K (or V) in one block
-	poolBlockBytes := 2 * blockKVBytes                         // K + V per physical block
+	blockKVBytes := g.blockSize * kvElems * g.bytesPerElement // bytes for K (or V) in one block
+	poolBlockBytes := 2 * blockKVBytes                        // K + V per physical block
 	outBytes := totalTokens * kvElems * g.bytesPerElement
 
 	kOut = g.allocPerm(outBytes)

@@ -17,10 +17,10 @@ func TestFormBatches(t *testing.T) {
 	// Create 3 sequences
 	s1 := NewSequence(1, "1")
 	s1.SetState(StatePending)
-	
+
 	s2 := NewSequence(2, "2")
 	s2.SetState(StateDecoding)
-	
+
 	s3 := NewSequence(3, "3")
 	s3.SetState(StateDecoding)
 
@@ -30,7 +30,7 @@ func TestFormBatches(t *testing.T) {
 	// Since MaxBatchSize is 2, we expect a batch of size 2.
 	// We might also expect it to prioritize decoding over prefill, or FIFO.
 	// For now, let's just check the size constraint.
-	
+
 	batch := sched.formBatches(ready)
 
 	if len(batch) > cfg.MaxBatchSize {
