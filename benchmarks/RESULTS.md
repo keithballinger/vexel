@@ -1,22 +1,26 @@
-# Benchmark Results & Optimization Roadmap
+# Benchmark Results
 
 > Hardware: Apple M4 Max, 128 GB Unified Memory, 40 GPU cores, Metal 4
-> Models: LLaMA 3.1 8B Q4_K_M, TinyLlama 1.1B Q4_0, Qwen 2.5 0.5B Q4_K_M
-> llama.cpp: b8534 (e99d77fa4), mlx-lm: 0.31.1
-> Last updated: 2026-03-28
+> Models: LLaMA 3.1 8B Q4_K_M, TinyLlama 1.1B Q4_0
+> llama.cpp: b8534 (e99d77fa4)
+> Last updated: 2026-03-29 (accuracy-verified benchmarks)
 
 ## Current Results (2026-03-29, M4 Max)
 
-### Standard Decode (GPU KV cache, greedy)
+### Standard Decode (GPU KV cache, greedy, temp=0)
 
 | Model | Vexel tok/s | llama.cpp tok/s | vs llama.cpp |
 |-------|------------|----------------|--------------|
-| **LLaMA 3.1 8B Q4_K_M** | **66.6** | 42.4 | **+57%** |
-| **TinyLlama 1.1B Q4_0** | **343.8** | 323.3 | **+6%** |
-| Qwen 2.5 0.5B Q4_K_M | 143.4 | 342.2 | -58% |
+| **LLaMA 3.1 8B Q4_K_M** | **65.7** | 51.1 | **+28%** |
+| **TinyLlama 1.1B Q4_0** | **347** | 326 | **+6%** |
 
-Vexel is fastest on 8B+ models. llama.cpp has an edge on very small models
-(0.5B) likely due to CPU REPACK optimization.
+All benchmarks verified with correct output (accuracy validated against
+llama.cpp). Best of 3 runs, 50-token generation.
+
+**Note on previous results**: Earlier benchmarks showed +57% for LLaMA 8B.
+This was inflated because the fused FP16 QKV path was incorrectly enabled
+for mixed Q4_K/Q6_K weight matrices, producing wrong output but running faster.
+The current 28% advantage reflects honest, accuracy-verified performance.
 
 ### Paged KV Cache Decode
 
@@ -136,9 +140,20 @@ Memory usage is comparable. MLX is slightly lower due to Python lazy evaluation.
 
 | Engine | Decode tok/s | vs Vexel | Language | Format |
 |--------|-------------|----------|----------|--------|
-| **Vexel** | **66.6** | baseline | Go | GGUF |
-| llama.cpp | 42.4 | -36% | C++ | GGUF |
-| MLX | 35.6 | -47% | Python | safetensors |
+| **Vexel** | **65.7** | baseline | Go | GGUF |
+| llama.cpp | 51.1 | -22% | C++ | GGUF |
+| MLX | 35.6 | -46% | Python | safetensors |
+
+### Known Limitations
+
+- **Prefill deadlock**: LLaMA 8B hangs for prompts > ~16 tokens. Each dispatch
+  calls `waitUntilCompleted` individually; 32 layers × 12+ dispatches creates
+  hundreds of blocking waits that can deadlock Metal's command queue. Requires
+  a Metal-level fix (batched prefill or fire-and-forget commits).
+- **Prefill speed**: 10-40 tok/s (vs llama.cpp 70-1300 tok/s) due to per-dispatch
+  waitUntilCompleted. llama.cpp batches all prefill operations efficiently.
+- **Scratch allocator**: Disabled by default. The Q4_K fused decode path has
+  remaining offset issues. Q4_0 models work correctly with scratch enabled.
 
 ---
 
