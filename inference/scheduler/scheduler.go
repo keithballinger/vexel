@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	goruntime "runtime"
 	"sync"
 	"time"
 	"unsafe"
@@ -123,6 +124,12 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			return err
 		}
 
+		// Brief yield after each step to allow token delivery to consumers.
+		// CGO calls in Metal GPU operations don't trigger Go scheduler preemption,
+		// so without an explicit sleep the scheduler goroutine can monopolize the
+		// OS thread and prevent the main goroutine from reading generated tokens.
+		time.Sleep(100 * time.Microsecond)
+
 		// If sequences remain, loop immediately
 		if s.SequenceCount() > 0 {
 			continue
@@ -159,6 +166,18 @@ func (s *Scheduler) step(ctx context.Context) error {
 	// 2. Form batch
 	batch := s.formBatches(ready)
 	if len(batch) == 0 {
+		// No ready sequences — clean up finished ones and yield to avoid
+		// busy-looping. Without this, the scheduler goroutine spins indefinitely
+		// on finished sequences, starving the main goroutine from receiving the
+		// channel close notification.
+		s.mu.Lock()
+		for id, seq := range s.sequences {
+			if seq.State() == StateFinished {
+				delete(s.sequences, id)
+			}
+		}
+		s.mu.Unlock()
+		goruntime.Gosched()
 		return nil
 	}
 

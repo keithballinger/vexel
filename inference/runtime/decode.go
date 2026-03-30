@@ -764,6 +764,13 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 		}
 	}
 
+	// For prefill (no outer batch), Sync to ensure all per-layer batches completed
+	// before extracting the last token's hidden state for logits computation.
+	// For decode, the deferred EndBatch from the outer cross-layer batch handles this.
+	if batchSize > 1 {
+		m.backend.Sync()
+	}
+
 	// Timing: mark end of layer loop
 	var tLayersEnd time.Time
 	if decodeTimingActive.Load() {

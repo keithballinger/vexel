@@ -1071,12 +1071,12 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		return x, nil
 	}
 
-	// Command buffer batching for decode only. For prefill (seqLen>1),
-	// individual dispatches with finish_encode ensure each kernel completes within
-	// Metal's GPU timeout. Batching prefill dispatches can cause timeout kills
-	// when large matmuls (8+ tokens × full hidden size) exceed the per-buffer limit.
-	prefillSeqLen := x.Shape().NumElements() / b.HiddenSize
-	useBatching := b.batcher != nil && !cachedGPUProfile && prefillSeqLen == 1
+	// Command buffer batching for both decode and prefill.
+	// Decode: nested within outer batch from DecodeWithGPUKV (layers share one encoder).
+	// Prefill: each layer gets its own batch (BeginBatch → ~18 dispatches → EndBatch → commit).
+	// Per-layer batching reduces prefill from 576 individual waitUntilCompleted calls to
+	// 32 non-blocking commits, fixing the deadlock for >16 token prompts on 32-layer models.
+	useBatching := b.batcher != nil && !cachedGPUProfile
 
 	if useBatching {
 		b.batcher.BeginBatch()
