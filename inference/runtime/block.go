@@ -1519,6 +1519,12 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		capture("kv", "fullV", fullVPtr, fullSeqLen*numKVHeads*headDim)
 	}
 
+	// Barrier: SDPA reads KV cache buffers written by ScatterKV above.
+	// Without this, the GPU may execute SDPA before scatter completes,
+	// reading stale cache data. Critical for models with large K values
+	// (Qwen: ~130) where stale data causes completely wrong attention.
+	barrier()
+
 	// 5. Attention: Q @ K^T -> softmax -> @ V
 	scale := float32(1.0 / sqrt(float64(headDim)))
 
