@@ -3,7 +3,7 @@
 > Hardware: Apple M4 Max, 128 GB Unified Memory, 40 GPU cores, Metal 4
 > Models: LLaMA 3.1 8B Q4_K_M, TinyLlama 1.1B Q4_0
 > llama.cpp: b8534 (e99d77fa4)
-> Last updated: 2026-03-29 (accuracy-verified benchmarks)
+> Last updated: 2026-03-29 (re-benchmarked, accuracy-verified)
 
 ## Current Results (2026-03-29, M4 Max)
 
@@ -11,8 +11,8 @@
 
 | Model | Vexel tok/s | llama.cpp tok/s | vs llama.cpp |
 |-------|------------|----------------|--------------|
-| **LLaMA 3.1 8B Q4_K_M** | **65.7** | 51.1 | **+28%** |
-| **TinyLlama 1.1B Q4_0** | **347** | 326 | **+6%** |
+| **LLaMA 3.1 8B Q4_K_M** | **65.9** | 52.5 | **+26%** |
+| **TinyLlama 1.1B Q4_0** | **320.8** | — | — |
 
 All benchmarks verified with correct output (accuracy validated against
 llama.cpp). Best of 3 runs, 50-token generation.
@@ -20,7 +20,19 @@ llama.cpp). Best of 3 runs, 50-token generation.
 **Note on previous results**: Earlier benchmarks showed +57% for LLaMA 8B.
 This was inflated because the fused FP16 QKV path was incorrectly enabled
 for mixed Q4_K/Q6_K weight matrices, producing wrong output but running faster.
-The current 28% advantage reflects honest, accuracy-verified performance.
+The current 26% advantage reflects honest, accuracy-verified performance.
+
+### Prefill Throughput
+
+| Model | Prompt tokens | Prefill tok/s | Decode tok/s |
+|-------|--------------|---------------|--------------|
+| **TinyLlama 1.1B Q4_0** | 15 | **606.9** | 309.9 |
+| **TinyLlama 1.1B Q4_0** | 1 | **151.9** | 320.8 |
+| **LLaMA 3.1 8B Q4_K_M** | 1 | **22.2** | 65.9 |
+| LLaMA 3.1 8B Q4_K_M | 15 | HUNG | — |
+
+TinyLlama prefill scales well (607 tok/s at 15 tokens). LLaMA 8B still
+deadlocks on prompts longer than ~16 tokens (see Known Limitations).
 
 ### Paged KV Cache Decode
 
@@ -140,8 +152,8 @@ Memory usage is comparable. MLX is slightly lower due to Python lazy evaluation.
 
 | Engine | Decode tok/s | vs Vexel | Language | Format |
 |--------|-------------|----------|----------|--------|
-| **Vexel** | **65.7** | baseline | Go | GGUF |
-| llama.cpp | 51.1 | -22% | C++ | GGUF |
+| **Vexel** | **65.9** | baseline | Go | GGUF |
+| llama.cpp | 52.5 | -20% | C++ | GGUF |
 | MLX | 35.6 | -46% | Python | safetensors |
 
 ### Known Limitations
@@ -150,8 +162,8 @@ Memory usage is comparable. MLX is slightly lower due to Python lazy evaluation.
   calls `waitUntilCompleted` individually; 32 layers × 12+ dispatches creates
   hundreds of blocking waits that can deadlock Metal's command queue. Requires
   a Metal-level fix (batched prefill or fire-and-forget commits).
-- **Prefill speed**: 10-40 tok/s (vs llama.cpp 70-1300 tok/s) due to per-dispatch
-  waitUntilCompleted. llama.cpp batches all prefill operations efficiently.
+- **Prefill speed (LLaMA 8B)**: 20-22 tok/s for short prompts (vs llama.cpp
+  67-70 tok/s). TinyLlama prefill is much better at 607 tok/s for 15 tokens.
 - **Scratch allocator**: Disabled by default. The Q4_K fused decode path has
   remaining offset issues. Q4_0 models work correctly with scratch enabled.
 
@@ -159,12 +171,12 @@ Memory usage is comparable. MLX is slightly lower due to Python lazy evaluation.
 
 ## Vexel's Competitive Advantages
 
-On the M4 Max, Vexel is **87% faster** than Apple MLX and **57% faster** than
+On the M4 Max, Vexel is **85% faster** than Apple MLX and **26% faster** than
 llama.cpp on LLaMA 3.1 8B decode, with better context scaling (<6% degradation
 at ctx=1024).
 
-1. **87% faster than MLX** on LLaMA 3.1 8B 4-bit (66.6 vs 35.6 tok/s)
-2. **57% faster than llama.cpp** on LLaMA 3.1 8B Q4_K_M (66.6 vs 42.4 tok/s)
+1. **85% faster than MLX** on LLaMA 3.1 8B 4-bit (65.9 vs 35.6 tok/s)
+2. **26% faster than llama.cpp** on LLaMA 3.1 8B Q4_K_M (65.9 vs 52.5 tok/s)
 3. **Superior context scaling** — <6% degradation at ctx=1024
 4. **Medusa speculative decoding** — online-trained heads with adaptive probes, zero overhead
 5. **Near-linear multi-client scaling** — 989 tok/s at 4 concurrent (paged KV)
