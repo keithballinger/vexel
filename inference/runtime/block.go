@@ -1350,10 +1350,12 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		}
 
 		profileOp("Wqkv", func() {
-			if !b.Wqkv.DevicePtr().IsNil() && seqLen > 1 && b.qkvDeinterleaver != nil {
-				// Fused QKV prefill path: single matmul → temp → deinterleave
+			if !b.Wqkv.DevicePtr().IsNil() && b.qkvDeinterleaver != nil {
+				// Fused QKV path: single matmul → temp → deinterleave into Q/K/V.
 				// Uses gate+up scratch space as temp buffer (contiguous via ScratchAlloc).
 				// gateBytes+upBytes = seqLen*intermediateSize*4*2 ≥ seqLen*qkvDim*4 for all models.
+				// Must always deinterleave — writing fused output directly to qPtr would
+				// overflow the Q buffer (qDim < qkvDim) when K/V are separate allocations.
 				qkvDim := b.Wqkv.Shape().Dims()[0]
 				b.matMulTransposedWithBias(normOutPtr, b.Wqkv, b.WqkvBias, gatePtr, seqLen, qkvDim, hiddenSize)
 				// Barrier: deinterleave reads gatePtr written by fused matmul
@@ -1362,7 +1364,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				kvDim := numKVHeads * headDim
 				b.qkvDeinterleaver.DeinterleaveQKV(gatePtr, qPtr, kPtr, vPtr, seqLen, qDim, kvDim)
 			} else if !b.Wqkv.DevicePtr().IsNil() {
-				// Fused QKV decode path (seqLen==1): output lands directly in Q|K|V scratch
+				// Fused QKV without deinterleaver: matmul into Q|K|V contiguous scratch.
+				// Only safe when scratch allocator places Q/K/V contiguously.
 				qkvDim := b.Wqkv.Shape().Dims()[0]
 				b.matMulTransposedWithBias(normOutPtr, b.Wqkv, b.WqkvBias, qPtr, seqLen, qkvDim, hiddenSize)
 			} else {
