@@ -11489,7 +11489,7 @@ void metal_matvec_transposed_f32(void* queuePtr, void* pipelinePtr,
 
 void metal_matmul_transposed_f32_offset(void* queuePtr, void* pipelinePtr,
                                          void* A, uint64_t aOff,
-                                         void* B,
+                                         void* B, uint64_t bOff,
                                          void* C, uint64_t cOff,
                                          int M, int N, int K) {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
@@ -11501,7 +11501,7 @@ void metal_matmul_transposed_f32_offset(void* queuePtr, void* pipelinePtr,
 
     [encoder setComputePipelineState:pipeline];
     [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:aOff atIndex:0];
-    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:bOff atIndex:1];
     [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:cOff atIndex:2];
     [encoder setBytes:&M length:sizeof(M) atIndex:3];
     [encoder setBytes:&N length:sizeof(N) atIndex:4];
@@ -11522,7 +11522,7 @@ void metal_matmul_transposed_f32_offset(void* queuePtr, void* pipelinePtr,
 
 void metal_matvec_transposed_f32_offset(void* queuePtr, void* pipelinePtr,
                                          void* A, uint64_t aOff,
-                                         void* B,
+                                         void* B, uint64_t bOff,
                                          void* C, uint64_t cOff,
                                          int N, int K) {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
@@ -11534,7 +11534,7 @@ void metal_matvec_transposed_f32_offset(void* queuePtr, void* pipelinePtr,
 
     [encoder setComputePipelineState:pipeline];
     [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:aOff atIndex:0];
-    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:bOff atIndex:1];
     [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:cOff atIndex:2];
     [encoder setBytes:&N length:sizeof(N) atIndex:3];
     [encoder setBytes:&K length:sizeof(K) atIndex:4];

@@ -710,13 +710,13 @@ func (b *Backend) MatMulTransposedOffset(a, bMat, out tensor.DevicePtr, m, n, k 
 	if m == 1 && b.matvecPipeline != nil {
 		C.metal_matvec_transposed_f32_offset(b.queue, b.matvecPipeline,
 			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
-			unsafe.Pointer(bMat.Addr()),
+			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
 			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
 			C.int(n), C.int(k))
 	} else {
 		C.metal_matmul_transposed_f32_offset(b.queue, b.matmulPipeline,
 			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
-			unsafe.Pointer(bMat.Addr()),
+			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
 			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
 			C.int(m), C.int(n), C.int(k))
 	}
