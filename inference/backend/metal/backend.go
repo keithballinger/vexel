@@ -681,6 +681,10 @@ func (b *Backend) MatMul(a, bMat, out tensor.DevicePtr, m, n, k int) {
 
 // MatMulTransposed performs C = A @ B^T where A is [M,K], B is [N,K], C is [M,N].
 func (b *Backend) MatMulTransposed(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	if a.Offset() != 0 || out.Offset() != 0 {
+		b.MatMulTransposedOffset(a, bMat, out, m, n, k)
+		return
+	}
 	b.profiler.RecordDispatch("MatMulTransposed")
 	if m == 1 && b.matvecPipeline != nil {
 		// Use optimized matrix-vector kernel for single-row case
@@ -691,6 +695,23 @@ func (b *Backend) MatMulTransposed(a, bMat, out tensor.DevicePtr, m, n, k int) {
 		// Use transposed matmul kernel
 		C.metal_matmul_transposed_f32(b.queue, b.matmulPipeline,
 			unsafe.Pointer(a.Addr()), unsafe.Pointer(bMat.Addr()), unsafe.Pointer(out.Addr()),
+			C.int(m), C.int(n), C.int(k))
+	}
+}
+
+func (b *Backend) MatMulTransposedOffset(a, bMat, out tensor.DevicePtr, m, n, k int) {
+	b.profiler.RecordDispatch("MatMulTransposed")
+	if m == 1 && b.matvecPipeline != nil {
+		C.metal_matvec_transposed_f32_offset(b.queue, b.matvecPipeline,
+			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+			unsafe.Pointer(bMat.Addr()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			C.int(n), C.int(k))
+	} else {
+		C.metal_matmul_transposed_f32_offset(b.queue, b.matmulPipeline,
+			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+			unsafe.Pointer(bMat.Addr()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
 			C.int(m), C.int(n), C.int(k))
 	}
 }
@@ -1844,6 +1865,10 @@ func (b *Backend) SDPA(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHea
 // where v2's tile overhead dominates.
 // Set VEXEL_FA2_V1=1 to force the original two-pass FA2 kernel.
 func (b *Backend) SDPAPrefill(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	if q.Offset() != 0 || k.Offset() != 0 || v.Offset() != 0 || out.Offset() != 0 {
+		b.SDPAPrefillOffset(q, k, v, out, seqLen, numQHeads, numKVHeads, headDim, scale)
+		return
+	}
 	b.profiler.RecordDispatch("SDPAPrefill")
 	if seqLen >= flashAttentionMinSeqLen() {
 		// FA2 v2: single-pass, tiled Q, ~11x faster at seq128+ (crossover at ~48 tokens)
@@ -1901,6 +1926,39 @@ func (b *Backend) SDPAPrefillFA2V2(q, k, v, out tensor.DevicePtr, seqLen, numQHe
 	C.metal_flash_attention_2_v2_f32(b.queue, b.flashAttention2V2Pipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+		C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+		C.float(scale))
+}
+
+func (b *Backend) SDPAPrefillOffset(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale float32) {
+	b.profiler.RecordDispatch("SDPAPrefill")
+	if seqLen >= flashAttentionMinSeqLen() {
+		if b.flashAttention2V2Pipeline != nil && seqLen >= 48 && os.Getenv("VEXEL_FA2_V1") != "1" {
+			C.metal_flash_attention_2_v2_f32_offset(b.queue, b.flashAttention2V2Pipeline,
+				unsafe.Pointer(q.Addr()), C.uint64_t(q.Offset()),
+				unsafe.Pointer(k.Addr()), C.uint64_t(k.Offset()),
+				unsafe.Pointer(v.Addr()), C.uint64_t(v.Offset()),
+				unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+				C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+				C.float(scale))
+			return
+		}
+		if b.flashAttention2Pipeline != nil {
+			C.metal_flash_attention_2_f32_offset(b.queue, b.flashAttention2Pipeline,
+				unsafe.Pointer(q.Addr()), C.uint64_t(q.Offset()),
+				unsafe.Pointer(k.Addr()), C.uint64_t(k.Offset()),
+				unsafe.Pointer(v.Addr()), C.uint64_t(v.Offset()),
+				unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+				C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+				C.float(scale))
+			return
+		}
+	}
+	C.metal_sdpa_prefill_f32_offset(b.queue, b.sdpaPrefillPipeline,
+		unsafe.Pointer(q.Addr()), C.uint64_t(q.Offset()),
+		unsafe.Pointer(k.Addr()), C.uint64_t(k.Offset()),
+		unsafe.Pointer(v.Addr()), C.uint64_t(v.Offset()),
+		unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
 		C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
 		C.float(scale))
 }

@@ -91,8 +91,10 @@ func initModel(modelPath string, maxTokens, contextLen int, verbose, usePaged bo
 	}
 
 	// GPU scratch allocator: bump-allocates layer intermediates from a single MTLBuffer.
-	// Disabled by default due to offset handling issues in some kernel dispatch paths.
-	// Set VEXEL_SCRATCH=1 to enable (produces wrong output with some models).
+	// Currently disabled — the fused decode kernels have offset handling issues that
+	// cause incorrect output. The offset-aware variants for MatMulTransposed and
+	// SDPAPrefill are in place, but the fused QKV+MLP decode path needs more work.
+	// Set VEXEL_SCRATCH=1 to enable for testing.
 	if os.Getenv("VEXEL_SCRATCH") == "1" {
 		decodeScratchBytes := modelCfg.ScratchBytes(1) + 7*256
 		if err := gpuBackend.InitScratch(int(decodeScratchBytes)); err != nil {

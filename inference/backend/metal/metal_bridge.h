@@ -60,6 +60,17 @@ void metal_matvec_transposed_f32(void* queue, void* pipeline,
                                   void* A, void* B, void* C,
                                   int N, int K);
 
+void metal_matmul_transposed_f32_offset(void* queue, void* pipeline,
+                                         void* A, uint64_t aOff,
+                                         void* B,
+                                         void* C, uint64_t cOff,
+                                         int M, int N, int K);
+void metal_matvec_transposed_f32_offset(void* queue, void* pipeline,
+                                         void* A, uint64_t aOff,
+                                         void* B,
+                                         void* C, uint64_t cOff,
+                                         int N, int K);
+
 // Q4_0 quantized matrix-vector: C = A @ B^T where B is Q4_0 encoded
 void metal_matvec_q4_0_transposed_f32(void* queue, void* pipeline,
                                        void* A, void* B, void* C,
@@ -625,6 +636,20 @@ void metal_flash_attention_2_v2_f32(void* queue, void* pipeline,
                                      void* Q, void* K, void* V, void* out,
                                      int seqLen, int numQHeads, int numKVHeads, int headDim,
                                      float scale);
+
+// Offset-aware SDPA prefill variants for scratch-allocated DevicePtrs
+void metal_sdpa_prefill_f32_offset(void* queue, void* pipeline,
+                                    void* Q, uint64_t qOff, void* K, uint64_t kOff,
+                                    void* V, uint64_t vOff, void* out, uint64_t outOff,
+                                    int seqLen, int numQHeads, int numKVHeads, int headDim, float scale);
+void metal_flash_attention_2_f32_offset(void* queue, void* pipeline,
+                                         void* Q, uint64_t qOff, void* K, uint64_t kOff,
+                                         void* V, uint64_t vOff, void* out, uint64_t outOff,
+                                         int seqLen, int numQHeads, int numKVHeads, int headDim, float scale);
+void metal_flash_attention_2_v2_f32_offset(void* queue, void* pipeline,
+                                            void* Q, uint64_t qOff, void* K, uint64_t kOff,
+                                            void* V, uint64_t vOff, void* out, uint64_t outOff,
+                                            int seqLen, int numQHeads, int numKVHeads, int headDim, float scale);
 
 // Flash Attention 2 with FP16 activations (2x bandwidth)
 // Q, K, V, out are all FP16

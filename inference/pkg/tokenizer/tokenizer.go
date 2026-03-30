@@ -641,9 +641,34 @@ func min(a, b int) int {
 	return b
 }
 
-var byteTokenRegex = regexp.MustCompile(`<0x([0-9A-Fa-f]{2})>`) 
+var byteTokenRegex = regexp.MustCompile(`<0x([0-9A-Fa-f]{2})>`)
+
+// gpt2UnicodeToByte is the reverse of GPT-2's bytes_to_unicode() mapping.
+// GPT-2 BPE maps each byte (0-255) to a printable Unicode character.
+// This table maps those Unicode characters back to byte values for decoding.
+var gpt2UnicodeToByte = func() map[rune]byte {
+	b2u := make(map[byte]rune)
+	next := rune(256)
+	for b := 0; b < 256; b++ {
+		r := rune(b)
+		if (r >= '!' && r <= '~') || (r >= 0xA1 && r <= 0xAC) || (r >= 0xAE && r <= 0xFF) {
+			b2u[byte(b)] = r
+		} else {
+			b2u[byte(b)] = next
+			next++
+		}
+	}
+	u2b := make(map[rune]byte, 256)
+	for b, u := range b2u {
+		u2b[u] = b
+	}
+	return u2b
+}()
 
 func (t *Tokenizer) Decode(ids []int) (string, error) {
+	if t.useByteLevel {
+		return t.decodeByteLevelBPE(ids)
+	}
 	var out strings.Builder
 	for _, id := range ids {
 		if s, ok := t.ids[id]; ok {
@@ -651,9 +676,34 @@ func (t *Tokenizer) Decode(ids []int) (string, error) {
 		}
 	}
 	s := out.String()
-	// Replace Ġ with space for ByteLevel
-	s = strings.ReplaceAll(s, "Ġ", " ")
 	return decodeSpecialChars(s), nil
+}
+
+// decodeByteLevelBPE decodes GPT-2/LLaMA 3 byte-level BPE tokens.
+// Each token character is mapped back to its byte value, then the byte
+// sequence is interpreted as UTF-8.
+func (t *Tokenizer) decodeByteLevelBPE(ids []int) (string, error) {
+	var buf []byte
+	for _, id := range ids {
+		s, ok := t.ids[id]
+		if !ok {
+			continue
+		}
+		if len(s) == 6 && s[0] == '<' && s[1] == '0' && s[2] == 'x' && s[5] == '>' {
+			if b, err := strconv.ParseUint(s[3:5], 16, 8); err == nil {
+				buf = append(buf, byte(b))
+				continue
+			}
+		}
+		for _, r := range s {
+			if b, ok := gpt2UnicodeToByte[r]; ok {
+				buf = append(buf, b)
+			} else {
+				buf = append(buf, []byte(string(r))...)
+			}
+		}
+	}
+	return string(buf), nil
 }
 
 func decodeSpecialChars(s string) string {

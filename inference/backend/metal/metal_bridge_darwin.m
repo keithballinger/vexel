@@ -11354,10 +11354,10 @@ static id<MTLComputeCommandEncoder> get_encoder(id<MTLCommandQueue> queue, id<MT
 }
 
 // Helper: finish encoding and possibly commit.
-// Always waits for completion — required for correct memory visibility between
-// separate command buffers on Apple Silicon. The proper way to avoid per-dispatch
-// waiting is command buffer batching (metal_begin_batch/metal_end_batch), which
-// encodes multiple operations into a single command buffer with one wait.
+// Waits for completion to ensure memory visibility between separate command buffers.
+// The proper way to reduce per-dispatch overhead is command buffer batching
+// (metal_begin_batch/metal_end_batch), which encodes multiple operations
+// into a single command buffer with memory barriers instead of separate waits.
 static inline void finish_encode(id<MTLComputeCommandEncoder> encoder, id<MTLCommandBuffer> cmdBuf, bool shouldCommit) {
     if (shouldCommit) {
         uint64_t start = mach_absolute_time();
@@ -11480,6 +11480,68 @@ void metal_matvec_transposed_f32(void* queuePtr, void* pipelinePtr,
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
     [encoder endEncoding];
     [cmdBuffer commit];
+}
+
+void metal_matmul_transposed_f32_offset(void* queuePtr, void* pipelinePtr,
+                                         void* A, uint64_t aOff,
+                                         void* B,
+                                         void* C, uint64_t cOff,
+                                         int M, int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:aOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:cOff atIndex:2];
+    [encoder setBytes:&M length:sizeof(M) atIndex:3];
+    [encoder setBytes:&N length:sizeof(N) atIndex:4];
+    [encoder setBytes:&K length:sizeof(K) atIndex:5];
+
+    MTLSize threadgroupSize = MTLSizeMake(
+        MIN(pipeline.maxTotalThreadsPerThreadgroup, (NSUInteger)N),
+        1, 1
+    );
+    MTLSize threadgroups2 = MTLSizeMake(
+        ((NSUInteger)N + threadgroupSize.width - 1) / threadgroupSize.width,
+        (NSUInteger)M,
+        1
+    );
+    [encoder dispatchThreadgroups:threadgroups2 threadsPerThreadgroup:threadgroupSize];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_matvec_transposed_f32_offset(void* queuePtr, void* pipelinePtr,
+                                         void* A, uint64_t aOff,
+                                         void* B,
+                                         void* C, uint64_t cOff,
+                                         int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:aOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:cOff atIndex:2];
+    [encoder setBytes:&N length:sizeof(N) atIndex:3];
+    [encoder setBytes:&K length:sizeof(K) atIndex:4];
+
+    int threadgroupSize = 256;
+    int numThreadgroups = N;
+
+    MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
 }
 
 // Q4_0 quantized matrix-vector multiply: C = A @ B^T where B is Q4_0
@@ -15105,6 +15167,118 @@ void metal_flash_attention_2_v2_f32(void* queuePtr, void* pipelinePtr,
 
     MTLSize threadgroups = MTLSizeMake(numQTiles, numKVHeads, 1);
     MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);  // 8 simdgroups * 32 threads
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Offset-aware SDPA prefill variants for scratch-allocated DevicePtrs
+
+void metal_sdpa_prefill_f32_offset(void* queuePtr, void* pipelinePtr,
+                                    void* Q, uint64_t qOff, void* K, uint64_t kOff,
+                                    void* V, uint64_t vOff, void* out, uint64_t outOff,
+                                    int seqLen, int numQHeads, int numKVHeads, int headDim,
+                                    float scale) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:qOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:kOff atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:vOff atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:outOff atIndex:3];
+    [encoder setBytes:&seqLen length:sizeof(seqLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+
+    int PREFILL_THREADS = 64;
+    int PREFILL_TILE_K = 16;
+    int sharedMemSize = (PREFILL_TILE_K + 8) * sizeof(float);
+
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    MTLSize threadgroups = MTLSizeMake(seqLen, numQHeads, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(PREFILL_THREADS, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_flash_attention_2_f32_offset(void* queuePtr, void* pipelinePtr,
+                                         void* Q, uint64_t qOff, void* K, uint64_t kOff,
+                                         void* V, uint64_t vOff, void* out, uint64_t outOff,
+                                         int seqLen, int numQHeads, int numKVHeads, int headDim,
+                                         float scale) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:qOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:kOff atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:vOff atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:outOff atIndex:3];
+    [encoder setBytes:&seqLen length:sizeof(seqLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+
+    int FA2_TILE_KV = 64;
+    int sharedMemSize = 2 * FA2_TILE_KV * headDim * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    MTLSize threadgroups = MTLSizeMake(seqLen, numKVHeads, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_flash_attention_2_v2_f32_offset(void* queuePtr, void* pipelinePtr,
+                                            void* Q, uint64_t qOff, void* K, uint64_t kOff,
+                                            void* V, uint64_t vOff, void* out, uint64_t outOff,
+                                            int seqLen, int numQHeads, int numKVHeads, int headDim,
+                                            float scale) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:qOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:kOff atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:vOff atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:outOff atIndex:3];
+    [encoder setBytes:&seqLen length:sizeof(seqLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+
+    int FA2V2_TILE_KV = 32;
+    int sharedMemSize = 2 * FA2V2_TILE_KV * headDim * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    int headsPerKV = numQHeads / numKVHeads;
+    int tileQ = 8 / headsPerKV;
+    if (tileQ < 1) tileQ = 1;
+    if (tileQ > 8) tileQ = 8;
+    int numQTiles = (seqLen + tileQ - 1) / tileQ;
+
+    MTLSize threadgroups = MTLSizeMake(numQTiles, numKVHeads, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
     finish_encode(encoder, cmdBuffer, shouldCommit);
