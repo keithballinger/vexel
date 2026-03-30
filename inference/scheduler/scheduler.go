@@ -124,13 +124,11 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			return err
 		}
 
-		// Yield after each step to allow token delivery to consumers.
+		// Brief yield after each step to allow token delivery to consumers.
 		// CGO calls in Metal GPU operations don't trigger Go scheduler preemption,
-		// so without an explicit yield the scheduler goroutine can monopolize the
+		// so without an explicit sleep the scheduler goroutine can monopolize the
 		// OS thread and prevent the main goroutine from reading generated tokens.
-		// Gosched() yields without imposing a minimum sleep duration (time.Sleep
-		// rounds up to OS scheduler quantum ~1ms on macOS under load).
-		goruntime.Gosched()
+		time.Sleep(50 * time.Microsecond)
 
 		// If sequences remain, loop immediately
 		if s.SequenceCount() > 0 {

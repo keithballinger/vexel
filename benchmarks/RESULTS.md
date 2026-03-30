@@ -22,17 +22,16 @@ This was inflated because the fused FP16 QKV path was incorrectly enabled
 for mixed Q4_K/Q6_K weight matrices, producing wrong output but running faster.
 The current 26% advantage reflects honest, accuracy-verified performance.
 
-### Prefill Throughput
+### Prefill Throughput (per-layer batching)
 
 | Model | Prompt tokens | Prefill tok/s | Decode tok/s |
 |-------|--------------|---------------|--------------|
-| **TinyLlama 1.1B Q4_0** | 15 | **606.9** | 309.9 |
-| **TinyLlama 1.1B Q4_0** | 1 | **151.9** | 320.8 |
-| **LLaMA 3.1 8B Q4_K_M** | 1 | **22.2** | 65.9 |
-| LLaMA 3.1 8B Q4_K_M | 15 | HUNG | — |
+| **TinyLlama 1.1B Q4_0** | 15 | **607** | 310 |
+| **LLaMA 3.1 8B Q4_K_M** | 15 | **131** | 65.7 |
+| LLaMA 3.1 8B Q4_K_M | 2 | 21 | 65.8 |
 
-TinyLlama prefill scales well (607 tok/s at 15 tokens). LLaMA 8B still
-deadlocks on prompts longer than ~16 tokens (see Known Limitations).
+Per-layer batching fixed the prefill deadlock that previously hung LLaMA 8B
+for prompts > 16 tokens. Prefill improved from 10-40 tok/s to 131 tok/s.
 
 ### Paged KV Cache Decode
 
@@ -158,12 +157,10 @@ Memory usage is comparable. MLX is slightly lower due to Python lazy evaluation.
 
 ### Known Limitations
 
-- **Prefill deadlock**: LLaMA 8B hangs for prompts > ~16 tokens. Each dispatch
-  calls `waitUntilCompleted` individually; 32 layers × 12+ dispatches creates
-  hundreds of blocking waits that can deadlock Metal's command queue. Requires
-  a Metal-level fix (batched prefill or fire-and-forget commits).
-- **Prefill speed (LLaMA 8B)**: 20-22 tok/s for short prompts (vs llama.cpp
-  67-70 tok/s). TinyLlama prefill is much better at 607 tok/s for 15 tokens.
+- **Prefill speed gap**: LLaMA 8B prefill is 131 tok/s vs llama.cpp ~70 tok/s
+  (Vexel is faster here), but llama.cpp scales better to longer prompts (1300+
+  tok/s at 16 tokens). Vexel's per-layer batching commits after each layer
+  while llama.cpp batches the entire prefill into one command buffer.
 - **Scratch allocator**: Disabled by default. The Q4_K fused decode path has
   remaining offset issues. Q4_0 models work correctly with scratch enabled.
 
