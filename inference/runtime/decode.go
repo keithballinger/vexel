@@ -411,7 +411,7 @@ func (m *ModelRuntime) DecodeWithPagedKV(tokens []int, seqID int64, pos int) (te
 	scratchBytes := m.config.ScratchBytes(batchSize)
 	// Add extra space for full KV sequences from cache
 	maxKVLen := pos + batchSize
-	kvHeadDim := m.config.NumKeyValueHeads * (m.config.HiddenSize / m.config.NumAttentionHeads)
+	kvHeadDim := m.config.NumKeyValueHeads * m.config.EffectiveHeadDim()
 	scratchBytes += int64(maxKVLen * kvHeadDim * 4 * 2) // K and V
 	scratchPtr, err := allocPtr(int(scratchBytes))
 	if err != nil {
@@ -538,7 +538,7 @@ func (m *ModelRuntime) DecodeWithPagedKVAndHidden(tokens []int, seqID int64, pos
 	scratchBytes := m.config.ScratchBytes(batchSize)
 	// Add extra space for full KV sequences from cache
 	maxKVLen := pos + batchSize
-	kvHeadDim := m.config.NumKeyValueHeads * (m.config.HiddenSize / m.config.NumAttentionHeads)
+	kvHeadDim := m.config.NumKeyValueHeads * m.config.EffectiveHeadDim()
 	scratchBytes += int64(maxKVLen * kvHeadDim * 4 * 2) // K and V
 	scratchPtr, err := allocPtr(int(scratchBytes))
 	if err != nil {
@@ -1505,7 +1505,7 @@ func (m *ModelRuntime) VerifySpeculativeWithPagedKVAndHidden(tokens []int, seqID
 	scratchBytes := m.config.ScratchBytes(seqLen)
 	// Add extra space for full KV sequences from cache
 	maxKVLen := startPos + seqLen
-	kvHeadDim := m.config.NumKeyValueHeads * (m.config.HiddenSize / m.config.NumAttentionHeads)
+	kvHeadDim := m.config.NumKeyValueHeads * m.config.EffectiveHeadDim()
 	scratchBytes += int64(maxKVLen * kvHeadDim * 4 * 2) // K and V
 	scratchPtr, err := allocPtr(int(scratchBytes))
 	if err != nil {

@@ -111,7 +111,8 @@ type ModelConfig struct {
 	// Architecture-specific settings
 	NormType         NormType // Normalization type (RMSNorm or LayerNorm)
 	MLPType          MLPType  // MLP structure (SwiGLU or GELU)
-	HasBias          bool     // Whether model has bias terms in projections
+	HasBias          bool     // Whether model has bias terms in all projections (Phi-2)
+	HasQKVBias       bool     // Whether model has bias terms in Q/K/V projections only (Qwen2)
 	ParallelResidual bool     // True for parallel residual (Phi): x + attn(norm(x)) + mlp(norm(x))
 	                          // False for serial residual (LLaMA): x + attn(norm1(x)), then x + mlp(norm2(x))
 	RoPEDim          int      // Dimensions to apply RoPE to (0 = full headDim for LLaMA-style)
@@ -120,8 +121,13 @@ type ModelConfig struct {
 	SlidingWindow       int                // Sliding window size for attention (0 = infinite/full context)
 	AttentionWindowType AttentionWindowType // Window pattern: Global (default), Sliding (all layers), Alternating (even=global, odd=sliding)
 
+	// Head dimension override (0 = hiddenSize/numAttentionHeads).
+	// Gemma 2 2B: hiddenSize=2304, numHeads=8, but headDim=256 (not 288).
+	HeadDim int
+
 	// Gemma 2-specific settings
-	AttentionLogitSoftCap float32   // Logit soft-capping value (0 = disabled, typically 30.0 for Gemma 2)
+	AttentionLogitSoftCap float32   // Logit soft-capping value (0 = disabled, 50.0 for Gemma 2 attention)
+	FinalLogitSoftCap     float32   // Final logit soft-capping (0 = disabled, 30.0 for Gemma 2)
 	HasPostNorms          bool      // Apply RMSNorm after attention and MLP (before residual). Gemma 2 only.
 	RoPEFreqScales        []float32 // Per-dimension inverse frequency values for learned RoPE (nil = use theta-based)
 
@@ -131,6 +137,15 @@ type ModelConfig struct {
 	// MoE (Mixture of Experts) settings
 	NumMoEExperts  int // Total number of routed experts (e.g., 64 or 256 for DeepSeek)
 	NumMoESelected int // Number of experts selected per token (e.g., 6 or 8 for DeepSeek)
+}
+
+// EffectiveHeadDim returns the head dimension, using the explicit HeadDim if set,
+// otherwise falling back to HiddenSize / NumAttentionHeads.
+func (c ModelConfig) EffectiveHeadDim() int {
+	if c.HeadDim > 0 {
+		return c.HeadDim
+	}
+	return c.HiddenSize / c.NumAttentionHeads
 }
 
 // MemoryPlan holds the estimated memory usage breakdown.
@@ -233,13 +248,14 @@ func (c ModelConfig) ApproxParams() int64 {
 	// V: Hidden * HeadDim * KV
 	// O: Hidden * Hidden
 	
-	headDim := int64(c.HiddenSize) / int64(c.NumAttentionHeads)
+	headDim := int64(c.EffectiveHeadDim())
 	kvSize := headDim * int64(c.NumKeyValueHeads)
-	
-	attn := int64(c.HiddenSize)*int64(c.HiddenSize) + // Q
+	qSize2 := headDim * int64(c.NumAttentionHeads)
+
+	attn := int64(c.HiddenSize)*qSize2 + // Q
 		int64(c.HiddenSize)*kvSize + // K
 		int64(c.HiddenSize)*kvSize + // V
-		int64(c.HiddenSize)*int64(c.HiddenSize)   // O
+		qSize2*int64(c.HiddenSize)   // O
 
 	// MLP:
 	// Gate, Up, Down
@@ -278,9 +294,9 @@ func (c ModelConfig) WeightsBytes(profile tensor.QuantProfile) int64 {
 
 // KVBytes calculates the memory required for the KV cache.
 func (c ModelConfig) KVBytes(activeSequences int, contextLen int, profile tensor.QuantProfile) int64 {
-	// Head Dim = Hidden / Heads
-	headDim := int64(c.HiddenSize) / int64(c.NumAttentionHeads)
-	
+	// Head Dim (may differ from hiddenSize/numHeads for Gemma 2)
+	headDim := int64(c.EffectiveHeadDim())
+
 	// Elements per token = 2 (Key + Value) * Layers * KVHeads * HeadDim
 	elementsPerToken := 2 * int64(c.NumHiddenLayers) * int64(c.NumKeyValueHeads) * headDim
 	
@@ -298,8 +314,8 @@ func (c ModelConfig) ScratchBytes(maxBatchSize int) int64 {
 		return 0
 	}
 
-	// Calculate GQA-aware sizes
-	headDim := int64(c.HiddenSize) / int64(c.NumAttentionHeads)
+	// Calculate GQA-aware sizes (headDim may differ from hiddenSize/numHeads for Gemma 2)
+	headDim := int64(c.EffectiveHeadDim())
 	qSize := int64(maxBatchSize) * int64(c.NumAttentionHeads) * headDim     // Q buffer
 	kvSize := int64(maxBatchSize) * int64(c.NumKeyValueHeads) * headDim     // K and V buffers (each)
 
@@ -393,6 +409,8 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 	hasPostNorms := false                  // Default: no post-norms
 	embeddingScale := float32(0)           // 0 = disabled, Gemma uses sqrt(hiddenSize)
 
+	hasQKVBias := false
+
 	switch g.Architecture {
 	case "phi", "phi2":
 		normType = NormLayerNorm
@@ -423,7 +441,10 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		mlpType = MLPGeGLU
 		hasBias = false
 		embeddingScale = float32(math.Sqrt(float64(g.HiddenSize)))
-		attnLogitSoftCap = 30.0     // Gemma 2 uses logit soft-capping with cap=30
+		attnLogitSoftCap = g.AttnLogitSoftCap // Read from GGUF (typically 50.0 for Gemma 2)
+		if attnLogitSoftCap == 0 {
+			attnLogitSoftCap = 50.0 // Fallback default
+		}
 		attnWindowType = WindowAlternating // Even layers=global, odd layers=sliding window
 		hasPostNorms = true                // Gemma 2 applies RMSNorm after attn and MLP
 		// Gemma 2 uses LLaMA-style RoPE (interleaved pairs)
@@ -432,16 +453,39 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		mlpType = MLPMoE // MoE layers; dense layers within the model also use SwiGLU
 		hasBias = false
 		// DeepSeek uses LLaMA-style RoPE (interleaved pairs)
-	case "llama", "mistral", "qwen2":
+	case "llama", "mistral":
 		// Default LLaMA-family settings
 		normType = NormRMSNorm
 		mlpType = MLPSwiGLU
 		hasBias = false
 		// LLaMA uses LLaMA-style RoPE (interleaved pairs)
+	case "qwen2":
+		// Qwen2 is LLaMA-compatible but has QKV bias (no output/MLP bias)
+		// and uses NEOX-style RoPE (split pairs: i, i+dim/2)
+		normType = NormRMSNorm
+		mlpType = MLPSwiGLU
+		hasBias = false
+		hasQKVBias = true
+		ropeNeox = true
 	}
 
 	fmt.Printf("[CONFIG] Architecture=%s: NormType=%v, MLPType=%v, HasBias=%v, ParallelResidual=%v, RoPENeox=%v\n",
 		g.Architecture, normType, mlpType, hasBias, parallelResidual, ropeNeox)
+	if g.HeadDim > 0 {
+		fmt.Printf("[CONFIG] HeadDim=%d (explicit, vs hiddenSize/numHeads=%d)\n", g.HeadDim, g.HiddenSize/g.NumHeads)
+	}
+	if attnLogitSoftCap > 0 {
+		fmt.Printf("[CONFIG] AttentionLogitSoftCap=%.1f, FinalLogitSoftCap=%.1f\n", attnLogitSoftCap, g.FinalLogitSoftCap)
+	}
+	if hasPostNorms {
+		fmt.Printf("[CONFIG] HasPostNorms=true (Gemma 2 post-attention and post-FFN norms)\n")
+	}
+
+	// Use GGUF-provided epsilon if available, otherwise default
+	rmsNormEPS := float64(g.RMSNormEPS)
+	if rmsNormEPS == 0 {
+		rmsNormEPS = 1e-5 // Standard default
+	}
 
 	return ModelConfig{
 		HiddenSize:        g.HiddenSize,
@@ -452,17 +496,20 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		VocabSize:         g.VocabSize,
 		MaxSeqLen:         maxSeqLen,
 		RoPETheta:         ropeTheta,
-		RMSNormEPS:        1e-5, // Standard default
+		RMSNormEPS:        rmsNormEPS,
 		DType:             tensor.Float32, // We dequantize to F32 for CPU
 		NormType:          normType,
 		MLPType:           mlpType,
 		HasBias:           hasBias,
+		HasQKVBias:        hasQKVBias,
 		ParallelResidual:  parallelResidual,
 		RoPEDim:           g.RoPEDimCount, // 0 = full headDim, otherwise partial RoPE
 		RoPENeox:              ropeNeox,       // NEOX-style (split) vs LLaMA-style (interleaved) RoPE
 		SlidingWindow:         g.SlidingWindow,
 		AttentionWindowType:   attnWindowType,
+		HeadDim:               g.HeadDim,         // 0 = derive from hiddenSize/numHeads
 		AttentionLogitSoftCap: attnLogitSoftCap,
+		FinalLogitSoftCap:     g.FinalLogitSoftCap,
 		HasPostNorms:          hasPostNorms,
 		EmbeddingScale:        embeddingScale,
 		NumMoEExperts:         g.ExpertCount,

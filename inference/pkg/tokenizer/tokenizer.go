@@ -185,10 +185,16 @@ func LoadFromGGUF(path string) (*Tokenizer, error) {
 	}
 	useByteLevel := tokenizerModel == "gpt2"
 
-	// Disable BOS only for models where BOS and EOS share the same token (GPT-2, Phi-2).
-	// LLaMA 3 uses GPT-2 BPE format but has a distinct BOS (128000) — it still needs BOS.
-	if bos == eos {
-		addBos = false
+	// Use explicit add_bos_token from GGUF metadata if available.
+	// This is the authoritative source: e.g., Qwen2 has bos!=eos but add_bos_token=false.
+	if v, ok := gf.Metadata["tokenizer.ggml.add_bos_token"]; ok {
+		addBos = v.AsBool()
+	} else {
+		// Fallback heuristic: disable BOS when BOS and EOS share the same token (GPT-2, Phi-2).
+		// LLaMA 3 uses GPT-2 BPE format but has a distinct BOS (128000) — it still needs BOS.
+		if bos == eos {
+			addBos = false
+		}
 	}
 
 	// Collect special tokens (types 3=control, 6=byte)
@@ -241,7 +247,10 @@ func LoadFromGGUF(path string) (*Tokenizer, error) {
 		sort.Slice(sortedTokens, func(i, j int) bool {
 			return sortedTokens[i].score > sortedTokens[j].score
 		})
-		// Build merge pairs: for each multi-char token, try splitting at each position
+		// Build merge pairs: for each multi-char token, register ALL valid splits as merges.
+		// A token like "▁Hello" can be split as "▁"+"Hello" or "▁H"+"ello" etc.
+		// All valid splits must be registered because BPE may encounter any of these
+		// symbol pairs depending on the order of earlier merges applied.
 		for rank, st := range sortedTokens {
 			runes := []rune(st.token)
 			for splitPos := 1; splitPos < len(runes); splitPos++ {
@@ -253,7 +262,6 @@ func LoadFromGGUF(path string) (*Tokenizer, error) {
 						if _, exists := mergeRanks[key]; !exists {
 							mergeRanks[key] = rank
 						}
-						break // use first valid split
 					}
 				}
 			}

@@ -155,6 +155,13 @@ func GetLayerTensorName(hfName string) string {
 		ggufSuffix = "attn_k.weight"
 	case "self_attn.v_proj.weight":
 		ggufSuffix = "attn_v.weight"
+	// Separate Q/K/V bias (Qwen2)
+	case "self_attn.q_proj.bias":
+		ggufSuffix = "attn_q.bias"
+	case "self_attn.k_proj.bias":
+		ggufSuffix = "attn_k.bias"
+	case "self_attn.v_proj.bias":
+		ggufSuffix = "attn_v.bias"
 
 	// Phi-style combined QKV projection
 	case "self_attn.qkv_proj.weight":
@@ -209,6 +216,12 @@ func GetLayerTensorName(hfName string) string {
 		ggufSuffix = "ffn_norm.weight"
 	case "post_attention_layernorm.bias":
 		ggufSuffix = "ffn_norm.bias"
+
+	// Gemma 2 post-norm weights (after attn/MLP projection, before residual)
+	case "post_attention_norm.weight":
+		ggufSuffix = "post_attention_norm.weight"
+	case "post_ffw_norm.weight":
+		ggufSuffix = "post_ffw_norm.weight"
 	default:
 		return hfName
 	}

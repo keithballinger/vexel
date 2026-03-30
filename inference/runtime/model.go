@@ -92,7 +92,7 @@ func (m *ModelRuntime) SetupRoPEFreqs() {
 		return // No learned frequencies, use standard theta-based RoPE
 	}
 
-	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	headDim := m.config.EffectiveHeadDim()
 	halfDim := headDim / 2
 
 	if len(m.config.RoPEFreqScales) != halfDim {
@@ -126,7 +126,7 @@ func (m *ModelRuntime) SetupRoPEFreqs() {
 
 // ModelMeta extracts model metadata from the runtime config.
 func (m *ModelRuntime) ModelMeta() ModelMeta {
-	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	headDim := m.config.EffectiveHeadDim()
 
 	// Build quant format stats from loaded tensors
 	quantFormats := make(map[string]int)
@@ -211,7 +211,7 @@ func (m *ModelRuntime) PagedKVCache() *kv.PagedKVCache {
 
 // CreatePagedKVCache creates and sets a new paged KV cache based on model config.
 func (m *ModelRuntime) CreatePagedKVCache(maxBlocks int) *kv.PagedKVCache {
-	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	headDim := m.config.EffectiveHeadDim()
 	config := kv.PagedKVConfig{
 		NumLayers:  m.config.NumHiddenLayers,
 		NumKVHeads: m.config.NumKeyValueHeads,
@@ -229,7 +229,7 @@ func (m *ModelRuntime) CreatePagedKVCache(maxBlocks int) *kv.PagedKVCache {
 // Automatically uses FP16 storage if the backend supports it (2x memory savings).
 // Set VEXEL_KV_FP32=1 to force FP32 KV cache for testing.
 func (m *ModelRuntime) CreateGPUKVCache(maxSeqLen int) *GPUKVCache {
-	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	headDim := m.config.EffectiveHeadDim()
 
 	// Auto-enable FP16 if backend supports it (2x memory bandwidth savings).
 	// Disable FP16 when scratch allocator is active — the FP16 fused decode kernels
@@ -278,7 +278,7 @@ func (m *ModelRuntime) CreateGPUBlockPool(maxBlocksPerLayer int) *GPUBlockPool {
 	if os.Getenv("VEXEL_KV_FP32") == "1" {
 		useFP16 = false
 	}
-	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	headDim := m.config.EffectiveHeadDim()
 	pool := NewGPUBlockPool(
 		m.backend, pagedOps,
 		m.config.NumHiddenLayers,
@@ -298,6 +298,21 @@ func (m *ModelRuntime) GetGPUBlockPool() *GPUBlockPool {
 }
 
 var outputHeadDebugOnce sync.Once
+
+// ApplyFinalLogitSoftCap applies tanh-based soft-capping to logits on CPU.
+// Gemma 2 uses cap * tanh(logits / cap) with cap=30.0 on the final output logits.
+// This prevents extreme logit values from dominating sampling.
+// No-op if FinalLogitSoftCap is 0 (disabled).
+func (m *ModelRuntime) ApplyFinalLogitSoftCap(logitsData []float32) {
+	cap := m.config.FinalLogitSoftCap
+	if cap <= 0 {
+		return
+	}
+	invCap := 1.0 / float64(cap)
+	for i := range logitsData {
+		logitsData[i] = float32(float64(cap) * math.Tanh(float64(logitsData[i])*invCap))
+	}
+}
 
 // outputHeadMatMul performs logits = state @ OutputHead^T, using quantized kernel if available.
 func (m *ModelRuntime) outputHeadMatMul(statePtr, logitsPtr tensor.DevicePtr, batchSize, vocabSize, hiddenSize int) {

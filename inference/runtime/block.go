@@ -335,7 +335,7 @@ func (b *BlockRuntime) SetPlan(plan *ExecutionPlan) {
 
 // NewBlockRuntime creates a new block runtime with config.
 func NewBlockRuntime(b backend.Backend, config ModelConfig) *BlockRuntime {
-	headDim := config.HiddenSize / config.NumAttentionHeads
+	headDim := config.EffectiveHeadDim()
 	br := &BlockRuntime{
 		backend:           b,
 		NumAttentionHeads: config.NumAttentionHeads,
@@ -2034,7 +2034,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		type q4kFusedSiLUMulAdd interface {
 			MatMulQ4_K_FusedSiLUMulAdd(gate, up, w, residual tensor.DevicePtr, n, k int)
 		}
-		if !usedFullFusion && canFuseFFN && didFuseWoAdd && mlpQuantProfile == tensor.Q4_K {
+		if !usedFullFusion && canFuseFFN && didFuseWoAdd && mlpQuantProfile == tensor.Q4_K &&
+			b.W2.QuantProfile() == tensor.Q4_K {
 			normMatIface, normMatOK := b.backend.(q4kFusedRMSNormOutF32)
 			siluW2Iface, siluW2OK := b.backend.(q4kFusedSiLUMulAdd)
 			if normMatOK && siluW2OK {

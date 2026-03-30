@@ -341,6 +341,21 @@ func (m *ModelRuntime) requiredTensorNames() []string {
 				prefix+"input_layernorm.weight",
 				prefix+"post_attention_layernorm.weight",
 			)
+			// Gemma 2 post-norm weights (applied after attn/MLP, before residual)
+			if m.config.HasPostNorms {
+				names = append(names,
+					prefix+"post_attention_norm.weight", // Post-attn RMSNorm
+					prefix+"post_ffw_norm.weight",       // Post-FFN RMSNorm
+				)
+			}
+			// Qwen2 and similar models have QKV bias but not output/MLP bias
+			if m.config.HasQKVBias {
+				names = append(names,
+					prefix+"self_attn.q_proj.bias",
+					prefix+"self_attn.k_proj.bias",
+					prefix+"self_attn.v_proj.bias",
+				)
+			}
 		}
 	}
 
@@ -896,6 +911,13 @@ func (m *ModelRuntime) mapTensor(name string, t tensor.Tensor) {
 		layer.Wk = t
 	case "self_attn.v_proj.weight":
 		layer.Wv = t
+	// Separate Q/K/V bias (Qwen2)
+	case "self_attn.q_proj.bias", "attn_q.bias":
+		layer.WqBias = t
+	case "self_attn.k_proj.bias", "attn_k.bias":
+		layer.WkBias = t
+	case "self_attn.v_proj.bias", "attn_v.bias":
+		layer.WvBias = t
 
 	// Phi-style combined QKV projection (needs splitting)
 	// Also handling Phi-2 legacy names
@@ -958,9 +980,10 @@ func (m *ModelRuntime) mapTensor(name string, t tensor.Tensor) {
 		layer.FFNNormBias = t
 
 	// Post-norm weights (Gemma 2): applied after attention/MLP, before residual
-	case "attn_post_norm.weight":
+	// GGUF uses "post_attention_norm" and "post_ffw_norm" naming convention
+	case "post_attention_norm.weight", "attn_post_norm.weight":
 		layer.PostAttnNorm = t
-	case "ffn_post_norm.weight":
+	case "post_ffw_norm.weight", "ffn_post_norm.weight":
 		layer.PostFFNNorm = t
 	}
 }
@@ -978,7 +1001,7 @@ func (m *ModelRuntime) splitQKVWeight(layer *BlockRuntime, combined tensor.Tenso
 	cols := dims[1]      // hidden
 
 	// Calculate Q, K, V sizes based on head configuration
-	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	headDim := m.config.EffectiveHeadDim()
 	qRows := m.config.NumAttentionHeads * headDim    // Q uses all heads
 	kvRows := m.config.NumKeyValueHeads * headDim   // K, V may use fewer heads (GQA)
 
@@ -1066,7 +1089,7 @@ func (m *ModelRuntime) splitQKVBias(layer *BlockRuntime, combined tensor.Tensor)
 	totalSize := dims[0]
 
 	// Calculate Q, K, V sizes based on head configuration
-	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	headDim := m.config.EffectiveHeadDim()
 	qSize := m.config.NumAttentionHeads * headDim
 	kvSize := m.config.NumKeyValueHeads * headDim
 
@@ -1238,7 +1261,7 @@ func (m *ModelRuntime) splitQKVGPU(layer *BlockRuntime) {
 	totalRows := dims[0]
 	cols := dims[1]
 
-	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	headDim := m.config.EffectiveHeadDim()
 	qRows := m.config.NumAttentionHeads * headDim
 	kvRows := m.config.NumKeyValueHeads * headDim
 
@@ -1304,7 +1327,7 @@ func (m *ModelRuntime) splitQKVBiasGPU(layer *BlockRuntime) {
 		return
 	}
 
-	headDim := m.config.HiddenSize / m.config.NumAttentionHeads
+	headDim := m.config.EffectiveHeadDim()
 	qSize := m.config.NumAttentionHeads * headDim
 	kvSize := m.config.NumKeyValueHeads * headDim
 

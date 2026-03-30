@@ -761,6 +761,9 @@ func (s *Scheduler) getLogitsOnCPU(logits tensor.Tensor, numElements int) []floa
 	// before returning, ensuring GPU work is complete.
 	backend.ToHost(hostData, ptr)
 
+	// Apply final logit soft-capping (Gemma 2: cap * tanh(logits / cap), cap=30.0)
+	s.runtime.ApplyFinalLogitSoftCap(result)
+
 	return result
 }
 

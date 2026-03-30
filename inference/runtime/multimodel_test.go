@@ -129,7 +129,7 @@ func TestModelConfigFromGGUF_ArchitectureDetection(t *testing.T) {
 			name:     "qwen2",
 			arch:     "qwen2",
 			wantNorm: NormRMSNorm, wantMLP: MLPSwiGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 0, wantWindowType: WindowGlobal, wantPostNorms: false,
+			wantBias: false, wantParallel: false, wantRoPENeox: true, wantSoftCap: 0, wantWindowType: WindowGlobal, wantPostNorms: false,
 		},
 		{
 			name:     "phi2",
@@ -165,7 +165,7 @@ func TestModelConfigFromGGUF_ArchitectureDetection(t *testing.T) {
 			name:     "gemma2",
 			arch:     "gemma2",
 			wantNorm: NormRMSNorm, wantMLP: MLPGeGLU,
-			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 30.0, wantWindowType: WindowAlternating, wantPostNorms: true,
+			wantBias: false, wantParallel: false, wantRoPENeox: false, wantSoftCap: 50.0, wantWindowType: WindowAlternating, wantPostNorms: true,
 		},
 	}
 

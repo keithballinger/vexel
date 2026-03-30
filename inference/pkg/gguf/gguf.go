@@ -180,6 +180,11 @@ func (v MetadataValue) AsUint64() uint64 {
 	}
 }
 
+// AsBool returns the value as bool.
+func (v MetadataValue) AsBool() bool {
+	return v.Bool
+}
+
 // AsFloat32 returns the value as float32.
 func (v MetadataValue) AsFloat32() float32 {
 	switch v.Type {
@@ -231,6 +236,10 @@ type File struct {
 	RoPETheta       float32
 	RoPEDimCount    int // Dimensions for RoPE (0 = full headDim). For partial RoPE like Phi-2.
 	SlidingWindow   int // Sliding window size
+	RMSNormEPS      float32 // RMS normalization epsilon (0 = use default 1e-5)
+	HeadDim         int     // Explicit head dimension (0 = hiddenSize/numHeads). Gemma 2 uses 256 with hiddenSize=2304, numHeads=8.
+	AttnLogitSoftCap float32 // Attention logit soft-capping value (0 = disabled, 50.0 for Gemma 2)
+	FinalLogitSoftCap float32 // Final logit soft-capping value (0 = disabled, 30.0 for Gemma 2)
 	ExpertCount     int // Total number of routed experts (MoE models, e.g., 64 or 256)
 	ExpertUsedCount int // Number of experts selected per token (MoE models, e.g., 6 or 8)
 	file            *os.File // Underlying file for mmap access
@@ -539,6 +548,23 @@ func (f *File) extractModelConfig() {
 	if v, ok := f.Metadata[prefix+"attention.sliding_window"]; ok {
 		f.SlidingWindow = int(v.AsUint32())
 	}
+	// RMS norm epsilon (e.g., 1e-5 for LLaMA, 1e-6 for Qwen2)
+	if v, ok := f.Metadata[prefix+"attention.layer_norm_rms_epsilon"]; ok {
+		f.RMSNormEPS = v.AsFloat32()
+	}
+	// Explicit head dimensions (Gemma 2: key_length=256, value_length=256 with hiddenSize=2304, numHeads=8)
+	// When present, headDim != hiddenSize/numHeads
+	if v, ok := f.Metadata[prefix+"attention.key_length"]; ok {
+		f.HeadDim = int(v.AsUint32())
+	}
+	// Attention logit soft-capping (Gemma 2: 50.0)
+	if v, ok := f.Metadata[arch+".attn_logit_softcapping"]; ok {
+		f.AttnLogitSoftCap = v.AsFloat32()
+	}
+	// Final logit soft-capping (Gemma 2: 30.0)
+	if v, ok := f.Metadata[arch+".final_logit_softcapping"]; ok {
+		f.FinalLogitSoftCap = v.AsFloat32()
+	}
 
 	// MoE (Mixture of Experts) parameters
 	if v, ok := f.Metadata[prefix+"expert_count"]; ok {
@@ -621,6 +647,10 @@ type ModelConfigValues struct {
 	RoPETheta        float32
 	RoPEDimCount     int // Dimensions for RoPE (0 = full headDim)
 	SlidingWindow    int // Sliding window size
+	RMSNormEPS       float32 // RMS normalization epsilon (0 = use default 1e-5)
+	HeadDim          int     // Explicit head dimension (0 = hiddenSize/numHeads). Gemma 2 2B: 256.
+	AttnLogitSoftCap float32 // Attention logit soft-capping (0 = disabled, 50.0 for Gemma 2)
+	FinalLogitSoftCap float32 // Final logit soft-capping (0 = disabled, 30.0 for Gemma 2)
 	ExpertCount      int // Total number of routed experts (MoE models)
 	ExpertUsedCount  int // Number of experts selected per token (MoE models)
 }
@@ -628,18 +658,22 @@ type ModelConfigValues struct {
 // GetModelConfig returns the extracted model configuration.
 func (f *File) GetModelConfig() ModelConfigValues {
 	return ModelConfigValues{
-		Architecture:     f.Architecture,
-		NumLayers:        f.NumLayers,
-		HiddenSize:       f.HiddenSize,
-		IntermediateSize: f.IntermediateSize,
-		NumHeads:         f.NumHeads,
-		NumKVHeads:       f.NumKVHeads,
-		VocabSize:        f.VocabSize,
-		ContextLength:    f.ContextLength,
-		RoPETheta:        f.RoPETheta,
-		RoPEDimCount:     f.RoPEDimCount,
-		SlidingWindow:    f.SlidingWindow,
-		ExpertCount:      f.ExpertCount,
-		ExpertUsedCount:  f.ExpertUsedCount,
+		Architecture:      f.Architecture,
+		NumLayers:         f.NumLayers,
+		HiddenSize:        f.HiddenSize,
+		IntermediateSize:  f.IntermediateSize,
+		NumHeads:          f.NumHeads,
+		NumKVHeads:        f.NumKVHeads,
+		VocabSize:         f.VocabSize,
+		ContextLength:     f.ContextLength,
+		RoPETheta:         f.RoPETheta,
+		RoPEDimCount:      f.RoPEDimCount,
+		SlidingWindow:     f.SlidingWindow,
+		RMSNormEPS:        f.RMSNormEPS,
+		HeadDim:           f.HeadDim,
+		AttnLogitSoftCap:  f.AttnLogitSoftCap,
+		FinalLogitSoftCap: f.FinalLogitSoftCap,
+		ExpertCount:       f.ExpertCount,
+		ExpertUsedCount:   f.ExpertUsedCount,
 	}
 }
