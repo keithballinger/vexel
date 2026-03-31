@@ -69,6 +69,7 @@ func initModel(modelPath string, maxTokens, contextLen int, verbose, usePaged bo
 		gpuBackend.Close()
 		return nil, nil, nil, fmt.Errorf("create runtime: %w", err)
 	}
+	model.SetVerbose(verbose)
 
 	if verbose {
 		log.Printf("Loading weights from %s...", modelPath)
@@ -148,6 +149,7 @@ func loadDraftModel(draftPath string, gpuBackend *metal.Backend, maxTokens, cont
 	if err != nil {
 		return nil, fmt.Errorf("create draft runtime: %w", err)
 	}
+	draft.SetVerbose(verbose)
 
 	if verbose {
 		log.Printf("Loading draft model from %s...", draftPath)

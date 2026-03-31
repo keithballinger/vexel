@@ -851,9 +851,11 @@ func (b *Backend) MatMulQ6_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 	if m == 1 {
 		// Use optimized NR2 kernel (2 outputs per simdgroup) if available
 		if b.matvecQ6KNR2Pipeline != nil {
-			q6kNR2DebugOnce.Do(func() {
-				fmt.Println("[DEBUG] Using Q6_K NR2 kernel for LM head")
-			})
+			if os.Getenv("DEBUG_DECODE") == "1" {
+				q6kNR2DebugOnce.Do(func() {
+					fmt.Println("[DEBUG] Using Q6_K NR2 kernel for LM head")
+				})
+			}
 			if a.Offset() != 0 || out.Offset() != 0 {
 				C.metal_matvec_q6k_nr2_f32_offset(b.queue, b.matvecQ6KNR2Pipeline,
 					unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),

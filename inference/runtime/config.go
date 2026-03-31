@@ -1,7 +1,7 @@
 package runtime
 
 import (
-	"fmt"
+	"log"
 	"math"
 
 	"vexel/inference/pkg/gguf"
@@ -469,16 +469,16 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		ropeNeox = true
 	}
 
-	fmt.Printf("[CONFIG] Architecture=%s: NormType=%v, MLPType=%v, HasBias=%v, ParallelResidual=%v, RoPENeox=%v\n",
+	log.Printf("[CONFIG] Architecture=%s: NormType=%v, MLPType=%v, HasBias=%v, ParallelResidual=%v, RoPENeox=%v",
 		g.Architecture, normType, mlpType, hasBias, parallelResidual, ropeNeox)
 	if g.HeadDim > 0 {
-		fmt.Printf("[CONFIG] HeadDim=%d (explicit, vs hiddenSize/numHeads=%d)\n", g.HeadDim, g.HiddenSize/g.NumHeads)
+		log.Printf("[CONFIG] HeadDim=%d (explicit, vs hiddenSize/numHeads=%d)", g.HeadDim, g.HiddenSize/g.NumHeads)
 	}
 	if attnLogitSoftCap > 0 {
-		fmt.Printf("[CONFIG] AttentionLogitSoftCap=%.1f, FinalLogitSoftCap=%.1f\n", attnLogitSoftCap, g.FinalLogitSoftCap)
+		log.Printf("[CONFIG] AttentionLogitSoftCap=%.1f, FinalLogitSoftCap=%.1f", attnLogitSoftCap, g.FinalLogitSoftCap)
 	}
 	if hasPostNorms {
-		fmt.Printf("[CONFIG] HasPostNorms=true (Gemma 2 post-attention and post-FFN norms)\n")
+		log.Printf("[CONFIG] HasPostNorms=true (Gemma 2 post-attention and post-FFN norms)")
 	}
 
 	// Use GGUF-provided epsilon if available, otherwise default

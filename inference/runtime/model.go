@@ -3,6 +3,7 @@ package runtime
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"sync"
@@ -43,6 +44,9 @@ type ModelRuntime struct {
 	// Keep converted weight slices alive to prevent GC
 	keepAlive      [][]float32
 	keepAliveBytes [][]byte // For raw quantized weight data
+
+	// Verbose enables detailed loading/config output
+	verbose bool
 }
 
 // NewModelRuntime initializes a new model runtime.
@@ -96,7 +100,7 @@ func (m *ModelRuntime) SetupRoPEFreqs() {
 	halfDim := headDim / 2
 
 	if len(m.config.RoPEFreqScales) != halfDim {
-		fmt.Printf("[WARNING] RoPEFreqScales length %d != expected %d (headDim/2), ignoring\n",
+		log.Printf("[WARNING] RoPEFreqScales length %d != expected %d (headDim/2), ignoring",
 			len(m.config.RoPEFreqScales), halfDim)
 		return
 	}
@@ -105,7 +109,7 @@ func (m *ModelRuntime) SetupRoPEFreqs() {
 	sizeBytes := halfDim * 4
 	freqBuf := m.backend.Alloc(sizeBytes)
 	if freqBuf.IsNil() {
-		fmt.Printf("[WARNING] Failed to allocate %d bytes for RoPE freq buffer\n", sizeBytes)
+		log.Printf("[WARNING] Failed to allocate %d bytes for RoPE freq buffer", sizeBytes)
 		return
 	}
 
@@ -121,7 +125,9 @@ func (m *ModelRuntime) SetupRoPEFreqs() {
 		layer.SetRoPEFreqBuffer(freqBuf)
 	}
 
-	fmt.Printf("[CONFIG] Loaded %d learned RoPE inverse frequencies\n", halfDim)
+	if m.verbose {
+		log.Printf("[CONFIG] Loaded %d learned RoPE inverse frequencies", halfDim)
+	}
 }
 
 // ModelMeta extracts model metadata from the runtime config.
@@ -167,6 +173,11 @@ func (m *ModelRuntime) Backend() backend.Backend {
 // When active, FP16 KV cache is disabled (FP16 fused kernels lack offset support).
 func (m *ModelRuntime) SetUseScratch(active bool) {
 	m.useScratch = active
+}
+
+// SetVerbose enables or disables verbose loading/config output.
+func (m *ModelRuntime) SetVerbose(v bool) {
+	m.verbose = v
 }
 
 // applyFinalNorm applies the final normalization (RMSNorm or LayerNorm based on config).
@@ -325,10 +336,12 @@ func (m *ModelRuntime) outputHeadMatMul(statePtr, logitsPtr tensor.DevicePtr, ba
 	if m.OutputHead.IsQuantized() {
 		if quantBackend, ok := m.backend.(backend.QuantizedMatMul); ok {
 			profile := m.OutputHead.QuantProfile()
-			outputHeadDebugOnce.Do(func() {
-				fmt.Printf("[DEBUG] OutputHead: IsQuantized=%v, Profile=%v, Backend implements QuantizedMatMul=%v\n",
-					m.OutputHead.IsQuantized(), profile, ok)
-			})
+			if debugDecode {
+				outputHeadDebugOnce.Do(func() {
+					fmt.Printf("[DEBUG] OutputHead: IsQuantized=%v, Profile=%v, Backend implements QuantizedMatMul=%v\n",
+						m.OutputHead.IsQuantized(), profile, ok)
+				})
+			}
 
 			// For batch operations, process one position at a time
 			if batchSize > 1 && (profile == tensor.Q6_K || profile == tensor.Q4_0 || profile == tensor.Q4_K || profile == tensor.Q5_K || profile == tensor.Q5_0 || profile == tensor.Q8_0) {

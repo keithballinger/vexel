@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"fmt"
+	"log"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -34,13 +35,15 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 
 	// Validate architecture compatibility
 	if supported, warning := loader.ValidateArchitecture(); !supported {
-		fmt.Printf("\n⚠️  WARNING: %s\n\n", warning)
-	} else {
-		fmt.Printf("Architecture: %s\n", loader.Architecture())
+		log.Printf("WARNING: %s", warning)
+	} else if m.verbose {
+		log.Printf("Architecture: %s", loader.Architecture())
 	}
 
 	// Print stats
-	loader.PrintTensorStats()
+	if m.verbose {
+		loader.PrintTensorStats()
+	}
 
 	// Load each required tensor
 	tensorNames := m.requiredTensorNames()
@@ -63,11 +66,11 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 				}
 			}
 		}
-		if found {
-			fmt.Printf("Loading %s (%s): Type=%v\n", hfName, ggufName, info.Type)
+		if found && m.verbose {
+			log.Printf("Loading %s (%s): Type=%v", hfName, ggufName, info.Type)
 		}
 		if !found {
-			fmt.Printf("Warning: tensor %s (%s) not found\n", hfName, ggufName)
+			log.Printf("Warning: tensor %s (%s) not found", hfName, ggufName)
 			continue
 		}
 
@@ -78,7 +81,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 		if info.Type == gguf.TensorTypeQ4_0 && m.isWeightMatrix(hfName) {
 			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
 			if err != nil {
-				fmt.Printf("Warning: failed to load raw tensor %s: %v\n", hfName, err)
+				log.Printf("Warning: failed to load raw tensor %s: %v", hfName, err)
 				continue
 			}
 
@@ -95,7 +98,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			// Q4_K native GPU kernel - uses get_scale_min_k4 format
 			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
 			if err != nil {
-				fmt.Printf("Warning: failed to load raw Q4_K tensor %s: %v\n", hfName, err)
+				log.Printf("Warning: failed to load raw Q4_K tensor %s: %v", hfName, err)
 				continue
 			}
 			t = tensor.NewQuantTensor(
@@ -110,7 +113,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			// Q5_K native GPU kernel
 			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
 			if err != nil {
-				fmt.Printf("Warning: failed to load raw Q5_K tensor %s: %v\n", hfName, err)
+				log.Printf("Warning: failed to load raw Q5_K tensor %s: %v", hfName, err)
 				continue
 			}
 			t = tensor.NewQuantTensor(
@@ -125,7 +128,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			// Keep as Q6_K for GPU-native quantized inference
 			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
 			if err != nil {
-				fmt.Printf("Warning: failed to load raw tensor %s: %v\n", hfName, err)
+				log.Printf("Warning: failed to load raw tensor %s: %v", hfName, err)
 				continue
 			}
 			t = tensor.NewQuantTensor(
@@ -139,7 +142,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 		} else if info.Type == gguf.TensorTypeQ5_0 && (m.isWeightMatrix(hfName) || hfName == "lm_head.weight") {
 			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
 			if err != nil {
-				fmt.Printf("Warning: failed to load raw Q5_0 tensor %s: %v\n", hfName, err)
+				log.Printf("Warning: failed to load raw Q5_0 tensor %s: %v", hfName, err)
 				continue
 			}
 			t = tensor.NewQuantTensor(
@@ -154,7 +157,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			// Q8_0 native GPU kernel
 			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
 			if err != nil {
-				fmt.Printf("Warning: failed to load raw Q8_0 tensor %s: %v\n", hfName, err)
+				log.Printf("Warning: failed to load raw Q8_0 tensor %s: %v", hfName, err)
 				continue
 			}
 			t = tensor.NewQuantTensor(
@@ -169,7 +172,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			// BF16 native GPU kernel - keep raw BF16 data on GPU
 			rawData, dims, _, err := loader.LoadTensorRaw(ggufName)
 			if err != nil {
-				fmt.Printf("Warning: failed to load raw BF16 tensor %s: %v\n", hfName, err)
+				log.Printf("Warning: failed to load raw BF16 tensor %s: %v", hfName, err)
 				continue
 			}
 			t = tensor.NewQuantTensor(
@@ -184,7 +187,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 			// Dequantize to F32 for embeddings, norms, or non-Q4_0/Q6_K types
 			data, dims, err := loader.LoadTensor(ggufName)
 			if err != nil {
-				fmt.Printf("Warning: failed to load tensor %s: %v\n", hfName, err)
+				log.Printf("Warning: failed to load tensor %s: %v", hfName, err)
 				continue
 			}
 
@@ -201,7 +204,7 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 		loadedCount++
 	}
 
-	fmt.Printf("Loaded %d/%d tensors from GGUF (%d quantized raw)\n", loadedCount, len(tensorNames), q4Count)
+	log.Printf("Loaded %d/%d tensors from GGUF (%d quantized raw)", loadedCount, len(tensorNames), q4Count)
 
 	return nil
 }
@@ -215,7 +218,9 @@ func (m *ModelRuntime) LoadWeightsF32(path string) error {
 	}
 	m.ggufLoader = loader
 
-	loader.PrintTensorStats()
+	if m.verbose {
+		loader.PrintTensorStats()
+	}
 
 	tensorNames := m.requiredTensorNames()
 	loadedCount := 0
@@ -234,7 +239,7 @@ func (m *ModelRuntime) LoadWeightsF32(path string) error {
 			}
 		}
 		if !found {
-			fmt.Printf("Warning: tensor %s (%s) not found\n", hfName, ggufName)
+			log.Printf("Warning: tensor %s (%s) not found", hfName, ggufName)
 			continue
 		}
 		_ = info // Unused but needed for consistency
@@ -242,7 +247,7 @@ func (m *ModelRuntime) LoadWeightsF32(path string) error {
 		// Always dequantize to F32
 		data, dims, err := loader.LoadTensor(ggufName)
 		if err != nil {
-			fmt.Printf("Warning: failed to load tensor %s: %v\n", hfName, err)
+			log.Printf("Warning: failed to load tensor %s: %v", hfName, err)
 			continue
 		}
 
@@ -257,7 +262,7 @@ func (m *ModelRuntime) LoadWeightsF32(path string) error {
 		loadedCount++
 	}
 
-	fmt.Printf("Loaded %d/%d tensors from GGUF (all F32 dequantized)\n", loadedCount, len(tensorNames))
+	log.Printf("Loaded %d/%d tensors from GGUF (all F32 dequantized)", loadedCount, len(tensorNames))
 	return nil
 }
 
@@ -587,7 +592,7 @@ func (m *ModelRuntime) CopyWeightsToDevice() error {
 	// Weight tying: if output head is missing, use the embedding weights
 	if m.OutputHead.DevicePtr().IsNil() && !m.Embedding.DevicePtr().IsNil() {
 		m.OutputHead = m.Embedding
-		fmt.Println("Using tied embedding weights for output head")
+		log.Println("Using tied embedding weights for output head")
 	}
 
 	// Copy layer weights
@@ -748,7 +753,7 @@ func (m *ModelRuntime) FuseQKVWeights() error {
 		kElements := kRows * cols
 		vElements := vRows * cols
 		if qElements%blockSize != 0 || kElements%blockSize != 0 || vElements%blockSize != 0 {
-			fmt.Printf("Warning: layer %d QKV fusion skipped (not aligned to Q4_0 block size)\n", i)
+			log.Printf("Warning: layer %d QKV fusion skipped (not aligned to Q4_0 block size)", i)
 			continue
 		}
 
@@ -777,7 +782,7 @@ func (m *ModelRuntime) FuseQKVWeights() error {
 		layer.Wqkv = tensor.NewQuantTensor(tensor.NewShape(totalRows, cols), m.config.DType, fusedPtr, tensor.Q4_0)
 
 		if i == 0 {
-			fmt.Printf("QKV fusion: [%d,%d]+[%d,%d]+[%d,%d] → [%d,%d] (%.1f MB/layer, %d layers)\n",
+			log.Printf("QKV fusion: [%d,%d]+[%d,%d]+[%d,%d] → [%d,%d] (%.1f MB/layer, %d layers)",
 				qRows, cols, kRows, cols, vRows, cols, totalRows, cols,
 				float64(totalBytes)/(1024*1024), len(m.layers))
 		}
@@ -835,7 +840,7 @@ func (m *ModelRuntime) FuseGateUpWeights() error {
 		w1Elements := w1Rows * cols
 		w3Elements := w3Rows * cols
 		if w1Elements%blockSize != 0 || w3Elements%blockSize != 0 {
-			fmt.Printf("Warning: layer %d gate_up fusion skipped (not aligned to Q4_0 block size)\n", i)
+			log.Printf("Warning: layer %d gate_up fusion skipped (not aligned to Q4_0 block size)", i)
 			continue
 		}
 
@@ -862,7 +867,7 @@ func (m *ModelRuntime) FuseGateUpWeights() error {
 		layer.W1W3 = tensor.NewQuantTensor(tensor.NewShape(totalRows, cols), m.config.DType, fusedPtr, tensor.Q4_0)
 
 		if i == 0 {
-			fmt.Printf("Gate_up fusion: [%d,%d]+[%d,%d] → [%d,%d] (%.1f MB/layer, %d layers)\n",
+			log.Printf("Gate_up fusion: [%d,%d]+[%d,%d] → [%d,%d] (%.1f MB/layer, %d layers)",
 				w1Rows, cols, w3Rows, cols, totalRows, cols,
 				float64(totalBytes)/(1024*1024), len(m.layers))
 		}
@@ -1010,7 +1015,7 @@ func (m *ModelRuntime) mapTensor(name string, t tensor.Tensor) {
 func (m *ModelRuntime) splitQKVWeight(layer *BlockRuntime, combined tensor.Tensor) {
 	dims := combined.Shape().Dims()
 	if len(dims) != 2 {
-		fmt.Printf("Warning: unexpected QKV weight shape: %v\n", dims)
+		log.Printf("Warning: unexpected QKV weight shape: %v", dims)
 		return
 	}
 
@@ -1025,7 +1030,7 @@ func (m *ModelRuntime) splitQKVWeight(layer *BlockRuntime, combined tensor.Tenso
 	// Verify total matches
 	expectedRows := qRows + kvRows + kvRows
 	if totalRows != expectedRows {
-		fmt.Printf("Warning: QKV weight rows %d != expected %d (Q=%d, KV=%d each)\n",
+		log.Printf("Warning: QKV weight rows %d != expected %d (Q=%d, KV=%d each)",
 			totalRows, expectedRows, qRows, kvRows)
 		return
 	}
@@ -1056,7 +1061,7 @@ func (m *ModelRuntime) splitQKVWeight(layer *BlockRuntime, combined tensor.Tenso
 		case tensor.BF16:
 			blockSize, bytesPerBlock = 1, 2
 		default:
-			fmt.Printf("Warning: splitting quantized profile %v not yet supported\n", profile)
+			log.Printf("Warning: splitting quantized profile %v not yet supported", profile)
 			return
 		}
 
@@ -1064,7 +1069,7 @@ func (m *ModelRuntime) splitQKVWeight(layer *BlockRuntime, combined tensor.Tenso
 		kvElements := kvRows * cols
 
 		if qElements%blockSize != 0 || kvElements%blockSize != 0 {
-			fmt.Printf("Warning: quantized split point not aligned with block size (%d)\n", blockSize)
+			log.Printf("Warning: quantized split point not aligned with block size (%d)", blockSize)
 			return
 		}
 
@@ -1101,7 +1106,7 @@ func (m *ModelRuntime) splitQKVWeight(layer *BlockRuntime, combined tensor.Tenso
 func (m *ModelRuntime) splitQKVBias(layer *BlockRuntime, combined tensor.Tensor) {
 	dims := combined.Shape().Dims()
 	if len(dims) != 1 {
-		fmt.Printf("Warning: unexpected QKV bias shape: %v\n", dims)
+		log.Printf("Warning: unexpected QKV bias shape: %v", dims)
 		return
 	}
 
@@ -1114,7 +1119,7 @@ func (m *ModelRuntime) splitQKVBias(layer *BlockRuntime, combined tensor.Tensor)
 
 	expectedSize := qSize + kvSize + kvSize
 	if totalSize != expectedSize {
-		fmt.Printf("Warning: QKV bias size %d != expected %d\n", totalSize, expectedSize)
+		log.Printf("Warning: QKV bias size %d != expected %d", totalSize, expectedSize)
 		return
 	}
 
@@ -1140,7 +1145,7 @@ func (m *ModelRuntime) splitQKVBias(layer *BlockRuntime, combined tensor.Tensor)
 func (m *ModelRuntime) splitGateUpWeight(layer *BlockRuntime, combined tensor.Tensor) {
 	dims := combined.Shape().Dims()
 	if len(dims) != 2 {
-		fmt.Printf("Warning: unexpected gate_up weight shape: %v\n", dims)
+		log.Printf("Warning: unexpected gate_up weight shape: %v", dims)
 		return
 	}
 
@@ -1149,7 +1154,7 @@ func (m *ModelRuntime) splitGateUpWeight(layer *BlockRuntime, combined tensor.Te
 
 	intermediateSize := m.config.IntermediateSize
 	if totalRows != 2*intermediateSize {
-		fmt.Printf("Warning: gate_up weight rows %d != expected %d (2*%d)\n",
+		log.Printf("Warning: gate_up weight rows %d != expected %d (2*%d)",
 			totalRows, 2*intermediateSize, intermediateSize)
 		return
 	}
@@ -1182,13 +1187,13 @@ func (m *ModelRuntime) splitGateUpWeight(layer *BlockRuntime, combined tensor.Te
 		case tensor.BF16:
 			blockSize, bytesPerBlock = 1, 2
 		default:
-			fmt.Printf("Warning: splitting quantized gate_up profile %v not yet supported\n", profile)
+			log.Printf("Warning: splitting quantized gate_up profile %v not yet supported", profile)
 			return
 		}
 
 		gateElements := gateRows * cols
 		if gateElements%blockSize != 0 {
-			fmt.Printf("Warning: quantized gate_up split point not aligned with block size (%d)\n", blockSize)
+			log.Printf("Warning: quantized gate_up split point not aligned with block size (%d)", blockSize)
 			return
 		}
 
