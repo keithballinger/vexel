@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"log"
 	"math"
 
 	"vexel/inference/pkg/gguf"
@@ -469,17 +468,7 @@ func ModelConfigFromGGUF(g gguf.ModelConfigValues) ModelConfig {
 		ropeNeox = true
 	}
 
-	log.Printf("[CONFIG] Architecture=%s: NormType=%v, MLPType=%v, HasBias=%v, ParallelResidual=%v, RoPENeox=%v",
-		g.Architecture, normType, mlpType, hasBias, parallelResidual, ropeNeox)
-	if g.HeadDim > 0 {
-		log.Printf("[CONFIG] HeadDim=%d (explicit, vs hiddenSize/numHeads=%d)", g.HeadDim, g.HiddenSize/g.NumHeads)
-	}
-	if attnLogitSoftCap > 0 {
-		log.Printf("[CONFIG] AttentionLogitSoftCap=%.1f, FinalLogitSoftCap=%.1f", attnLogitSoftCap, g.FinalLogitSoftCap)
-	}
-	if hasPostNorms {
-		log.Printf("[CONFIG] HasPostNorms=true (Gemma 2 post-attention and post-FFN norms)")
-	}
+	// These config details are only logged in verbose mode by ModelRuntime after SetVerbose is called.
 
 	// Use GGUF-provided epsilon if available, otherwise default
 	rmsNormEPS := float64(g.RMSNormEPS)

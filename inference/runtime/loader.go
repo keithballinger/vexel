@@ -204,7 +204,9 @@ func (m *ModelRuntime) LoadWeightsGGUF(path string) error {
 		loadedCount++
 	}
 
-	log.Printf("Loaded %d/%d tensors from GGUF (%d quantized raw)", loadedCount, len(tensorNames), q4Count)
+	if m.verbose {
+		log.Printf("Loaded %d/%d tensors from GGUF (%d quantized raw)", loadedCount, len(tensorNames), q4Count)
+	}
 
 	return nil
 }
@@ -262,7 +264,9 @@ func (m *ModelRuntime) LoadWeightsF32(path string) error {
 		loadedCount++
 	}
 
-	log.Printf("Loaded %d/%d tensors from GGUF (all F32 dequantized)", loadedCount, len(tensorNames))
+	if m.verbose {
+		log.Printf("Loaded %d/%d tensors from GGUF (all F32 dequantized)", loadedCount, len(tensorNames))
+	}
 	return nil
 }
 

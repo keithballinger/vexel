@@ -178,6 +178,25 @@ func (m *ModelRuntime) SetUseScratch(active bool) {
 // SetVerbose enables or disables verbose loading/config output.
 func (m *ModelRuntime) SetVerbose(v bool) {
 	m.verbose = v
+	if v {
+		m.logConfigDetails()
+	}
+}
+
+// logConfigDetails prints detailed model configuration information (only in verbose mode).
+func (m *ModelRuntime) logConfigDetails() {
+	c := m.config
+	log.Printf("[CONFIG] Architecture=%s: NormType=%v, MLPType=%v, HasBias=%v, ParallelResidual=%v, RoPENeox=%v",
+		"auto-detected", c.NormType, c.MLPType, c.HasBias, c.ParallelResidual, c.RoPENeox)
+	if c.HeadDim > 0 {
+		log.Printf("[CONFIG] HeadDim=%d (explicit, vs hiddenSize/numHeads=%d)", c.HeadDim, c.HiddenSize/c.NumAttentionHeads)
+	}
+	if c.AttentionLogitSoftCap > 0 {
+		log.Printf("[CONFIG] AttentionLogitSoftCap=%.1f, FinalLogitSoftCap=%.1f", c.AttentionLogitSoftCap, c.FinalLogitSoftCap)
+	}
+	if c.HasPostNorms {
+		log.Printf("[CONFIG] HasPostNorms=true (Gemma 2 post-attention and post-FFN norms)")
+	}
 }
 
 // applyFinalNorm applies the final normalization (RMSNorm or LayerNorm based on config).

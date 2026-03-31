@@ -16,3 +16,8 @@ benchmarks/results/
 
 # Memory/cache
 .remember/
+
+# Debug tools and test data
+compare_layers
+data/
+tools/
