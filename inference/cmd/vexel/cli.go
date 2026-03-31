@@ -16,6 +16,7 @@ type GlobalFlags struct {
 	MedusaHeadsPath string // Path to Medusa heads weights file (implies --medusa)
 	ContextLen      int    // Maximum context length for KV cache (0 = default 2048)
 	NoChatTemplate  bool   // Disable automatic chat template wrapping for instruct models
+	LoRAPath        string // Path to LoRA adapter directory
 }
 
 // validSubcommands lists the recognized subcommand names.
@@ -81,6 +82,12 @@ func parseArgs(args []string) (string, GlobalFlags, error) {
 		case "--no-chat-template":
 			globals.NoChatTemplate = true
 			i++
+		case "--lora":
+			if i+1 >= len(args) {
+				return "", GlobalFlags{}, fmt.Errorf("--lora requires a path")
+			}
+			globals.LoRAPath = args[i+1]
+			i += 2
 		default:
 			// Not a global flag — must be the subcommand
 			goto foundCmd
@@ -237,6 +244,7 @@ Global flags:
   --medusa-heads      Path to Medusa heads weights file (implies --medusa)
   --context-len       Maximum context length for KV cache (default 2048)
   --no-chat-template  Disable automatic chat template wrapping for instruct models
+  --lora              Path to LoRA adapter directory (optional)
 
 Examples:
   vexel --model model.gguf serve --port 8080 --grpc-port 9090

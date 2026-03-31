@@ -18,6 +18,7 @@ import (
 
 	"vexel/inference/backend/metal"
 	"vexel/inference/cmd/vexel/internal"
+	"vexel/inference/lora"
 	"vexel/inference/memory"
 	"vexel/inference/pkg/gguf"
 	"vexel/inference/pkg/sampler"
@@ -30,7 +31,8 @@ import (
 
 // initModel loads the model from a GGUF file and returns the runtime, tokenizer, and backend.
 // This is shared setup used by serve, generate, and chat subcommands.
-func initModel(modelPath string, maxTokens, contextLen int, verbose, usePaged bool) (*runtime.ModelRuntime, *tokenizer.Tokenizer, *metal.Backend, error) {
+func initModel(globals GlobalFlags, maxTokens, contextLen int, verbose, usePaged bool) (*runtime.ModelRuntime, *tokenizer.Tokenizer, *metal.Backend, error) {
+	modelPath := globals.Model
 	if modelPath == "" {
 		return nil, nil, nil, fmt.Errorf("--model flag is required")
 	}
@@ -102,6 +104,22 @@ func initModel(modelPath string, maxTokens, contextLen int, verbose, usePaged bo
 		log.Printf("Using paged KV cache (maxBlocks=%d, blockSize=%d, maxContext=%d)", maxBlocks, blockSize, maxContextLen)
 	} else {
 		model.CreateGPUKVCache(maxContextLen)
+	}
+
+	if globals.LoRAPath != "" {
+		adapter, err := lora.LoadAdapter(globals.LoRAPath)
+		if err != nil {
+			gpuBackend.Close()
+			return nil, nil, nil, fmt.Errorf("load LoRA adapter: %w", err)
+		}
+		gpuAdapter, err := lora.UploadToGPU(adapter, gpuBackend)
+		if err != nil {
+			gpuBackend.Close()
+			return nil, nil, nil, fmt.Errorf("upload LoRA to GPU: %w", err)
+		}
+		model.AttachLoRA(gpuAdapter)
+		log.Printf("LoRA adapter loaded: rank=%d, alpha=%.0f, scale=%.4f, layers=%d",
+			adapter.Config.Rank, adapter.Config.Alpha, adapter.Scale, len(adapter.Layers))
 	}
 
 	// Load tokenizer from GGUF (preferred — guarantees vocab matches the model).
@@ -197,7 +215,7 @@ func runServe(globals GlobalFlags, args []string) error {
 	// Use paged KV when explicitly requested (--context-len) or for Medusa mode.
 	// Otherwise use GPU KV cache which is faster for single-client decode.
 	usePaged := globals.ContextLen > 0
-	model, tok, gpuBackend, err := initModel(globals.Model, sf.MaxTokens, globals.ContextLen, globals.Verbose, usePaged)
+	model, tok, gpuBackend, err := initModel(globals, sf.MaxTokens, globals.ContextLen, globals.Verbose, usePaged)
 	if err != nil {
 		return err
 	}
@@ -354,7 +372,7 @@ func runGenerate(globals GlobalFlags, args []string) error {
 	}
 
 	usePaged := globals.ContextLen > 0
-	model, tok, gpuBackend, err := initModel(globals.Model, gf.MaxTokens, globals.ContextLen, globals.Verbose, usePaged)
+	model, tok, gpuBackend, err := initModel(globals, gf.MaxTokens, globals.ContextLen, globals.Verbose, usePaged)
 	if err != nil {
 		return err
 	}
@@ -479,7 +497,7 @@ func runChat(globals GlobalFlags, args []string) error {
 	samplerCfg := sampler.DefaultConfig()
 	samplerCfg.Temperature = float32(cf.Temperature)
 
-	model, tok, gpuBackend, err := initModel(globals.Model, cf.MaxTokens, globals.ContextLen, globals.Verbose, false)
+	model, tok, gpuBackend, err := initModel(globals, cf.MaxTokens, globals.ContextLen, globals.Verbose, false)
 	if err != nil {
 		return err
 	}
