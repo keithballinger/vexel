@@ -736,14 +736,16 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 	scratch := tensor.NewTensor(tensor.NewShape(int(scratchBytes/4)), m.config.DType, scratchPtr)
 
 	// 5. Layer Loop using ExecuteWithGPUKV
-	// Cross-layer batching for decode (batchSize==1). For prefill (batchSize>1),
-	// the large number of dispatches per command buffer can hit Metal GPU timeouts.
-	// Skip cross-layer batching for models with post-norms (Gemma 2): the additional
-	// norm dispatches within each layer need more aggressive GPU serialization.
-	if batchSize == 1 && !m.config.HasPostNorms {
+	// Cross-layer batching for decode (batchSize==1): all layer dispatches share
+	// one command encoder, reducing per-layer commit overhead. The batch is committed
+	// after the layer loop (not deferred to function end) so that finalNorm and
+	// outputHead dispatches run in separate command buffers — required for models
+	// with many dispatches per layer (e.g., Gemma 2 with post-norms and GeGLU).
+	var crossLayerBatcher backend.Batcher
+	if batchSize == 1 {
 		if batcher, ok := m.backend.(backend.Batcher); ok && !cachedGPUProfile {
 			batcher.BeginBatch()
-			defer batcher.EndBatch()
+			crossLayerBatcher = batcher
 		}
 	}
 
@@ -759,6 +761,9 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 	for i, layer := range m.layers {
 		state, err = layer.ExecuteWithGPUKV(state, scratch, m.gpuCache, i, pos)
 		if err != nil {
+			if crossLayerBatcher != nil {
+				crossLayerBatcher.EndBatch()
+			}
 			return tensor.Tensor{}, fmt.Errorf("layer %d: %w", i, err)
 		}
 		// Debug every layer to trace where values go wrong
@@ -768,9 +773,14 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 		}
 	}
 
-	// For prefill (no outer batch), Sync to ensure all per-layer batches completed
-	// before extracting the last token's hidden state for logits computation.
-	// For decode, the deferred EndBatch from the outer cross-layer batch handles this.
+	// Commit the cross-layer batch before finalNorm and outputHead.
+	if crossLayerBatcher != nil {
+		crossLayerBatcher.EndBatch()
+	}
+
+	// For prefill (no cross-layer batch), Sync to ensure all per-layer batches
+	// completed before extracting the last token's hidden state for logits.
+	// For decode, the cross-layer EndBatch above already committed.
 	if batchSize > 1 {
 		m.backend.Sync()
 	}
