@@ -11,6 +11,7 @@ import (
 
 	"vexel/inference/backend"
 	"vexel/inference/kv"
+	"vexel/inference/lora"
 	"vexel/inference/memory"
 	"vexel/inference/pkg/gguf"
 	"vexel/inference/tensor"
@@ -47,6 +48,9 @@ type ModelRuntime struct {
 
 	// Verbose enables detailed loading/config output
 	verbose bool
+
+	// loraAdapter holds GPU-resident LoRA weights attached via AttachLoRA.
+	loraAdapter *lora.GPUAdapter
 }
 
 // NewModelRuntime initializes a new model runtime.
@@ -506,4 +510,34 @@ func (m *ModelRuntime) GetOutputHeadWeightsF32() []float32 {
 // float32frombits converts a uint32 bit pattern to float32.
 func float32frombits(b uint32) float32 {
 	return *(*float32)(unsafe.Pointer(&b))
+}
+
+// AttachLoRA wires a GPU-resident LoRA adapter into the model's layer stack.
+// The adapter's weights are injected into Q and V projections during forward
+// passes until replaced or set to nil.
+func (m *ModelRuntime) AttachLoRA(adapter *lora.GPUAdapter) {
+	m.loraAdapter = adapter
+	m.wireLoRA()
+}
+
+// wireLoRA propagates the current loraAdapter to each BlockRuntime so the
+// forward pass can apply the LoRA deltas without an extra indirection.
+func (m *ModelRuntime) wireLoRA() {
+	if m.loraAdapter == nil {
+		// Detach: clear all layer references.
+		for _, layer := range m.layers {
+			layer.loraLayer = nil
+			layer.loraRank = 0
+			layer.loraScale = 0
+		}
+		return
+	}
+	for i, layer := range m.layers {
+		la := m.loraAdapter.GetLayer(i)
+		if la != nil {
+			layer.loraLayer = la
+			layer.loraRank = m.loraAdapter.Rank
+			layer.loraScale = m.loraAdapter.Scale
+		}
+	}
 }

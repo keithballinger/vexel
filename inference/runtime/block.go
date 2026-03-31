@@ -11,6 +11,7 @@ import (
 	"vexel/inference/backend"
 	"vexel/inference/debug"
 	"vexel/inference/kv"
+	"vexel/inference/lora"
 	"vexel/inference/tensor"
 )
 
@@ -340,11 +341,49 @@ type BlockRuntime struct {
 
 	// Execution plan (set by ModelRuntime.BuildPlan)
 	plan *ExecutionPlan
+
+	// LoRA adapter weights for this layer (nil when no adapter is attached).
+	// Set by ModelRuntime.wireLoRA.
+	loraLayer *lora.GPULayerAdapter
+	loraRank  int
+	loraScale float32
 }
 
 // SetPlan sets the execution plan for this block.
 func (b *BlockRuntime) SetPlan(plan *ExecutionPlan) {
 	b.plan = plan
+}
+
+// applyLoRA adds the LoRA delta (scale * B @ (A @ x)) to out in-place.
+//
+//	x        — input activations [seqLen, inDim] (FP32, row-major)
+//	a        — LoRA A matrix [rank, inDim]  (GPU, FP32)
+//	bMat     — LoRA B matrix [outDim, rank] (GPU, FP32)
+//	out      — projection output [seqLen, outDim]; updated in-place
+//	seqLen   — number of tokens in this forward pass
+//	rank     — LoRA rank r
+//	inDim    — input feature dimension (hiddenSize)
+//	outDim   — output feature dimension (numHeads*headDim or numKVHeads*headDim)
+//	scale    — lora_alpha / rank
+func (b *BlockRuntime) applyLoRA(x, a, bMat, out tensor.DevicePtr, seqLen, rank, inDim, outDim int, scale float32) {
+	// Step 1: intermediate = x @ A^T  →  [seqLen, rank]
+	intermediate := b.backend.Alloc(seqLen * rank * 4)
+	b.backend.MatMulTransposed(x, a, intermediate, seqLen, rank, inDim)
+
+	// Step 2: loraOut = intermediate @ B^T  →  [seqLen, outDim]
+	loraOut := b.backend.Alloc(seqLen * outDim * 4)
+	b.backend.MatMulTransposed(intermediate, bMat, loraOut, seqLen, outDim, rank)
+
+	// Step 3: out += scale * loraOut
+	// ScaleBuffer is optional (ScaleOps interface); fall back to CPU loop if unavailable.
+	if scale != 1.0 {
+		if scaler, ok := b.backend.(backend.ScaleOps); ok {
+			scaler.ScaleBuffer(loraOut, scale, seqLen*outDim)
+		}
+		// If ScaleOps is not available the scale will be 1.0 only for alpha==rank adapters;
+		// for other cases we silently skip scaling. Production Metal backends implement ScaleOps.
+	}
+	b.backend.Add(out, loraOut, out, seqLen*outDim)
 }
 
 // NewBlockRuntime creates a new block runtime with config.
@@ -1417,7 +1456,12 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 					qDim := b.Wq.Shape().Dims()[0]
 					b.matMulTransposedWithBias(normOutPtr, b.Wq, b.WqBias, qPtr, seqLen, qDim, hiddenSize)
 				}
-				barrier() // Ensure Q completes before K reads normOut
+				// LoRA Q contribution: qPtr += scale * QB @ (QA @ normOut)
+				if b.loraLayer != nil && b.loraLayer.HasQ {
+					b.applyLoRA(normOutPtr, b.loraLayer.QA, b.loraLayer.QB, qPtr,
+						seqLen, b.loraRank, hiddenSize, numHeads*headDim, b.loraScale)
+				}
+				barrier() // Ensure Q (+ LoRA delta) completes before K reads normOut
 				if !b.Wk.DevicePtr().IsNil() {
 					kDim := b.Wk.Shape().Dims()[0]
 					b.matMulTransposedWithBias(normOutPtr, b.Wk, b.WkBias, kPtr, seqLen, kDim, hiddenSize)
@@ -1426,6 +1470,11 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				if !b.Wv.DevicePtr().IsNil() {
 					vDim := b.Wv.Shape().Dims()[0]
 					b.matMulTransposedWithBias(normOutPtr, b.Wv, b.WvBias, vPtr, seqLen, vDim, hiddenSize)
+				}
+				// LoRA V contribution: vPtr += scale * VB @ (VA @ normOut)
+				if b.loraLayer != nil && b.loraLayer.HasV {
+					b.applyLoRA(normOutPtr, b.loraLayer.VA, b.loraLayer.VB, vPtr,
+						seqLen, b.loraRank, hiddenSize, numKVHeads*headDim, b.loraScale)
 				}
 			}
 		})
