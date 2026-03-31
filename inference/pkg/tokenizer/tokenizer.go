@@ -840,6 +840,23 @@ func Phi3ChatTemplate() ChatTemplate {
 	}
 }
 
+// Gemma2ChatTemplate returns the Gemma 2 chat template.
+// Gemma 2 uses <start_of_turn>/<end_of_turn> special tokens for turn delimiters.
+// It has no system role; system prompts should be prepended to the first user message.
+// The per-turn stop token is <end_of_turn> (ID 107), distinct from EOS (ID 1).
+func Gemma2ChatTemplate() ChatTemplate {
+	return ChatTemplate{
+		Name:              "gemma2",
+		SystemPrefix:      "",  // Gemma 2 has no system role
+		SystemSuffix:      "",
+		UserPrefix:        "<start_of_turn>user\n",
+		UserSuffix:        "<end_of_turn>\n",
+		AssistantPrefix:   "<start_of_turn>model\n",
+		AssistantSuffix:   "<end_of_turn>\n",
+		ExtraStopTokenIDs: []int{107}, // <end_of_turn> token ID in Gemma 2 vocab
+	}
+}
+
 // DetectChatTemplate picks a chat template based on the model file path.
 // It inspects the filename for known model family patterns.
 func DetectChatTemplate(modelPath string) ChatTemplate {
@@ -862,6 +879,12 @@ func DetectChatTemplate(modelPath string) ChatTemplate {
 		strings.Contains(lower, "phi3") ||
 		strings.Contains(lower, "phi_3"):
 		return Phi3ChatTemplate()
+
+	// Gemma 2 uses <start_of_turn>/<end_of_turn> special tokens, not ChatML.
+	// Must be checked before any generic "gemma" case.
+	case strings.Contains(lower, "gemma-2") ||
+		strings.Contains(lower, "gemma2"):
+		return Gemma2ChatTemplate()
 
 	case strings.Contains(lower, "mistral") ||
 		strings.Contains(lower, "qwen") ||
