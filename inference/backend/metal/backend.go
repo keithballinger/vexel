@@ -1227,14 +1227,23 @@ func (b *Backend) MatMulQ5_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 // B contains raw Q5_0 data (22 bytes per 32 elements: 2 byte f16 scale + 4 byte qh + 16 bytes qs).
 func (b *Backend) MatMulQ5_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 	b.profiler.RecordDispatch("MatMulQ5_0")
-	if b.matmulQ5_0BatchedPipeline == nil {
-		panic("MatMulQ5_0 called but no matmulQ5_0BatchedPipeline available")
+	if b.matvecQ5_0NR2Pipeline == nil {
+		panic("MatMulQ5_0 called but no matvecQ5_0NR2Pipeline available")
 	}
-	C.metal_matmul_q5_0_batched_f32(b.queue, b.matmulQ5_0BatchedPipeline,
-		unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
-		unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
-		unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
-		C.int(m), C.int(n), C.int(k))
+	// Use the optimized M=1 NR2 kernel for all batch sizes via explicit loop.
+	// This ensures bit-identical results for the same row regardless of M,
+	// matching Q8_0's dispatch strategy for consistency.
+	stateRowBytes := uintptr(k * 4)
+	outRowBytes := uintptr(n * 4)
+	for i := 0; i < m; i++ {
+		aOff := C.uint64_t(a.Offset()) + C.uint64_t(uintptr(i)*stateRowBytes)
+		outOff := C.uint64_t(out.Offset()) + C.uint64_t(uintptr(i)*outRowBytes)
+		C.metal_matvec_q5_0_nr2_f32(b.queue, b.matvecQ5_0NR2Pipeline,
+			unsafe.Pointer(a.Addr()), aOff,
+			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
+			unsafe.Pointer(out.Addr()), outOff,
+			C.int(n), C.int(k))
+	}
 }
 
 // MatMulQ8_0 performs C = A @ B^T where A is [M,K] in F32, B is [N,K] in Q8_0 format.

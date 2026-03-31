@@ -5483,6 +5483,8 @@ constant int Q5_0_NR2_OUTPUTS_PER_TG = 16; // 8 simdgroups × 2 outputs
 
 // Q5_0 NR2 matvec: [1,K] × [N,K]^T → [1,N]
 // Each simdgroup handles 2 N outputs, lanes stride through blocks.
+// Optimized: float4 vectorized A loads, factored dot products (d*(dot(a,q) - 16*sum(a))),
+// uint vector loads for qs bytes.
 kernel void matvec_q5_0_nr2_f32(
     device const float* A [[buffer(0)]],
     device const uchar* B [[buffer(1)]],
@@ -5503,65 +5505,222 @@ kernel void matvec_q5_0_nr2_f32(
     int numBlocks = (K + Q5_0_BLOCK_SIZE - 1) / Q5_0_BLOCK_SIZE;
     device const uchar* b_row0 = B + (int64_t)row0 * numBlocks * Q5_0_BYTES_PER_BLOCK;
     device const uchar* b_row1 = B + (int64_t)row1 * numBlocks * Q5_0_BYTES_PER_BLOCK;
+    bool hasRow1 = (row1 < N);
 
     for (int block = simd_lane; block < numBlocks; block += 32) {
         int base_k = block * Q5_0_BLOCK_SIZE;
-        int elems = min(Q5_0_BLOCK_SIZE, K - base_k);
 
-        // Load A values for this block (reuse across both rows)
-        float a_vals[32];
-        for (int i = 0; i < elems; i++) {
-            a_vals[i] = A[base_k + i];
-        }
+        if (base_k + 32 <= K) {
+            // Fast path: full 32-element block with vectorized loads
+            // Load A as float4 vectors (8 float4s = 32 floats)
+            device const float4* a_vec = (device const float4*)(A + base_k);
+            float4 a0 = a_vec[0], a1 = a_vec[1], a2 = a_vec[2], a3 = a_vec[3];
+            float4 a4 = a_vec[4], a5 = a_vec[5], a6 = a_vec[6], a7 = a_vec[7];
 
-        // Row 0
-        {
-            device const uchar* p = b_row0 + block * Q5_0_BYTES_PER_BLOCK;
-            float d = float(as_type<half>(*((device const ushort*)p)));
-            // Read qh byte-by-byte to avoid potential alignment issues
-            uint32_t qh = uint32_t(p[2]) | (uint32_t(p[3]) << 8) | (uint32_t(p[4]) << 16) | (uint32_t(p[5]) << 24);
-            device const uchar* qs = p + 6;
+            // Row 0
+            {
+                device const uchar* p = b_row0 + block * Q5_0_BYTES_PER_BLOCK;
+                float d = float(as_type<half>(*((device const ushort*)p)));
+                // Read qh byte-by-byte to avoid potential alignment issues
+                uint32_t qh = uint32_t(p[2]) | (uint32_t(p[3]) << 8) | (uint32_t(p[4]) << 16) | (uint32_t(p[5]) << 24);
+                // Read qs bytes individually (p+6 is not 4-byte aligned due to 22-byte block size)
+                device const uchar* qs = p + 6;
 
-            float s = 0.0f;
-            // First 16 elements (low nibbles)
-            for (int j = 0; j < min(16, elems); j++) {
-                uint8_t xi0 = qs[j] & 0x0F;
-                uint8_t xh0 = ((qh >> j) << 4) & 0x10;
-                int q = int(xi0 | xh0) - 16;
-                s += a_vals[j] * float(q);
+                // Factored: d * (dot(a, q5) - 16 * sum(a))
+                float raw_dot = 0.0f;
+                float act_sum = 0.0f;
+
+                // Low nibble elements 0-3
+                float4 q;
+                q = float4(float((qs[0] & 0xF) | (((qh >> 0) & 1) << 4)),
+                           float((qs[1] & 0xF) | (((qh >> 1) & 1) << 4)),
+                           float((qs[2] & 0xF) | (((qh >> 2) & 1) << 4)),
+                           float((qs[3] & 0xF) | (((qh >> 3) & 1) << 4)));
+                raw_dot += dot(a0, q);
+                act_sum += a0.x + a0.y + a0.z + a0.w;
+
+                // Low nibble elements 4-7
+                q = float4(float((qs[4] & 0xF) | (((qh >> 4) & 1) << 4)),
+                           float((qs[5] & 0xF) | (((qh >> 5) & 1) << 4)),
+                           float((qs[6] & 0xF) | (((qh >> 6) & 1) << 4)),
+                           float((qs[7] & 0xF) | (((qh >> 7) & 1) << 4)));
+                raw_dot += dot(a1, q);
+                act_sum += a1.x + a1.y + a1.z + a1.w;
+
+                // Low nibble elements 8-11
+                q = float4(float((qs[8] & 0xF) | (((qh >> 8) & 1) << 4)),
+                           float((qs[9] & 0xF) | (((qh >> 9) & 1) << 4)),
+                           float((qs[10] & 0xF) | (((qh >> 10) & 1) << 4)),
+                           float((qs[11] & 0xF) | (((qh >> 11) & 1) << 4)));
+                raw_dot += dot(a2, q);
+                act_sum += a2.x + a2.y + a2.z + a2.w;
+
+                // Low nibble elements 12-15
+                q = float4(float((qs[12] & 0xF) | (((qh >> 12) & 1) << 4)),
+                           float((qs[13] & 0xF) | (((qh >> 13) & 1) << 4)),
+                           float((qs[14] & 0xF) | (((qh >> 14) & 1) << 4)),
+                           float((qs[15] & 0xF) | (((qh >> 15) & 1) << 4)));
+                raw_dot += dot(a3, q);
+                act_sum += a3.x + a3.y + a3.z + a3.w;
+
+                // High nibble elements 16-19
+                q = float4(float((qs[0] >> 4) | (((qh >> 16) & 1) << 4)),
+                           float((qs[1] >> 4) | (((qh >> 17) & 1) << 4)),
+                           float((qs[2] >> 4) | (((qh >> 18) & 1) << 4)),
+                           float((qs[3] >> 4) | (((qh >> 19) & 1) << 4)));
+                raw_dot += dot(a4, q);
+                act_sum += a4.x + a4.y + a4.z + a4.w;
+
+                // High nibble elements 20-23
+                q = float4(float((qs[4] >> 4) | (((qh >> 20) & 1) << 4)),
+                           float((qs[5] >> 4) | (((qh >> 21) & 1) << 4)),
+                           float((qs[6] >> 4) | (((qh >> 22) & 1) << 4)),
+                           float((qs[7] >> 4) | (((qh >> 23) & 1) << 4)));
+                raw_dot += dot(a5, q);
+                act_sum += a5.x + a5.y + a5.z + a5.w;
+
+                // High nibble elements 24-27
+                q = float4(float((qs[8] >> 4) | (((qh >> 24) & 1) << 4)),
+                           float((qs[9] >> 4) | (((qh >> 25) & 1) << 4)),
+                           float((qs[10] >> 4) | (((qh >> 26) & 1) << 4)),
+                           float((qs[11] >> 4) | (((qh >> 27) & 1) << 4)));
+                raw_dot += dot(a6, q);
+                act_sum += a6.x + a6.y + a6.z + a6.w;
+
+                // High nibble elements 28-31
+                q = float4(float((qs[12] >> 4) | (((qh >> 28) & 1) << 4)),
+                           float((qs[13] >> 4) | (((qh >> 29) & 1) << 4)),
+                           float((qs[14] >> 4) | (((qh >> 30) & 1) << 4)),
+                           float((qs[15] >> 4) | (((qh >> 31) & 1) << 4)));
+                raw_dot += dot(a7, q);
+                act_sum += a7.x + a7.y + a7.z + a7.w;
+
+                sum0 += d * (raw_dot - 16.0f * act_sum);
             }
-            // Second 16 elements (high nibbles)
-            for (int j = 0; j < min(16, elems - 16); j++) {
-                uint8_t xi1 = qs[j] >> 4;
-                uint8_t xh1 = ((qh >> (j + 16)) << 4) & 0x10;
-                int q = int(xi1 | xh1) - 16;
-                s += a_vals[j + 16] * float(q);
-            }
-            sum0 += d * s;
-        }
 
-        // Row 1
-        if (row1 < N) {
-            device const uchar* p = b_row1 + block * Q5_0_BYTES_PER_BLOCK;
-            float d = float(as_type<half>(*((device const ushort*)p)));
-            // Read qh byte-by-byte to avoid potential alignment issues
-            uint32_t qh = uint32_t(p[2]) | (uint32_t(p[3]) << 8) | (uint32_t(p[4]) << 16) | (uint32_t(p[5]) << 24);
-            device const uchar* qs = p + 6;
+            // Row 1
+            if (hasRow1) {
+                device const uchar* p = b_row1 + block * Q5_0_BYTES_PER_BLOCK;
+                float d = float(as_type<half>(*((device const ushort*)p)));
+                // Read qh byte-by-byte to avoid potential alignment issues
+                uint32_t qh = uint32_t(p[2]) | (uint32_t(p[3]) << 8) | (uint32_t(p[4]) << 16) | (uint32_t(p[5]) << 24);
+                device const uchar* qs = p + 6;
 
-            float s = 0.0f;
-            for (int j = 0; j < min(16, elems); j++) {
-                uint8_t xi0 = qs[j] & 0x0F;
-                uint8_t xh0 = ((qh >> j) << 4) & 0x10;
-                int q = int(xi0 | xh0) - 16;
-                s += a_vals[j] * float(q);
+                float raw_dot = 0.0f;
+                float4 q;
+
+                // Low nibble elements 0-15 (reuse a0..a3)
+                q = float4(float((qs[0] & 0xF) | (((qh >> 0) & 1) << 4)),
+                           float((qs[1] & 0xF) | (((qh >> 1) & 1) << 4)),
+                           float((qs[2] & 0xF) | (((qh >> 2) & 1) << 4)),
+                           float((qs[3] & 0xF) | (((qh >> 3) & 1) << 4)));
+                raw_dot += dot(a0, q);
+
+                q = float4(float((qs[4] & 0xF) | (((qh >> 4) & 1) << 4)),
+                           float((qs[5] & 0xF) | (((qh >> 5) & 1) << 4)),
+                           float((qs[6] & 0xF) | (((qh >> 6) & 1) << 4)),
+                           float((qs[7] & 0xF) | (((qh >> 7) & 1) << 4)));
+                raw_dot += dot(a1, q);
+
+                q = float4(float((qs[8] & 0xF) | (((qh >> 8) & 1) << 4)),
+                           float((qs[9] & 0xF) | (((qh >> 9) & 1) << 4)),
+                           float((qs[10] & 0xF) | (((qh >> 10) & 1) << 4)),
+                           float((qs[11] & 0xF) | (((qh >> 11) & 1) << 4)));
+                raw_dot += dot(a2, q);
+
+                q = float4(float((qs[12] & 0xF) | (((qh >> 12) & 1) << 4)),
+                           float((qs[13] & 0xF) | (((qh >> 13) & 1) << 4)),
+                           float((qs[14] & 0xF) | (((qh >> 14) & 1) << 4)),
+                           float((qs[15] & 0xF) | (((qh >> 15) & 1) << 4)));
+                raw_dot += dot(a3, q);
+
+                // High nibble elements 16-31 (reuse a4..a7)
+                q = float4(float((qs[0] >> 4) | (((qh >> 16) & 1) << 4)),
+                           float((qs[1] >> 4) | (((qh >> 17) & 1) << 4)),
+                           float((qs[2] >> 4) | (((qh >> 18) & 1) << 4)),
+                           float((qs[3] >> 4) | (((qh >> 19) & 1) << 4)));
+                raw_dot += dot(a4, q);
+
+                q = float4(float((qs[4] >> 4) | (((qh >> 20) & 1) << 4)),
+                           float((qs[5] >> 4) | (((qh >> 21) & 1) << 4)),
+                           float((qs[6] >> 4) | (((qh >> 22) & 1) << 4)),
+                           float((qs[7] >> 4) | (((qh >> 23) & 1) << 4)));
+                raw_dot += dot(a5, q);
+
+                q = float4(float((qs[8] >> 4) | (((qh >> 24) & 1) << 4)),
+                           float((qs[9] >> 4) | (((qh >> 25) & 1) << 4)),
+                           float((qs[10] >> 4) | (((qh >> 26) & 1) << 4)),
+                           float((qs[11] >> 4) | (((qh >> 27) & 1) << 4)));
+                raw_dot += dot(a6, q);
+
+                q = float4(float((qs[12] >> 4) | (((qh >> 28) & 1) << 4)),
+                           float((qs[13] >> 4) | (((qh >> 29) & 1) << 4)),
+                           float((qs[14] >> 4) | (((qh >> 30) & 1) << 4)),
+                           float((qs[15] >> 4) | (((qh >> 31) & 1) << 4)));
+                raw_dot += dot(a7, q);
+
+                // Reuse act_sum from row0 (same A values)
+                float act_sum = a0.x+a0.y+a0.z+a0.w + a1.x+a1.y+a1.z+a1.w
+                              + a2.x+a2.y+a2.z+a2.w + a3.x+a3.y+a3.z+a3.w
+                              + a4.x+a4.y+a4.z+a4.w + a5.x+a5.y+a5.z+a5.w
+                              + a6.x+a6.y+a6.z+a6.w + a7.x+a7.y+a7.z+a7.w;
+                sum1 += d * (raw_dot - 16.0f * act_sum);
             }
-            for (int j = 0; j < min(16, elems - 16); j++) {
-                uint8_t xi1 = qs[j] >> 4;
-                uint8_t xh1 = ((qh >> (j + 16)) << 4) & 0x10;
-                int q = int(xi1 | xh1) - 16;
-                s += a_vals[j + 16] * float(q);
+        } else {
+            // Slow path: partial block at boundary (scalar fallback)
+            int elems = K - base_k;
+            float a_vals[32];
+            for (int i = 0; i < elems; i++) {
+                a_vals[i] = A[base_k + i];
             }
-            sum1 += d * s;
+
+            // Row 0
+            {
+                device const uchar* p = b_row0 + block * Q5_0_BYTES_PER_BLOCK;
+                float d = float(as_type<half>(*((device const ushort*)p)));
+                // Read qh byte-by-byte to avoid potential alignment issues
+                uint32_t qh = uint32_t(p[2]) | (uint32_t(p[3]) << 8) | (uint32_t(p[4]) << 16) | (uint32_t(p[5]) << 24);
+                device const uchar* qs = p + 6;
+
+                float s = 0.0f;
+                for (int j = 0; j < min(16, elems); j++) {
+                    uint8_t xi0 = qs[j] & 0x0F;
+                    uint8_t xh0 = ((qh >> j) << 4) & 0x10;
+                    int q = int(xi0 | xh0) - 16;
+                    s += a_vals[j] * float(q);
+                }
+                for (int j = 0; j < min(16, elems - 16); j++) {
+                    uint8_t xi1 = qs[j] >> 4;
+                    uint8_t xh1 = ((qh >> (j + 16)) << 4) & 0x10;
+                    int q = int(xi1 | xh1) - 16;
+                    s += a_vals[j + 16] * float(q);
+                }
+                sum0 += d * s;
+            }
+
+            // Row 1
+            if (hasRow1) {
+                device const uchar* p = b_row1 + block * Q5_0_BYTES_PER_BLOCK;
+                float d = float(as_type<half>(*((device const ushort*)p)));
+                // Read qh byte-by-byte to avoid potential alignment issues
+                uint32_t qh = uint32_t(p[2]) | (uint32_t(p[3]) << 8) | (uint32_t(p[4]) << 16) | (uint32_t(p[5]) << 24);
+                device const uchar* qs = p + 6;
+
+                float s = 0.0f;
+                for (int j = 0; j < min(16, elems); j++) {
+                    uint8_t xi0 = qs[j] & 0x0F;
+                    uint8_t xh0 = ((qh >> j) << 4) & 0x10;
+                    int q = int(xi0 | xh0) - 16;
+                    s += a_vals[j] * float(q);
+                }
+                for (int j = 0; j < min(16, elems - 16); j++) {
+                    uint8_t xi1 = qs[j] >> 4;
+                    uint8_t xh1 = ((qh >> (j + 16)) << 4) & 0x10;
+                    int q = int(xi1 | xh1) - 16;
+                    s += a_vals[j + 16] * float(q);
+                }
+                sum1 += d * s;
+            }
         }
     }
 
