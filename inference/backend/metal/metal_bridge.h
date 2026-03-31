@@ -232,7 +232,8 @@ void metal_matvec_q4k_fused_rmsnorm_out_f32(void* queue, void* pipeline,
 // Q4_K fused MLP (SwiGLU) with offset support
 void metal_matvec_q4k_fused_mlp_f32_offset(void* queue, void* pipeline,
                                             void* x, uint64_t xOff,
-                                            void* W1, void* W3,
+                                            void* W1, uint64_t w1Off,
+                                            void* W3, uint64_t w3Off,
                                             void* out, uint64_t outOff,
                                             int N, int K);
 

@@ -5950,9 +5950,10 @@ kernel void layernorm_f32(
 kernel void gelu_f32(
     device const float* x [[buffer(0)]],
     device float* out [[buffer(1)]],
+    constant int& n [[buffer(2)]],
     uint gid [[thread_position_in_grid]]
 ) {
-    // NOTE: No bounds check needed - dispatch_kernel handles exact thread count
+    if (gid >= (uint)n) return;
     // GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
     float val = x[gid];
 
@@ -5978,8 +5979,10 @@ kernel void gelu_f32(
 kernel void gelu_f16(
     device const half* x [[buffer(0)]],
     device half* out [[buffer(1)]],
+    constant int& n [[buffer(2)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     float val = float(x[gid]);
     float x3 = val * val * val;
     float tanh_arg = 0.7978845608f * (val + 0.044715f * x3);
@@ -5993,8 +5996,10 @@ kernel void gelu_mul_f32(
     device const float* gate [[buffer(0)]],
     device const float* up [[buffer(1)]],
     device float* out [[buffer(2)]],
+    constant int& n [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     float val = gate[gid];
     float gelu_val;
     if (val > 10.0f) {
@@ -7393,8 +7398,10 @@ kernel void softmax_f32(
     device const float* x [[buffer(0)]],
     device float* out [[buffer(1)]],
     constant int& dim [[buffer(2)]],
+    constant int& numRows [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)numRows) return;
     int row = gid;
     int base = row * dim;
 
@@ -7422,8 +7429,10 @@ kernel void softmax_f32(
 kernel void silu_f32(
     device const float* x [[buffer(0)]],
     device float* out [[buffer(1)]],
+    constant int& n [[buffer(2)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     float val = x[gid];
     out[gid] = val / (1.0f + exp(-val));
 }
@@ -7433,8 +7442,10 @@ kernel void add_f32(
     device const float* a [[buffer(0)]],
     device const float* b [[buffer(1)]],
     device float* out [[buffer(2)]],
+    constant int& n [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     out[gid] = a[gid] + b[gid];
 }
 
@@ -7443,8 +7454,10 @@ kernel void mul_f32(
     device const float* a [[buffer(0)]],
     device const float* b [[buffer(1)]],
     device float* out [[buffer(2)]],
+    constant int& n [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     out[gid] = a[gid] * b[gid];
 }
 
@@ -7454,8 +7467,10 @@ kernel void silu_mul_f32(
     device const float* gate [[buffer(0)]],
     device const float* up [[buffer(1)]],
     device float* out [[buffer(2)]],
+    constant int& n [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     float g = gate[gid];
     float silu_g = g / (1.0f + exp(-g));
     out[gid] = silu_g * up[gid];
@@ -7468,8 +7483,10 @@ kernel void silu_mul_f32_to_f16(
     device const float* gate [[buffer(0)]],
     device const float* up [[buffer(1)]],
     device half* out [[buffer(2)]],
+    constant int& n [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     float g = gate[gid];
     float silu_g = g / (1.0f + exp(-g));
     out[gid] = half(silu_g * up[gid]);
@@ -7485,8 +7502,10 @@ constant float LEAKY_RELU_ALPHA = 0.01f;
 
 kernel void relu_inplace_f32(
     device float* x [[buffer(0)]],
+    constant int& n [[buffer(1)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     float val = x[gid];
     x[gid] = val > 0.0f ? val : LEAKY_RELU_ALPHA * val;
 }
@@ -7495,8 +7514,10 @@ kernel void relu_inplace_f32(
 kernel void relu_backward_f32(
     device const float* x [[buffer(0)]],      // forward input (pre-activation)
     device float* dx [[buffer(1)]],           // gradient (modified in-place)
+    constant int& n [[buffer(2)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     dx[gid] = (x[gid] > 0.0f) ? dx[gid] : LEAKY_RELU_ALPHA * dx[gid];
 }
 
@@ -7531,8 +7552,10 @@ kernel void sgd_update_f32(
     device const float* grad [[buffer(1)]],
     constant float& lr [[buffer(2)]],
     constant float& weightDecay [[buffer(3)]],
+    constant int& n [[buffer(4)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     float decay = 1.0f - lr * weightDecay;
     w[gid] = w[gid] * decay - lr * grad[gid];
 }
@@ -7540,8 +7563,10 @@ kernel void sgd_update_f32(
 // Zero out a buffer (for initializing gradients)
 kernel void zero_f32(
     device float* x [[buffer(0)]],
+    constant int& n [[buffer(1)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     x[gid] = 0.0f;
 }
 
@@ -7556,8 +7581,10 @@ kernel void add_f16(
     device const half* a [[buffer(0)]],
     device const half* b [[buffer(1)]],
     device half* out [[buffer(2)]],
+    constant int& n [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     out[gid] = a[gid] + b[gid];
 }
 
@@ -7566,8 +7593,10 @@ kernel void mul_f16(
     device const half* a [[buffer(0)]],
     device const half* b [[buffer(1)]],
     device half* out [[buffer(2)]],
+    constant int& n [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     out[gid] = a[gid] * b[gid];
 }
 
@@ -7576,8 +7605,10 @@ kernel void mul_f16(
 kernel void silu_f16(
     device const half* x [[buffer(0)]],
     device half* out [[buffer(1)]],
+    constant int& n [[buffer(2)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     half val = x[gid];
     // Compute SiLU in FP32 for numerical stability, then convert back
     float f = float(val);
@@ -7590,8 +7621,10 @@ kernel void silu_mul_f16(
     device const half* gate [[buffer(0)]],
     device const half* up [[buffer(1)]],
     device half* out [[buffer(2)]],
+    constant int& n [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     float g = float(gate[gid]);
     float silu_g = g / (1.0f + exp(-g));
     out[gid] = half(silu_g * float(up[gid]));
@@ -7602,8 +7635,10 @@ kernel void silu_mul_f16(
 kernel void convert_f32_to_f16(
     device const float* in [[buffer(0)]],
     device half* out [[buffer(1)]],
+    constant int& n [[buffer(2)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     out[gid] = half(in[gid]);
 }
 
@@ -7612,8 +7647,10 @@ kernel void convert_f32_to_f16(
 kernel void convert_f16_to_f32(
     device const half* in [[buffer(0)]],
     device float* out [[buffer(1)]],
+    constant int& n [[buffer(2)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)n) return;
     out[gid] = float(in[gid]);
 }
 
@@ -12831,8 +12868,11 @@ void metal_gelu_f32(void* queuePtr, void* pipelinePtr,
         (__bridge id<MTLBuffer>)x,
         (__bridge id<MTLBuffer>)out
     ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
 
-    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 void metal_gelu_mul_f32(void* queuePtr, void* pipelinePtr,
@@ -12845,8 +12885,11 @@ void metal_gelu_mul_f32(void* queuePtr, void* pipelinePtr,
         (__bridge id<MTLBuffer>)up,
         (__bridge id<MTLBuffer>)out
     ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
 
-    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 void metal_add_bias_f32(void* queuePtr, void* pipelinePtr,
@@ -12994,7 +13037,8 @@ void metal_softmax_f32(void* queuePtr, void* pipelinePtr,
         (__bridge id<MTLBuffer>)out
     ];
     NSArray* constants = @[
-        [NSData dataWithBytes:&dim length:sizeof(dim)]
+        [NSData dataWithBytes:&dim length:sizeof(dim)],
+        [NSData dataWithBytes:&batchSize length:sizeof(batchSize)]
     ];
 
     dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(batchSize, 1, 1));
@@ -13009,8 +13053,11 @@ void metal_silu_f32(void* queuePtr, void* pipelinePtr,
         (__bridge id<MTLBuffer>)x,
         (__bridge id<MTLBuffer>)out
     ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
 
-    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 // Fused SiLU+Mul: out = silu(gate) * up
@@ -13024,8 +13071,11 @@ void metal_silu_mul_f32(void* queuePtr, void* pipelinePtr,
         (__bridge id<MTLBuffer>)up,
         (__bridge id<MTLBuffer>)out
     ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
 
-    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 void metal_silu_mul_f32_to_f16(void* queuePtr, void* pipelinePtr,
@@ -13038,8 +13088,11 @@ void metal_silu_mul_f32_to_f16(void* queuePtr, void* pipelinePtr,
         (__bridge id<MTLBuffer>)up,
         (__bridge id<MTLBuffer>)out
     ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
 
-    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 void metal_add_f32(void* queuePtr, void* pipelinePtr,
@@ -13052,8 +13105,11 @@ void metal_add_f32(void* queuePtr, void* pipelinePtr,
         (__bridge id<MTLBuffer>)b,
         (__bridge id<MTLBuffer>)out
     ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
 
-    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 // Offset-aware variants: operate on sub-regions of shared MTLBuffers.
@@ -13074,6 +13130,7 @@ void metal_add_f32_offset(void* queuePtr, void* pipelinePtr,
     [encoder setBuffer:(__bridge id<MTLBuffer>)a offset:aOff atIndex:0];
     [encoder setBuffer:(__bridge id<MTLBuffer>)b offset:bOff atIndex:1];
     [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:outOff atIndex:2];
+    [encoder setBytes:&n length:sizeof(n) atIndex:3];
 
     MTLSize threadgroupSize = MTLSizeMake(
         MIN(pipeline.maxTotalThreadsPerThreadgroup, (NSUInteger)n), 1, 1);
@@ -13130,6 +13187,7 @@ void metal_silu_mul_f32_offset(void* queuePtr, void* pipelinePtr,
     [encoder setBuffer:(__bridge id<MTLBuffer>)gate offset:gateOff atIndex:0];
     [encoder setBuffer:(__bridge id<MTLBuffer>)up offset:upOff atIndex:1];
     [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:outOff atIndex:2];
+    [encoder setBytes:&n length:sizeof(n) atIndex:3];
 
     MTLSize threadgroupSize = MTLSizeMake(
         MIN(pipeline.maxTotalThreadsPerThreadgroup, (NSUInteger)n), 1, 1);
@@ -13553,8 +13611,11 @@ void metal_mul_f32(void* queuePtr, void* pipelinePtr,
         (__bridge id<MTLBuffer>)b,
         (__bridge id<MTLBuffer>)out
     ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
 
-    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 // Deinterleave QKV: split fused [M, qkvDim] output into separate Q, K, V buffers.
@@ -13694,7 +13755,10 @@ void metal_relu_inplace_f32(void* queuePtr, void* pipelinePtr, void* x, int n) {
     id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
 
     NSArray* buffers = @[(__bridge id<MTLBuffer>)x];
-    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 void metal_relu_backward_f32(void* queuePtr, void* pipelinePtr,
@@ -13706,7 +13770,10 @@ void metal_relu_backward_f32(void* queuePtr, void* pipelinePtr,
         (__bridge id<MTLBuffer>)x,
         (__bridge id<MTLBuffer>)dx
     ];
-    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 void metal_batched_outer_product_f32(void* queuePtr, void* pipelinePtr,
@@ -13742,7 +13809,8 @@ void metal_sgd_update_f32(void* queuePtr, void* pipelinePtr,
 
     NSArray* constants = @[
         [NSData dataWithBytes:&lr length:sizeof(lr)],
-        [NSData dataWithBytes:&weightDecay length:sizeof(weightDecay)]
+        [NSData dataWithBytes:&weightDecay length:sizeof(weightDecay)],
+        [NSData dataWithBytes:&n length:sizeof(n)]
     ];
 
     dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
@@ -13753,7 +13821,10 @@ void metal_zero_f32(void* queuePtr, void* pipelinePtr, void* x, int n) {
     id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
 
     NSArray* buffers = @[(__bridge id<MTLBuffer>)x];
-    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 // =============================================================================
@@ -13770,8 +13841,11 @@ void metal_add_f16(void* queuePtr, void* pipelinePtr,
         (__bridge id<MTLBuffer>)b,
         (__bridge id<MTLBuffer>)out
     ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
 
-    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 void metal_mul_f16(void* queuePtr, void* pipelinePtr,
@@ -13784,8 +13858,11 @@ void metal_mul_f16(void* queuePtr, void* pipelinePtr,
         (__bridge id<MTLBuffer>)b,
         (__bridge id<MTLBuffer>)out
     ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
 
-    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 void metal_silu_f16(void* queuePtr, void* pipelinePtr,
@@ -13797,8 +13874,11 @@ void metal_silu_f16(void* queuePtr, void* pipelinePtr,
         (__bridge id<MTLBuffer>)x,
         (__bridge id<MTLBuffer>)out
     ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
 
-    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 void metal_silu_mul_f16(void* queuePtr, void* pipelinePtr,
@@ -13811,8 +13891,11 @@ void metal_silu_mul_f16(void* queuePtr, void* pipelinePtr,
         (__bridge id<MTLBuffer>)up,
         (__bridge id<MTLBuffer>)out
     ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
 
-    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 void metal_convert_f32_to_f16(void* queuePtr, void* pipelinePtr,
@@ -13824,8 +13907,11 @@ void metal_convert_f32_to_f16(void* queuePtr, void* pipelinePtr,
         (__bridge id<MTLBuffer>)in,
         (__bridge id<MTLBuffer>)out
     ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
 
-    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 void metal_convert_f16_to_f32(void* queuePtr, void* pipelinePtr,
@@ -13837,8 +13923,11 @@ void metal_convert_f16_to_f32(void* queuePtr, void* pipelinePtr,
         (__bridge id<MTLBuffer>)in,
         (__bridge id<MTLBuffer>)out
     ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
 
-    dispatch_kernel(queue, pipeline, buffers, @[], MTLSizeMake(n, 1, 1));
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 // Offset-aware FP32 to FP16 conversion for scratch-allocated buffers.
@@ -13855,6 +13944,7 @@ void metal_convert_f32_to_f16_offset(void* queuePtr, void* pipelinePtr,
     [encoder setComputePipelineState:pipeline];
     [encoder setBuffer:(__bridge id<MTLBuffer>)in offset:inOff atIndex:0];
     [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:outOff atIndex:1];
+    [encoder setBytes:&n length:sizeof(n) atIndex:2];
 
     MTLSize threadgroupSize = MTLSizeMake(
         MIN(pipeline.maxTotalThreadsPerThreadgroup, (NSUInteger)n), 1, 1);
@@ -13879,6 +13969,7 @@ void metal_convert_f16_to_f32_offset(void* queuePtr, void* pipelinePtr,
     [encoder setComputePipelineState:pipeline];
     [encoder setBuffer:(__bridge id<MTLBuffer>)in offset:inOff atIndex:0];
     [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:outOff atIndex:1];
+    [encoder setBytes:&n length:sizeof(n) atIndex:2];
 
     MTLSize threadgroupSize = MTLSizeMake(
         MIN(pipeline.maxTotalThreadsPerThreadgroup, (NSUInteger)n), 1, 1);
@@ -16160,7 +16251,8 @@ void metal_matvec_q4k_fused_mlp_f32(void* queuePtr, void* pipelinePtr,
 
 void metal_matvec_q4k_fused_mlp_f32_offset(void* queuePtr, void* pipelinePtr,
                                             void* x, uint64_t xOff,
-                                            void* W1, void* W3,
+                                            void* W1, uint64_t w1Off,
+                                            void* W3, uint64_t w3Off,
                                             void* out, uint64_t outOff,
                                             int N, int K) {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
@@ -16169,8 +16261,8 @@ void metal_matvec_q4k_fused_mlp_f32_offset(void* queuePtr, void* pipelinePtr,
     id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
     [encoder setComputePipelineState:pipeline];
     [encoder setBuffer:(__bridge id<MTLBuffer>)x offset:xOff atIndex:0];
-    [encoder setBuffer:(__bridge id<MTLBuffer>)W1 offset:0 atIndex:1];
-    [encoder setBuffer:(__bridge id<MTLBuffer>)W3 offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)W1 offset:w1Off atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)W3 offset:w3Off atIndex:2];
     [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:outOff atIndex:3];
     [encoder setBytes:&N length:sizeof(N) atIndex:4];
     [encoder setBytes:&K length:sizeof(K) atIndex:5];

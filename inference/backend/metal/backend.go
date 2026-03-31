@@ -1087,17 +1087,13 @@ func (b *Backend) MatMulQ4_K_FusedMLP(x, w1, w3, out tensor.DevicePtr, m, n, k i
 	if b.matvecQ4KFusedMLPPipeline == nil {
 		panic("MatMulQ4_K_FusedMLP called but pipeline unavailable")
 	}
-	if x.Offset() != 0 || out.Offset() != 0 {
-		C.metal_matvec_q4k_fused_mlp_f32_offset(b.queue, b.matvecQ4KFusedMLPPipeline,
-			unsafe.Pointer(x.Addr()), C.uint64_t(x.Offset()),
-			unsafe.Pointer(w1.Addr()), unsafe.Pointer(w3.Addr()),
-			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
-			C.int(n), C.int(k))
-		return
-	}
-	C.metal_matvec_q4k_fused_mlp_f32(b.queue, b.matvecQ4KFusedMLPPipeline,
-		unsafe.Pointer(x.Addr()), unsafe.Pointer(w1.Addr()),
-		unsafe.Pointer(w3.Addr()), unsafe.Pointer(out.Addr()),
+	// Always use offset-aware dispatch: W3 may be a sub-region of W1W3 (Phi-3)
+	// with non-zero offset even when x and out have zero offsets.
+	C.metal_matvec_q4k_fused_mlp_f32_offset(b.queue, b.matvecQ4KFusedMLPPipeline,
+		unsafe.Pointer(x.Addr()), C.uint64_t(x.Offset()),
+		unsafe.Pointer(w1.Addr()), C.uint64_t(w1.Offset()),
+		unsafe.Pointer(w3.Addr()), C.uint64_t(w3.Offset()),
+		unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
 		C.int(n), C.int(k))
 }
 
