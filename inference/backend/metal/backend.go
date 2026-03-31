@@ -565,6 +565,14 @@ func (b *Backend) ToHost(dst []byte, src tensor.DevicePtr) {
 	C.metal_copy_from_buffer(unsafe.Pointer(&dst[0]), unsafe.Pointer(src.Addr()), C.size_t(len(dst)))
 }
 
+// GPUContentsAddr returns the GPU memory address ([buffer contents]) for a DevicePtr.
+func (b *Backend) GPUContentsAddr(p tensor.DevicePtr) uintptr {
+	if p.IsNil() {
+		return 0
+	}
+	return uintptr(C.metal_buffer_contents(unsafe.Pointer(p.Addr())))
+}
+
 // Sync waits for all pending GPU operations to complete.
 func (b *Backend) Sync() {
 	C.metal_sync(b.queue)
@@ -1208,9 +1216,6 @@ func (b *Backend) MatMulQ5_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 // B contains raw Q5_0 data (22 bytes per 32 elements: 2 byte f16 scale + 4 byte qh + 16 bytes qs).
 func (b *Backend) MatMulQ5_0(a, bMat, out tensor.DevicePtr, m, n, k int) {
 	b.profiler.RecordDispatch("MatMulQ5_0")
-	// Always use the batched kernel for ALL batch sizes (including M=1).
-	// Using different kernels for M=1 vs M>1 causes FP32 precision divergence
-	// that compounds through layers for models with large QKV bias (Qwen).
 	if b.matmulQ5_0BatchedPipeline == nil {
 		panic("MatMulQ5_0 called but no matmulQ5_0BatchedPipeline available")
 	}

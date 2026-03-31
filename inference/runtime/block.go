@@ -151,7 +151,21 @@ func (b *BlockRuntime) debugKVCacheHeadMajor(name string, ptr tensor.DevicePtr, 
 		for i := 0; i < 4 && offset+i < len(data)/4; i++ {
 			vals[i] = math.Float32frombits(binary.LittleEndian.Uint32(data[(offset+i)*4:]))
 		}
-		fmt.Printf("  pos %d: [%.6f, %.6f, %.6f, %.6f]\n", p, vals[0], vals[1], vals[2], vals[3])
+		fmt.Printf("  head0 pos %d: [%.6f, %.6f, %.6f, %.6f]\n", p, vals[0], vals[1], vals[2], vals[3])
+	}
+
+	// Read head 1 data - need to read enough to cover head 1's positions
+	head1Start := kvHeadStride // offset in elements to head 1
+	totalBytesNeeded := (head1Start + positionsToRead*headDim) * 4
+	allData := make([]byte, totalBytesNeeded)
+	toHost.ToHost(allData, ptr)
+	for p := 0; p < positionsToRead; p++ {
+		offset := head1Start + p*headDim
+		vals := make([]float32, 4)
+		for i := 0; i < 4; i++ {
+			vals[i] = math.Float32frombits(binary.LittleEndian.Uint32(allData[(offset+i)*4:]))
+		}
+		fmt.Printf("  head1 pos %d: [%.6f, %.6f, %.6f, %.6f]\n", p, vals[0], vals[1], vals[2], vals[3])
 	}
 }
 
@@ -1180,6 +1194,25 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		gatePtr = b.scratchAlloc.ScratchAlloc(gateBytes)
 		upPtr = b.scratchAlloc.ScratchAlloc(upBytes)
 		fusedMLPTempPtr = b.scratchAlloc.ScratchAlloc(fusedMLPTempBytes)
+		if debugDecode && layerIdx == 0 {
+			fmt.Printf("[ADDR] L0 normOut=0x%x q=0x%x k=0x%x v=0x%x attnOut=0x%x gate=0x%x\n",
+				normOutPtr.Addr(), qPtr.Addr(), kPtr.Addr(), vPtr.Addr(), attnOutPtr.Addr(), gatePtr.Addr())
+			if normOutPtr.Addr() == xPtr.Addr() {
+				fmt.Printf("[ALIAS] !!! normOutPtr == xPtr !!!\n")
+			}
+			if qPtr.Addr() == xPtr.Addr() {
+				fmt.Printf("[ALIAS] !!! qPtr == xPtr !!!\n")
+			}
+			if kPtr.Addr() == xPtr.Addr() {
+				fmt.Printf("[ALIAS] !!! kPtr == xPtr !!!\n")
+			}
+			if attnOutPtr.Addr() == xPtr.Addr() {
+				fmt.Printf("[ALIAS] !!! attnOutPtr == xPtr !!!\n")
+			}
+			if gatePtr.Addr() == xPtr.Addr() {
+				fmt.Printf("[ALIAS] !!! gatePtr == xPtr !!!\n")
+			}
+		}
 	} else {
 		// Fallback: individual pool allocations (no scratch allocator available).
 		normOutPtr = b.backend.Alloc(normOutBytes)
@@ -1190,6 +1223,10 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		gatePtr = b.backend.Alloc(gateBytes)
 		upPtr = b.backend.Alloc(upBytes)
 		fusedMLPTempPtr = b.backend.Alloc(fusedMLPTempBytes)
+		if debugDecode && layerIdx == 0 {
+			fmt.Printf("[ADDR] L0 x=0x%x normOut=0x%x q=0x%x k=0x%x v=0x%x attnOut=0x%x gate=0x%x\n",
+				xPtr.Addr(), normOutPtr.Addr(), qPtr.Addr(), kPtr.Addr(), vPtr.Addr(), attnOutPtr.Addr(), gatePtr.Addr())
+		}
 	}
 
 	// FP16/Q8_0 KV cache support: use pre-allocated buffers for decode, pool for prefill.
@@ -1350,9 +1387,12 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		if debugThisLayer {
 			b.backend.Sync()
 			b.debugBlockTensor(fmt.Sprintf("L%d Standard Norm out (prefill)", layerIdx), normOutPtr, seqLen*hiddenSize)
-			b.debugBlockTensor(fmt.Sprintf("L%d AttnNorm weights", layerIdx), b.AttnNorm.DevicePtr(), hiddenSize)
 		}
 
+		// Force sync before QKV to ensure norm output is complete
+		if debugDecode && layerIdx == 0 {
+			b.backend.Sync()
+		}
 		profileOp("Wqkv", func() {
 			if !b.Wqkv.DevicePtr().IsNil() && b.qkvDeinterleaver != nil {
 				// Fused QKV path: single matmul → temp → deinterleave into Q/K/V.
@@ -1377,10 +1417,12 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 					qDim := b.Wq.Shape().Dims()[0]
 					b.matMulTransposedWithBias(normOutPtr, b.Wq, b.WqBias, qPtr, seqLen, qDim, hiddenSize)
 				}
+				barrier() // Ensure Q completes before K reads normOut
 				if !b.Wk.DevicePtr().IsNil() {
 					kDim := b.Wk.Shape().Dims()[0]
 					b.matMulTransposedWithBias(normOutPtr, b.Wk, b.WkBias, kPtr, seqLen, kDim, hiddenSize)
 				}
+				barrier() // Ensure K completes before V reads normOut
 				if !b.Wv.DevicePtr().IsNil() {
 					vDim := b.Wv.Shape().Dims()[0]
 					b.matMulTransposedWithBias(normOutPtr, b.Wv, b.WvBias, vPtr, seqLen, vDim, hiddenSize)

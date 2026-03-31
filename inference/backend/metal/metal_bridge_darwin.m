@@ -6018,9 +6018,11 @@ kernel void add_bias_f32(
     device const float* x [[buffer(0)]],
     device const float* bias [[buffer(1)]],
     device float* out [[buffer(2)]],
-    constant int& cols [[buffer(3)]],
+    constant int& rows [[buffer(3)]],
+    constant int& cols [[buffer(4)]],
     uint gid [[thread_position_in_grid]]
 ) {
+    if (gid >= (uint)(rows * cols)) return;
     int col = gid % cols;
     out[gid] = x[gid] + bias[col];
 }
@@ -12863,7 +12865,8 @@ void metal_add_bias_f32(void* queuePtr, void* pipelinePtr,
     [encoder setBuffer:(__bridge id<MTLBuffer>)x offset:0 atIndex:0];
     [encoder setBuffer:(__bridge id<MTLBuffer>)bias offset:0 atIndex:1];
     [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:2];
-    [encoder setBytes:&cols length:sizeof(cols) atIndex:3];
+    [encoder setBytes:&rows length:sizeof(rows) atIndex:3];
+    [encoder setBytes:&cols length:sizeof(cols) atIndex:4];
 
     // One thread per element
     int threadgroupSize = 256;

@@ -722,6 +722,7 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 	}
 	m.applyEmbeddingScale(statePtr, batchSize*hiddenSize)
 	if debugDecode {
+		fmt.Printf("[ADDR] statePtr=0x%x size=%d\n", statePtr.Addr(), batchSize*hiddenSize*4)
 		m.backend.Sync()
 		debugTensor("[GPU] After Embedding", m.backend, statePtr, batchSize*hiddenSize)
 	}
