@@ -1620,6 +1620,7 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				vF32Tmp := b.backend.Alloc(fullSeqLen * numKVHeads * headDim * 4)
 				b.fp16Ops.ConvertF16ToF32(fullKPtr, kF32Tmp, fullSeqLen*numKVHeads*headDim)
 				b.fp16Ops.ConvertF16ToF32(fullVPtr, vF32Tmp, fullSeqLen*numKVHeads*headDim)
+				barrier() // Ensure F16→F32 conversion completes before SDPA reads the F32 buffers
 				effKVLen, kvStartPos := b.effectiveKVLen(layerIdx, fullSeqLen)
 				sdpaKPtr, sdpaVPtr := kF32Tmp, vF32Tmp
 				if kvStartPos > 0 {
