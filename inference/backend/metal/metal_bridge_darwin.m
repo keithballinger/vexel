@@ -5077,56 +5077,130 @@ kernel void matmul_q5k_batched_f32(
     device const uchar* b_row0 = B + (int64_t)row0 * numBlocks * Q5K_BYTES_PER_BLOCK;
     device const uchar* b_row1 = B + (int64_t)row1 * numBlocks * Q5K_BYTES_PER_BLOCK;
 
-    for (int block = 0; block < numBlocks; block++) {
-        device const uchar* p0 = b_row0 + block * Q5K_BYTES_PER_BLOCK;
-        device const uchar* p1 = (row1 < N) ? b_row1 + block * Q5K_BYTES_PER_BLOCK : p0;
+    // Sub-block strided: each lane processes whole 32-element sub-blocks
+    // 8 sub-blocks per Q5_K block, lanes stride across all sub-blocks
+    int totalSubBlocks = numBlocks << 3;  // numBlocks * 8
+    bool hasRow1 = (row1 < N);
 
-        float d0 = q4_f16_to_f32(((ushort)p0[1] << 8) | p0[0]);
-        float dm0 = q4_f16_to_f32(((ushort)p0[3] << 8) | p0[2]);
-        float d1 = (row1 < N) ? q4_f16_to_f32(((ushort)p1[1] << 8) | p1[0]) : 0.0f;
-        float dm1 = (row1 < N) ? q4_f16_to_f32(((ushort)p1[3] << 8) | p1[2]) : 0.0f;
+    for (int sb = simd_lane; sb < totalSubBlocks; sb += 32) {
+        int block_idx = sb >> 3;           // which Q5_K block
+        int j = sb & 7;                    // sub-block index within block (0..7)
 
+        device const uchar* p0 = b_row0 + block_idx * Q5K_BYTES_PER_BLOCK;
+
+        // Hardware fp16 conversion (as_type<half> instead of software q4_f16_to_f32)
+        float d0 = float(as_type<half>(*((device const ushort*)p0)));
+        float dmin0 = float(as_type<half>(*((device const ushort*)(p0 + 2))));
+
+        // Extract only this sub-block's scale and min
         device const uchar* sd0 = p0 + 4;
-        device const uchar* sd1 = p1 + 4;
+        int j_lo = j & 3;
+        uchar sc0, mn0;
+        if (j < 4) {
+            sc0 = sd0[j_lo] & 0x3F;
+            mn0 = sd0[j_lo + 4] & 0x3F;
+        } else {
+            sc0 = (sd0[8 + j_lo] & 0x0F) | ((sd0[j_lo] >> 6) << 4);
+            mn0 = (sd0[8 + j_lo] >> 4) | ((sd0[j_lo + 4] >> 6) << 4);
+        }
+        float dsc0 = d0 * float(sc0);
+        float dmn0 = dmin0 * float(mn0);
 
-        uchar s0[8], m0[8], s1[8], m1[8];
-        s0[0] = sd0[0] & 0x3F; s0[1] = sd0[1] & 0x3F; s0[2] = sd0[2] & 0x3F; s0[3] = sd0[3] & 0x3F;
-        m0[0] = sd0[4] & 0x3F; m0[1] = sd0[5] & 0x3F; m0[2] = sd0[6] & 0x3F; m0[3] = sd0[7] & 0x3F;
-        s0[4] = (sd0[8] & 0x0F) | ((sd0[0] >> 6) << 4); s0[5] = (sd0[9] & 0x0F) | ((sd0[1] >> 6) << 4);
-        s0[6] = (sd0[10] & 0x0F) | ((sd0[2] >> 6) << 4); s0[7] = (sd0[11] & 0x0F) | ((sd0[3] >> 6) << 4);
-        m0[4] = (sd0[8] >> 4) | ((sd0[4] >> 6) << 4); m0[5] = (sd0[9] >> 4) | ((sd0[5] >> 6) << 4);
-        m0[6] = (sd0[10] >> 4) | ((sd0[6] >> 6) << 4); m0[7] = (sd0[11] >> 4) | ((sd0[7] >> 6) << 4);
+        // Q5_K layout: qs at offset 48 (128 bytes), qh at offset 16 (32 bytes)
+        // Sub-blocks: even j uses low nibble, odd j uses high nibble (same as Q4_K)
+        int qs_base = (j >> 1) << 5;          // (j/2)*32: byte offset in qs
+        int shift = (j & 1) << 2;             // 0 for even, 4 for odd
+        int elem_start = block_idx * Q5K_BLOCK_SIZE + (j << 5);  // j * 32
 
-        if (row1 < N) {
-            s1[0] = sd1[0] & 0x3F; s1[1] = sd1[1] & 0x3F; s1[2] = sd1[2] & 0x3F; s1[3] = sd1[3] & 0x3F;
-            m1[0] = sd1[4] & 0x3F; m1[1] = sd1[5] & 0x3F; m1[2] = sd1[6] & 0x3F; m1[3] = sd1[7] & 0x3F;
-            s1[4] = (sd1[8] & 0x0F) | ((sd1[0] >> 6) << 4); s1[5] = (sd1[9] & 0x0F) | ((sd1[1] >> 6) << 4);
-            s1[6] = (sd1[10] & 0x0F) | ((sd1[2] >> 6) << 4); s1[7] = (sd1[11] & 0x0F) | ((sd1[3] >> 6) << 4);
-            m1[4] = (sd1[8] >> 4) | ((sd1[4] >> 6) << 4); m1[5] = (sd1[9] >> 4) | ((sd1[5] >> 6) << 4);
-            m1[6] = (sd1[10] >> 4) | ((sd1[6] >> 6) << 4); m1[7] = (sd1[11] >> 4) | ((sd1[7] >> 6) << 4);
+        // Row 1 setup
+        float dsc1 = 0.0f, dmn1 = 0.0f;
+        device const uchar* p1 = p0;  // dummy
+        if (hasRow1) {
+            p1 = b_row1 + block_idx * Q5K_BYTES_PER_BLOCK;
+            float d1 = float(as_type<half>(*((device const ushort*)p1)));
+            float dmin1 = float(as_type<half>(*((device const ushort*)(p1 + 2))));
+            device const uchar* sd1 = p1 + 4;
+            uchar sc1, mn1;
+            if (j < 4) {
+                sc1 = sd1[j_lo] & 0x3F;
+                mn1 = sd1[j_lo + 4] & 0x3F;
+            } else {
+                sc1 = (sd1[8 + j_lo] & 0x0F) | ((sd1[j_lo] >> 6) << 4);
+                mn1 = (sd1[8 + j_lo] >> 4) | ((sd1[j_lo + 4] >> 6) << 4);
+            }
+            dsc1 = d1 * float(sc1);
+            dmn1 = dmin1 * float(mn1);
         }
 
-        device const uchar* qh0 = p0 + 16;
-        device const uchar* qs0 = p0 + 48;
-        device const uchar* qh1 = p1 + 16;
-        device const uchar* qs1 = p1 + 48;
+        if (elem_start + 32 <= K) {
+            // Full sub-block: vectorized float4 loads + uint loads for qs
+            device const float4* a_vec = (device const float4*)(a_row + elem_start);
+            device const uint* qs32_0 = (device const uint*)(p0 + 48 + qs_base);
+            device const uchar* qh0 = p0 + 16;  // 32 bytes of high bits
 
-        int base_k = block * Q5K_BLOCK_SIZE;
+            // Factored: sum += dsc*dot(a,q5) - dmn*sum(a)
+            float raw_dot0 = 0.0f, act_sum0 = 0.0f;
+            float raw_dot1 = 0.0f, act_sum1 = 0.0f;
 
-        for (int i = simd_lane; i < 256 && base_k + i < K; i += 32) {
-            float a = a_row[base_k + i];
-            int is = i / 32;
-            int iqs = (i / 64) * 32 + (i % 32);
-            int nib = (i / 32) % 2;
+            device const uint* qs32_1 = hasRow1 ? (device const uint*)(p1 + 48 + qs_base) : qs32_0;
+            device const uchar* qh1 = hasRow1 ? (p1 + 16) : qh0;
 
-            int q0 = (qs0[iqs] >> (nib ? 4 : 0)) & 0xF;
-            q0 |= ((qh0[i % 32] >> is) & 1) << 4;
-            sum0 += a * (d0 * float(s0[is]) * float(q0) - dm0 * float(m0[is]));
+            // qh bit index for this sub-block: bit 'j' of qh[byte]
+            // For element at position j*32+i within the block:
+            //   qh byte = i (0..31), bit = j (sub-block index)
+            int qh_bit = j;
 
-            if (row1 < N) {
-                int q1 = (qs1[iqs] >> (nib ? 4 : 0)) & 0xF;
-                q1 |= ((qh1[i % 32] >> is) & 1) << 4;
-                sum1 += a * (d1 * float(s1[is]) * float(q1) - dm1 * float(m1[is]));
+            for (int i = 0; i < 8; i++) {
+                uint w0 = qs32_0[i];
+                // Extract 4-bit values from the correct nibble
+                float4 q4_0 = float4((w0 >> shift) & 0xF, (w0 >> (shift + 8)) & 0xF,
+                                     (w0 >> (shift + 16)) & 0xF, (w0 >> (shift + 24)) & 0xF);
+
+                // Add 5th bit from qh: qh[i*4+0..3] bit 'j'
+                int base_qh = i * 4;
+                float4 hb0 = float4(float((qh0[base_qh]   >> qh_bit) & 1) * 16.0f,
+                                    float((qh0[base_qh+1] >> qh_bit) & 1) * 16.0f,
+                                    float((qh0[base_qh+2] >> qh_bit) & 1) * 16.0f,
+                                    float((qh0[base_qh+3] >> qh_bit) & 1) * 16.0f);
+                float4 q5_0 = q4_0 + hb0;
+
+                float4 a = a_vec[i];
+                raw_dot0 += dot(a, q5_0);
+                act_sum0 += a.x + a.y + a.z + a.w;
+
+                if (hasRow1) {
+                    uint w1 = qs32_1[i];
+                    float4 q4_1 = float4((w1 >> shift) & 0xF, (w1 >> (shift + 8)) & 0xF,
+                                         (w1 >> (shift + 16)) & 0xF, (w1 >> (shift + 24)) & 0xF);
+                    float4 hb1 = float4(float((qh1[base_qh]   >> qh_bit) & 1) * 16.0f,
+                                        float((qh1[base_qh+1] >> qh_bit) & 1) * 16.0f,
+                                        float((qh1[base_qh+2] >> qh_bit) & 1) * 16.0f,
+                                        float((qh1[base_qh+3] >> qh_bit) & 1) * 16.0f);
+                    float4 q5_1 = q4_1 + hb1;
+                    raw_dot1 += dot(a, q5_1);
+                    act_sum1 = act_sum0;  // reuse — same A row
+                }
+            }
+            sum0 += dsc0 * raw_dot0 - dmn0 * act_sum0;
+            if (hasRow1) sum1 += dsc1 * raw_dot1 - dmn1 * act_sum1;
+        } else if (elem_start < K) {
+            // Partial sub-block: scalar fallback
+            device const uchar* qs0 = p0 + 48 + qs_base;
+            device const uchar* qh0 = p0 + 16;
+            int qh_bit = j;
+            for (int i = 0; i < 32 && elem_start + i < K; i++) {
+                float a = a_row[elem_start + i];
+                int q0 = (qs0[i] >> shift) & 0xF;
+                q0 |= ((qh0[i] >> qh_bit) & 1) << 4;
+                sum0 += a * (dsc0 * float(q0) - dmn0);
+
+                if (hasRow1) {
+                    device const uchar* qs1 = p1 + 48 + qs_base;
+                    device const uchar* qh1_p = p1 + 16;
+                    int q1 = (qs1[i] >> shift) & 0xF;
+                    q1 |= ((qh1_p[i] >> qh_bit) & 1) << 4;
+                    sum1 += a * (dsc1 * float(q1) - dmn1);
+                }
             }
         }
     }
@@ -5135,7 +5209,7 @@ kernel void matmul_q5k_batched_f32(
     sum1 = simd_sum(sum1);
     if (simd_lane == 0) {
         C[m * N + row0] = sum0;
-        if (row1 < N) C[m * N + row1] = sum1;
+        if (hasRow1) C[m * N + row1] = sum1;
     }
 }
 
