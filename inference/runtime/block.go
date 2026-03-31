@@ -1610,25 +1610,38 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				// FP16 path: Q already in FP16 (from fused kernel), no Q conversion needed
 				// SDPA output stays in FP16 — Wo will read it directly via F16-input matvec
 				b.fp16Ops.SDPAF16(qF16Ptr, fullKPtr, fullVPtr, attnOutF16Ptr, fullSeqLen, numHeads, numKVHeads, headDim, scale, gpuCache.KVHeadStride())
-			} else if useFP16KVCache && b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
-				if debugDecode && layerIdx == 0 {
-					fmt.Printf("FP16KVCache+SoftCap (fallback to FP32 SDPA)\n")
+			} else if useFP16KVCache && b.AttentionLogitSoftCap > 0 {
+				// Native FP16 softcap SDPA: reads FP16 KV directly, no conversion needed
+				type fp16SoftCapSDPA interface {
+					SDPAF16SoftCap(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale, softcap float32, kvHeadStride int)
 				}
-				// FP16 KV cache with softcap: no FP16 softcap kernel exists,
-				// so convert KV to FP32 and use the FP32 SDPASoftCap kernel.
-				kF32Tmp := b.backend.Alloc(fullSeqLen * numKVHeads * headDim * 4)
-				vF32Tmp := b.backend.Alloc(fullSeqLen * numKVHeads * headDim * 4)
-				b.fp16Ops.ConvertF16ToF32(fullKPtr, kF32Tmp, fullSeqLen*numKVHeads*headDim)
-				b.fp16Ops.ConvertF16ToF32(fullVPtr, vF32Tmp, fullSeqLen*numKVHeads*headDim)
-				barrier() // Ensure F16→F32 conversion completes before SDPA reads the F32 buffers
-				effKVLen, kvStartPos := b.effectiveKVLen(layerIdx, fullSeqLen)
-				sdpaKPtr, sdpaVPtr := kF32Tmp, vF32Tmp
-				if kvStartPos > 0 {
-					offsetBytes := uintptr(kvStartPos * headDim * 4)
-					sdpaKPtr = tensor.DevicePtrOffset(kF32Tmp, offsetBytes)
-					sdpaVPtr = tensor.DevicePtrOffset(vF32Tmp, offsetBytes)
+				if sc, ok := b.backend.(fp16SoftCapSDPA); ok {
+					if debugDecode && layerIdx == 0 {
+						fmt.Printf("FP16KVCache+SoftCap (native)\n")
+					}
+					// Convert Q to FP16
+					b.fp16Ops.ConvertF32ToF16(qPtr, qF16Ptr, qSize)
+					sc.SDPAF16SoftCap(qF16Ptr, fullKPtr, fullVPtr, attnOutF16Ptr, fullSeqLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap, gpuCache.KVHeadStride())
+					b.fp16Ops.ConvertF16ToF32(attnOutF16Ptr, attnOutPtr, qSize)
+				} else if b.softCapOps != nil {
+					if debugDecode && layerIdx == 0 {
+						fmt.Printf("FP16KVCache+SoftCap (fallback to FP32 SDPA)\n")
+					}
+					// Fallback: convert FP16 KV to F32 and use FP32 SDPASoftCap
+					kF32Tmp := b.backend.Alloc(fullSeqLen * numKVHeads * headDim * 4)
+					vF32Tmp := b.backend.Alloc(fullSeqLen * numKVHeads * headDim * 4)
+					b.fp16Ops.ConvertF16ToF32(fullKPtr, kF32Tmp, fullSeqLen*numKVHeads*headDim)
+					b.fp16Ops.ConvertF16ToF32(fullVPtr, vF32Tmp, fullSeqLen*numKVHeads*headDim)
+					barrier() // Ensure F16->F32 conversion completes before SDPA reads the F32 buffers
+					effKVLen, kvStartPos := b.effectiveKVLen(layerIdx, fullSeqLen)
+					sdpaKPtr, sdpaVPtr := kF32Tmp, vF32Tmp
+					if kvStartPos > 0 {
+						offsetBytes := uintptr(kvStartPos * headDim * 4)
+						sdpaKPtr = tensor.DevicePtrOffset(kF32Tmp, offsetBytes)
+						sdpaVPtr = tensor.DevicePtrOffset(vF32Tmp, offsetBytes)
+					}
+					b.softCapOps.SDPASoftCap(qPtr, sdpaKPtr, sdpaVPtr, attnOutPtr, effKVLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap, gpuCache.KVHeadStride())
 				}
-				b.softCapOps.SDPASoftCap(qPtr, sdpaKPtr, sdpaVPtr, attnOutPtr, effKVLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap, gpuCache.KVHeadStride())
 			} else if useFP16KVCache {
 				if debugDecode && layerIdx == 0 {
 					fmt.Printf("FP16KVCache\n")

@@ -147,9 +147,11 @@ type Backend struct {
 	matvecQ4F16Pipeline         unsafe.Pointer
 	sdpaDecodeF16Pipeline       unsafe.Pointer
 	sdpaDecodeF16VecPipeline    unsafe.Pointer // Vectorized version
-	sdpaFlashDecodeF16Pipeline      unsafe.Pointer // Flash Attention split-KV (O(headDim) shared mem)
-	sdpaFlashDecodeF16V3Pipeline    unsafe.Pointer // Chunk-based split-KV v3 (high ILP)
-	sdpaFlashDecodeF16NWGPipeline   unsafe.Pointer // NWG multi-TG with atomic merge
+	sdpaFlashDecodeF16Pipeline          unsafe.Pointer // Flash Attention split-KV (O(headDim) shared mem)
+	sdpaFlashDecodeF16V3Pipeline        unsafe.Pointer // Chunk-based split-KV v3 (high ILP)
+	sdpaFlashDecodeF16SoftcapPipeline   unsafe.Pointer // Flash Attention split-KV with softcap
+	sdpaFlashDecodeF16V3SoftcapPipeline unsafe.Pointer // Chunk-based split-KV v3 with softcap
+	sdpaFlashDecodeF16NWGPipeline       unsafe.Pointer // NWG multi-TG with atomic merge
 	sdpaFlashDecodeF16TiledPipeline unsafe.Pointer // Tiled split-K for long context
 	sdpaFlashDecodeF16MergePipeline unsafe.Pointer // Merge partials from tiled kernel
 	sdpaDecodeF16HD64Pipeline   unsafe.Pointer // Specialized for headDim=64
@@ -347,6 +349,8 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.sdpaDecodeF16VecPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_decode_f16_vec"))
 	b.sdpaFlashDecodeF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f16"))
 	b.sdpaFlashDecodeF16V3Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f16_v3"))
+	b.sdpaFlashDecodeF16SoftcapPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f16_softcap"))
+	b.sdpaFlashDecodeF16V3SoftcapPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f16_v3_softcap"))
 	b.sdpaFlashDecodeF16NWGPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f16_nwg"))
 	b.sdpaFlashDecodeF16TiledPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f16_tiled"))
 	b.sdpaFlashDecodeF16MergePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_flash_decode_f16_merge"))
@@ -2265,6 +2269,31 @@ func (b *Backend) SDPAF16V3(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, num
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
 		C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
 		C.float(scale), C.int(kvHeadStride))
+}
+
+// SDPAF16SoftCap performs scaled dot-product attention with FP16 KV cache and attention
+// logit soft-capping. Reads FP16 K/V directly (no conversion), applies cap*tanh(score/cap)
+// inline. Eliminates the FP16->F32 KV conversion roundtrip used by Gemma 2.
+func (b *Backend) SDPAF16SoftCap(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, numKVHeads, headDim int, scale, softcap float32, kvHeadStride int) {
+	b.profiler.RecordDispatch("SDPA")
+	// Try v3 first (chunk-based, higher ILP), fall back to v1
+	if b.sdpaFlashDecodeF16V3SoftcapPipeline != nil && headDim%32 == 0 {
+		C.metal_sdpa_flash_decode_f16_v3_softcap(b.queue, b.sdpaFlashDecodeF16V3SoftcapPipeline,
+			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+			unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+			C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+			C.float(scale), C.int(kvHeadStride), C.float(softcap))
+		return
+	}
+	if b.sdpaFlashDecodeF16SoftcapPipeline != nil && headDim%32 == 0 {
+		C.metal_sdpa_flash_decode_f16_softcap(b.queue, b.sdpaFlashDecodeF16SoftcapPipeline,
+			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+			unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+			C.int(kvLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+			C.float(scale), C.int(kvHeadStride), C.float(softcap))
+		return
+	}
+	panic("SDPAF16SoftCap called but no pipeline available")
 }
 
 // SDPAF16NWG performs multi-threadgroup SDPA with FP16 KV cache.

@@ -912,6 +912,18 @@ void metal_sdpa_flash_decode_f16_v3(void* queue, void* pipeline,
                                      int kvLen, int numQHeads, int numKVHeads, int headDim,
                                      float scale, int kvHeadStride);
 
+// Flash Attention SDPA F16 with attention logit soft-capping (v1 fallback)
+void metal_sdpa_flash_decode_f16_softcap(void* queue, void* pipeline,
+                                          void* Q, void* K, void* V, void* out,
+                                          int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                          float scale, int kvHeadStride, float softcap);
+
+// Chunk-based Flash Attention SDPA F16 v3 with attention logit soft-capping
+void metal_sdpa_flash_decode_f16_v3_softcap(void* queue, void* pipeline,
+                                              void* Q, void* K, void* V, void* out,
+                                              int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                              float scale, int kvHeadStride, float softcap);
+
 // NWG (N-Way Group) Flash Attention SDPA F16: multi-threadgroup per Q head with atomic merge.
 // partials: device buffer for partial results, counters: device buffer for atomic coordination.
 void metal_sdpa_flash_decode_f16_nwg(void* queue, void* pipeline,

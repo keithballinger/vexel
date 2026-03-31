@@ -9050,6 +9050,123 @@ kernel void sdpa_flash_decode_f16(
 }
 
 // =============================================================================
+// Flash Attention SDPA decode for FP16 KV cache with attention logit soft-capping (v1)
+//
+// Same as sdpa_flash_decode_f16 but applies softcap after Q·K score:
+//   score = softcap * tanh(score / softcap)
+// Used by Gemma 2 to bound attention logits. Eliminates FP16→F32 KV conversion.
+// =============================================================================
+
+kernel void sdpa_flash_decode_f16_softcap(
+    device const half* Q [[buffer(0)]],         // [numQHeads, headDim] in FP16
+    device const half* K [[buffer(1)]],         // [numKVHeads, maxSeqLen, headDim] in FP16
+    device const half* V [[buffer(2)]],         // [numKVHeads, maxSeqLen, headDim] in FP16
+    device half* out [[buffer(3)]],             // [numQHeads, headDim] in FP16
+    constant int& kvLen [[buffer(4)]],
+    constant int& numQHeads [[buffer(5)]],
+    constant int& numKVHeads [[buffer(6)]],
+    constant int& headDim [[buffer(7)]],
+    constant float& scale [[buffer(8)]],
+    constant int& kvHeadStride [[buffer(9)]],
+    constant float& softcap [[buffer(10)]],
+    threadgroup float* shared [[threadgroup(0)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int qHead = gid;
+    if (qHead >= numQHeads) return;
+
+    // GQA: map Q head to KV head
+    int headsPerKV = numQHeads / numKVHeads;
+    int kvHead = qHead / headsPerKV;
+    int kvBase = kvHead * kvHeadStride;
+
+    int elemsPerThread = headDim / 32;
+    int threadBase = simd_lane * elemsPerThread;
+
+    // Load Q into registers
+    float q_reg[8];
+    for (int e = 0; e < elemsPerThread; e++) {
+        q_reg[e] = float(Q[qHead * headDim + threadBase + e]);
+    }
+
+    // Per-simdgroup online softmax state
+    float m_i = -INFINITY;
+    float l_i = 0.0f;
+    float o_i[8];
+    for (int e = 0; e < 8; e++) o_i[e] = 0.0f;
+
+    int chunkSize = (kvLen + FLASH_F16_DECODE_NUM_SG - 1) / FLASH_F16_DECODE_NUM_SG;
+    int startPos = simd_group * chunkSize;
+    int endPos = min(startPos + chunkSize, kvLen);
+
+    for (int pos = startPos; pos < endPos; pos++) {
+        int kBase = kvBase + pos * headDim;
+
+        float partial = 0.0f;
+        for (int e = 0; e < elemsPerThread; e++) {
+            partial += q_reg[e] * float(K[kBase + threadBase + e]);
+        }
+        float score = simd_sum(partial) * scale;
+        score = softcap * precise::tanh(score / softcap);  // attention logit soft-capping
+
+        float m_new = max(m_i, score);
+        float alpha = exp(m_i - m_new);
+        float p = exp(score - m_new);
+
+        l_i = l_i * alpha + p;
+
+        int vBase = kvBase + pos * headDim;
+        for (int e = 0; e < elemsPerThread; e++) {
+            o_i[e] = o_i[e] * alpha + p * float(V[vBase + threadBase + e]);
+        }
+
+        m_i = m_new;
+    }
+
+    // Cross-simdgroup merge
+    threadgroup float* sg_maxs = shared;
+    threadgroup float* sg_sums = shared + FLASH_F16_DECODE_NUM_SG;
+    threadgroup float* sg_accs = shared + 2 * FLASH_F16_DECODE_NUM_SG;
+
+    if (simd_lane == 0) {
+        sg_maxs[simd_group] = m_i;
+        sg_sums[simd_group] = l_i;
+    }
+    for (int e = 0; e < elemsPerThread; e++) {
+        sg_accs[simd_group * headDim + threadBase + e] = o_i[e];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group == 0) {
+        float global_max = sg_maxs[0];
+        for (int s = 1; s < FLASH_F16_DECODE_NUM_SG; s++) {
+            global_max = max(global_max, sg_maxs[s]);
+        }
+
+        float total_sum = 0.0f;
+        float result[8];
+        for (int e = 0; e < 8; e++) result[e] = 0.0f;
+
+        for (int s = 0; s < FLASH_F16_DECODE_NUM_SG; s++) {
+            float w = (sg_sums[s] > 0.0f) ? exp(sg_maxs[s] - global_max) : 0.0f;
+            total_sum += sg_sums[s] * w;
+            for (int e = 0; e < elemsPerThread; e++) {
+                result[e] += sg_accs[s * headDim + threadBase + e] * w;
+            }
+        }
+
+        float inv_l = (total_sum > 0.0f) ? (1.0f / total_sum) : 0.0f;
+        int outBase = qHead * headDim;
+        for (int e = 0; e < elemsPerThread; e++) {
+            out[outBase + threadBase + e] = half(result[e] * inv_l);
+        }
+    }
+}
+
+// =============================================================================
 // Chunk-based Flash Attention SDPA decode for FP16 KV cache (v3)
 //
 // Key improvements over v1 (sdpa_flash_decode_f16):
@@ -9202,6 +9319,178 @@ kernel void sdpa_flash_decode_f16_v3(
 
     // ---- Cross-simdgroup merge (same as v1) ----
     // ---- Cross-simdgroup merge (only over activeSGs launched SGs) ----
+    threadgroup float* sg_maxs = shared;
+    threadgroup float* sg_sums = shared + activeSGs;
+    threadgroup float* sg_accs = shared + 2 * activeSGs;
+
+    if (simd_lane == 0) {
+        sg_maxs[simd_group] = m_i;
+        sg_sums[simd_group] = l_i;
+    }
+    for (int e = 0; e < elemsPerThread; e++) {
+        sg_accs[simd_group * headDim + threadBase + e] = o_i[e];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group == 0) {
+        float global_max = sg_maxs[0];
+        for (int s = 1; s < activeSGs; s++) {
+            global_max = max(global_max, sg_maxs[s]);
+        }
+
+        float total_sum = 0.0f;
+        float result[8];
+        for (int e = 0; e < 8; e++) result[e] = 0.0f;
+
+        for (int s = 0; s < activeSGs; s++) {
+            float w = (sg_sums[s] > 0.0f) ? exp(sg_maxs[s] - global_max) : 0.0f;
+            total_sum += sg_sums[s] * w;
+            for (int e = 0; e < elemsPerThread; e++) {
+                result[e] += sg_accs[s * headDim + threadBase + e] * w;
+            }
+        }
+
+        float inv_l = (total_sum > 0.0f) ? (1.0f / total_sum) : 0.0f;
+        int outBase = qHead * headDim;
+        for (int e = 0; e < elemsPerThread; e++) {
+            out[outBase + threadBase + e] = half(result[e] * inv_l);
+        }
+    }
+}
+
+// =============================================================================
+// Chunk-based Flash Attention SDPA decode for FP16 KV cache with soft-capping (v3)
+//
+// Same as sdpa_flash_decode_f16_v3 but applies softcap after Q·K score:
+//   score = softcap * tanh(score / softcap)
+// Used by Gemma 2 to bound attention logits. Eliminates FP16->F32 KV conversion.
+// =============================================================================
+
+kernel void sdpa_flash_decode_f16_v3_softcap(
+    device const half* Q [[buffer(0)]],         // [numQHeads, headDim] in FP16
+    device const half* K [[buffer(1)]],         // [numKVHeads, maxSeqLen, headDim] in FP16
+    device const half* V [[buffer(2)]],         // [numKVHeads, maxSeqLen, headDim] in FP16
+    device half* out [[buffer(3)]],             // [numQHeads, headDim] in FP16
+    constant int& kvLen [[buffer(4)]],
+    constant int& numQHeads [[buffer(5)]],
+    constant int& numKVHeads [[buffer(6)]],
+    constant int& headDim [[buffer(7)]],
+    constant float& scale [[buffer(8)]],
+    constant int& kvHeadStride [[buffer(9)]],
+    constant int& activeSGs [[buffer(10)]],     // actual launched simdgroups
+    constant float& softcap [[buffer(11)]],     // attention logit soft-capping value
+    threadgroup float* shared [[threadgroup(0)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int qHead = gid;
+    if (qHead >= numQHeads) return;
+
+    // GQA: map Q head to KV head
+    int headsPerKV = numQHeads / numKVHeads;
+    int kvHead = qHead / headsPerKV;
+    int kvBase = kvHead * kvHeadStride;
+
+    int elemsPerThread = headDim / 32;
+    int threadBase = simd_lane * elemsPerThread;
+
+    // Load Q into registers as float4 (assumes headDim % 128 == 0 for 4 elements/thread)
+    float4 q_f4;
+    if (elemsPerThread == 4) {
+        half4 q_h4 = *(device const half4*)(Q + qHead * headDim + threadBase);
+        q_f4 = float4(q_h4);
+    }
+    // For larger headDim, fall back to scalar
+    float q_reg[8];
+    if (elemsPerThread != 4) {
+        for (int e = 0; e < elemsPerThread; e++) {
+            q_reg[e] = float(Q[qHead * headDim + threadBase + e]);
+        }
+    }
+
+    // Per-simdgroup online softmax state
+    float m_i = -INFINITY;
+    float l_i = 0.0f;
+    float o_i[8];
+    for (int e = 0; e < 8; e++) o_i[e] = 0.0f;
+
+    int chunkSize = (kvLen + activeSGs - 1) / activeSGs;
+    int startPos = simd_group * chunkSize;
+    int endPos = min(startPos + chunkSize, kvLen);
+
+    // Scores buffer in registers for the current chunk
+    float scores[FLASH_V3_CHUNK];
+
+    // Process positions in chunks of C=32
+    for (int chunkStart = startPos; chunkStart < endPos; chunkStart += FLASH_V3_CHUNK) {
+        int chunkEnd = min(chunkStart + FLASH_V3_CHUNK, endPos);
+        int chunkLen = chunkEnd - chunkStart;
+
+        // ---- Phase 1: Compute Q·K for all positions in this chunk ----
+        for (int c = 0; c < chunkLen; c++) {
+            int pos = chunkStart + c;
+            int kBase = kvBase + pos * headDim;
+            float dot_val;
+            if (elemsPerThread == 4) {
+                half4 k_h4 = *(device const half4*)(K + kBase + threadBase);
+                dot_val = dot(q_f4, float4(k_h4));
+            } else {
+                dot_val = 0.0f;
+                for (int e = 0; e < elemsPerThread; e++) {
+                    dot_val += q_reg[e] * float(K[kBase + threadBase + e]);
+                }
+            }
+            float score = simd_sum(dot_val) * scale;
+            scores[c] = softcap * precise::tanh(score / softcap);  // attention logit soft-capping
+        }
+
+        // ---- Phase 2: Online softmax for this chunk ----
+        float chunk_max = -INFINITY;
+        for (int c = 0; c < chunkLen; c++) {
+            chunk_max = max(chunk_max, scores[c]);
+        }
+
+        float m_new = max(m_i, chunk_max);
+        float alpha = exp(m_i - m_new);
+
+        float chunk_sum = 0.0f;
+        for (int c = 0; c < chunkLen; c++) {
+            scores[c] = exp(scores[c] - m_new);
+            chunk_sum += scores[c];
+        }
+
+        l_i = l_i * alpha + chunk_sum;
+
+        // Rescale old accumulator
+        for (int e = 0; e < elemsPerThread; e++) {
+            o_i[e] *= alpha;
+        }
+
+        // ---- Phase 3: Weighted V accumulation ----
+        for (int c = 0; c < chunkLen; c++) {
+            int pos = chunkStart + c;
+            int vBase = kvBase + pos * headDim;
+            float w = scores[c];
+            if (elemsPerThread == 4) {
+                half4 v_h4 = *(device const half4*)(V + vBase + threadBase);
+                float4 vf4 = float4(v_h4);
+                o_i[0] += w * vf4[0];
+                o_i[1] += w * vf4[1];
+                o_i[2] += w * vf4[2];
+                o_i[3] += w * vf4[3];
+            } else {
+                for (int e = 0; e < elemsPerThread; e++) {
+                    o_i[e] += w * float(V[vBase + threadBase + e]);
+                }
+            }
+        }
+
+        m_i = m_new;
+    }
+
+    // ---- Cross-simdgroup merge ----
     threadgroup float* sg_maxs = shared;
     threadgroup float* sg_sums = shared + activeSGs;
     threadgroup float* sg_accs = shared + 2 * activeSGs;
@@ -14852,6 +15141,81 @@ void metal_sdpa_flash_decode_f16_v3(void* queuePtr, void* pipelinePtr,
     // 64 threads = 2 simdgroups. Merge loop uses activeSGs to avoid reading garbage.
     int numSG = 2;
     [encoder setBytes:&numSG length:sizeof(numSG) atIndex:10];
+
+    int sharedMemSize = (2 * numSG + numSG * headDim) * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    MTLSize threadgroups = MTLSizeMake(numQHeads, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(64, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Flash Attention SDPA decode for FP16 KV cache with attention logit soft-capping (v1)
+void metal_sdpa_flash_decode_f16_softcap(void* queuePtr, void* pipelinePtr,
+                                          void* Q, void* K, void* V, void* out,
+                                          int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                          float scale, int kvHeadStride, float softcap) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBytes:&kvLen length:sizeof(kvLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+    [encoder setBytes:&kvHeadStride length:sizeof(kvHeadStride) atIndex:9];
+    [encoder setBytes:&softcap length:sizeof(softcap) atIndex:10];
+
+    int numSG = 8;
+    int sharedMemSize = (2 * numSG + numSG * headDim) * sizeof(float);
+    [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
+
+    MTLSize threadgroups = MTLSizeMake(numQHeads, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(256, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+// Chunk-based Flash Attention SDPA decode for FP16 KV cache with soft-capping (v3)
+void metal_sdpa_flash_decode_f16_v3_softcap(void* queuePtr, void* pipelinePtr,
+                                              void* Q, void* K, void* V, void* out,
+                                              int kvLen, int numQHeads, int numKVHeads, int headDim,
+                                              float scale, int kvHeadStride, float softcap) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)Q offset:0 atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)K offset:0 atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)V offset:0 atIndex:2];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)out offset:0 atIndex:3];
+    [encoder setBytes:&kvLen length:sizeof(kvLen) atIndex:4];
+    [encoder setBytes:&numQHeads length:sizeof(numQHeads) atIndex:5];
+    [encoder setBytes:&numKVHeads length:sizeof(numKVHeads) atIndex:6];
+    [encoder setBytes:&headDim length:sizeof(headDim) atIndex:7];
+    [encoder setBytes:&scale length:sizeof(scale) atIndex:8];
+    [encoder setBytes:&kvHeadStride length:sizeof(kvHeadStride) atIndex:9];
+
+    // 64 threads = 2 simdgroups. Merge loop uses activeSGs to avoid reading garbage.
+    int numSG = 2;
+    [encoder setBytes:&numSG length:sizeof(numSG) atIndex:10];
+    [encoder setBytes:&softcap length:sizeof(softcap) atIndex:11];
 
     int sharedMemSize = (2 * numSG + numSG * headDim) * sizeof(float);
     [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
