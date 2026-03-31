@@ -1526,6 +1526,8 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				b.fp16Ops.ConvertF32ToF16(kPtr, kF16Ptr, kvSize)
 				b.fp16Ops.ConvertF32ToF16(vPtr, vF16Ptr, kvSize)
 
+				// Barrier: scatter reads kF16Ptr/vF16Ptr written by F32→F16 conversion
+				barrier()
 				// Use F16 scatter (since we now have F16 source)
 				fullKPtr, fullVPtr, fullSeqLen = gpuCache.AppendKV(layerIdx, kF16Ptr, vF16Ptr, tensor.Float16, seqLen)
 			} else if useQ8KVCache {
@@ -1608,6 +1610,24 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 				// FP16 path: Q already in FP16 (from fused kernel), no Q conversion needed
 				// SDPA output stays in FP16 — Wo will read it directly via F16-input matvec
 				b.fp16Ops.SDPAF16(qF16Ptr, fullKPtr, fullVPtr, attnOutF16Ptr, fullSeqLen, numHeads, numKVHeads, headDim, scale, gpuCache.KVHeadStride())
+			} else if useFP16KVCache && b.AttentionLogitSoftCap > 0 && b.softCapOps != nil {
+				if debugDecode && layerIdx == 0 {
+					fmt.Printf("FP16KVCache+SoftCap (fallback to FP32 SDPA)\n")
+				}
+				// FP16 KV cache with softcap: no FP16 softcap kernel exists,
+				// so convert KV to FP32 and use the FP32 SDPASoftCap kernel.
+				kF32Tmp := b.backend.Alloc(fullSeqLen * numKVHeads * headDim * 4)
+				vF32Tmp := b.backend.Alloc(fullSeqLen * numKVHeads * headDim * 4)
+				b.fp16Ops.ConvertF16ToF32(fullKPtr, kF32Tmp, fullSeqLen*numKVHeads*headDim)
+				b.fp16Ops.ConvertF16ToF32(fullVPtr, vF32Tmp, fullSeqLen*numKVHeads*headDim)
+				effKVLen, kvStartPos := b.effectiveKVLen(layerIdx, fullSeqLen)
+				sdpaKPtr, sdpaVPtr := kF32Tmp, vF32Tmp
+				if kvStartPos > 0 {
+					offsetBytes := uintptr(kvStartPos * headDim * 4)
+					sdpaKPtr = tensor.DevicePtrOffset(kF32Tmp, offsetBytes)
+					sdpaVPtr = tensor.DevicePtrOffset(vF32Tmp, offsetBytes)
+				}
+				b.softCapOps.SDPASoftCap(qPtr, sdpaKPtr, sdpaVPtr, attnOutPtr, effKVLen, numHeads, numKVHeads, headDim, scale, b.AttentionLogitSoftCap, gpuCache.KVHeadStride())
 			} else if useFP16KVCache {
 				if debugDecode && layerIdx == 0 {
 					fmt.Printf("FP16KVCache\n")
@@ -1745,6 +1765,7 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 		}
 		// Post-attention norm (Gemma 2): norm after attn projection, before residual
 		if b.HasPostNorms && !b.PostAttnNorm.DevicePtr().IsNil() {
+			barrier() // Wo writes woOutputPtr, PostAttnNorm reads+writes same buffer
 			b.backend.RMSNorm(woOutputPtr, b.PostAttnNorm.DevicePtr(), woOutputPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
 		}
 	})
@@ -2379,11 +2400,12 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 
 	// 9. Post-FFN norm (Gemma 2): norm after MLP, before residual
 	if b.HasPostNorms && !b.PostFFNNorm.DevicePtr().IsNil() {
+		barrier() // W2 writes normOutPtr, PostFFNNorm reads+writes same buffer
 		b.backend.RMSNorm(normOutPtr, b.PostFFNNorm.DevicePtr(), normOutPtr, seqLen, hiddenSize, float32(b.RMSNormEPS))
 	}
 
 	// 10. Final residual add (skip if W2+Add2 was already fused above)
-	// Barrier: Add2 reads normOutPtr written by W2 (scratch buffer)
+	// Barrier: Add2 reads normOutPtr written by W2 or PostFFNNorm
 	barrier()
 	// For parallel residual (Phi): x = x + attn_output + mlp_output (combined add)
 	// For serial residual (LLaMA): x = x + mlp_output (attn was already added in Add1)

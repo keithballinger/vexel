@@ -738,7 +738,9 @@ func (m *ModelRuntime) DecodeWithGPUKV(tokens []int, pos int) (tensor.Tensor, er
 	// 5. Layer Loop using ExecuteWithGPUKV
 	// Cross-layer batching for decode (batchSize==1). For prefill (batchSize>1),
 	// the large number of dispatches per command buffer can hit Metal GPU timeouts.
-	if batchSize == 1 {
+	// Skip cross-layer batching for models with post-norms (Gemma 2): the additional
+	// norm dispatches within each layer need more aggressive GPU serialization.
+	if batchSize == 1 && !m.config.HasPostNorms {
 		if batcher, ok := m.backend.(backend.Batcher); ok && !cachedGPUProfile {
 			batcher.BeginBatch()
 			defer batcher.EndBatch()
