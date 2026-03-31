@@ -118,6 +118,7 @@ type Backend struct {
 			matvecQ5KPipeline           unsafe.Pointer
 		
 			matvecQ5KNR2Pipeline        unsafe.Pointer
+			matmulQ5KBatchedPipeline    unsafe.Pointer
 			matmulQ4KBatchedPipeline    unsafe.Pointer
 			matmulQ4KSimdgroupPipeline  unsafe.Pointer
 			matvecQ4KFusedRMSNormQKVF16Pipeline unsafe.Pointer // Fused RMSNorm + QKV for Q4_K (FP16 output)
@@ -303,6 +304,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.matvecQ4KNR4Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_nr4_f32"))
 	b.matvecQ5KPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q5k_multi_output_f32"))
 	b.matvecQ5KNR2Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q5k_nr2_f32"))
+	b.matmulQ5KBatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q5k_batched_f32"))
 	b.matmulQ4KBatchedPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4k_batched_f32"))
 	b.matmulQ4KSimdgroupPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matmul_q4k_simdgroup_f32"))
 	b.matvecQ4KFusedRMSNormQKVF16Pipeline = C.metal_create_pipeline(b.device, b.library, C.CString("matvec_q4k_fused_rmsnorm_qkv_f16"))
@@ -1193,8 +1195,15 @@ func (b *Backend) MatMulQ5_K(a, bMat, out tensor.DevicePtr, m, n, k int) {
 			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
 			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
 			C.int(n), C.int(k))
+	} else if b.matmulQ5KBatchedPipeline != nil {
+		// Batched path for prefill (M > 1)
+		C.metal_matmul_q5k_batched_f32(b.queue, b.matmulQ5KBatchedPipeline,
+			unsafe.Pointer(a.Addr()), C.uint64_t(a.Offset()),
+			unsafe.Pointer(bMat.Addr()), C.uint64_t(bMat.Offset()),
+			unsafe.Pointer(out.Addr()), C.uint64_t(out.Offset()),
+			C.int(m), C.int(n), C.int(k))
 	} else {
-		// Looped matvec for prefill
+		// Looped matvec fallback for prefill
 		stateRowBytes := uintptr(k * 4)
 		outRowBytes := uintptr(n * 4)
 		for i := 0; i < m; i++ {

@@ -5044,6 +5044,102 @@ kernel void matvec_q5k_nr2_f32(
 }
 
 // =============================================================================
+// Q5_K BATCHED MATMUL (FOR M > 1, PREFILL)
+// =============================================================================
+// C[m,n] = A[m,k] @ B[n,k]^T where B is Q5_K quantized
+// NR2-style: 8 simdgroups × 2 N outputs = 16 outputs per threadgroup per M row.
+// Grid: (ceil(N/16), M) threadgroups of 256 threads.
+
+kernel void matmul_q5k_batched_f32(
+    device const float* A [[buffer(0)]],           // [M, K] activations
+    device const uchar* B [[buffer(1)]],           // [N, K] in Q5_K format
+    device float* C [[buffer(2)]],                 // [M, N] output
+    constant int& M [[buffer(3)]],
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    uint2 gid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    int m = gid.y;
+    if (m >= M) return;
+
+    // Each simdgroup handles TWO outputs (NR2 pattern)
+    int row0 = gid.x * Q5K_NR2_OUTPUTS_PER_TG + simd_group * 2;
+    int row1 = row0 + 1;
+    if (row0 >= N) return;
+
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+
+    device const float* a_row = A + m * K;
+    int numBlocks = (K + Q5K_BLOCK_SIZE - 1) / Q5K_BLOCK_SIZE;
+    device const uchar* b_row0 = B + (int64_t)row0 * numBlocks * Q5K_BYTES_PER_BLOCK;
+    device const uchar* b_row1 = B + (int64_t)row1 * numBlocks * Q5K_BYTES_PER_BLOCK;
+
+    for (int block = 0; block < numBlocks; block++) {
+        device const uchar* p0 = b_row0 + block * Q5K_BYTES_PER_BLOCK;
+        device const uchar* p1 = (row1 < N) ? b_row1 + block * Q5K_BYTES_PER_BLOCK : p0;
+
+        float d0 = q4_f16_to_f32(((ushort)p0[1] << 8) | p0[0]);
+        float dm0 = q4_f16_to_f32(((ushort)p0[3] << 8) | p0[2]);
+        float d1 = (row1 < N) ? q4_f16_to_f32(((ushort)p1[1] << 8) | p1[0]) : 0.0f;
+        float dm1 = (row1 < N) ? q4_f16_to_f32(((ushort)p1[3] << 8) | p1[2]) : 0.0f;
+
+        device const uchar* sd0 = p0 + 4;
+        device const uchar* sd1 = p1 + 4;
+
+        uchar s0[8], m0[8], s1[8], m1[8];
+        s0[0] = sd0[0] & 0x3F; s0[1] = sd0[1] & 0x3F; s0[2] = sd0[2] & 0x3F; s0[3] = sd0[3] & 0x3F;
+        m0[0] = sd0[4] & 0x3F; m0[1] = sd0[5] & 0x3F; m0[2] = sd0[6] & 0x3F; m0[3] = sd0[7] & 0x3F;
+        s0[4] = (sd0[8] & 0x0F) | ((sd0[0] >> 6) << 4); s0[5] = (sd0[9] & 0x0F) | ((sd0[1] >> 6) << 4);
+        s0[6] = (sd0[10] & 0x0F) | ((sd0[2] >> 6) << 4); s0[7] = (sd0[11] & 0x0F) | ((sd0[3] >> 6) << 4);
+        m0[4] = (sd0[8] >> 4) | ((sd0[4] >> 6) << 4); m0[5] = (sd0[9] >> 4) | ((sd0[5] >> 6) << 4);
+        m0[6] = (sd0[10] >> 4) | ((sd0[6] >> 6) << 4); m0[7] = (sd0[11] >> 4) | ((sd0[7] >> 6) << 4);
+
+        if (row1 < N) {
+            s1[0] = sd1[0] & 0x3F; s1[1] = sd1[1] & 0x3F; s1[2] = sd1[2] & 0x3F; s1[3] = sd1[3] & 0x3F;
+            m1[0] = sd1[4] & 0x3F; m1[1] = sd1[5] & 0x3F; m1[2] = sd1[6] & 0x3F; m1[3] = sd1[7] & 0x3F;
+            s1[4] = (sd1[8] & 0x0F) | ((sd1[0] >> 6) << 4); s1[5] = (sd1[9] & 0x0F) | ((sd1[1] >> 6) << 4);
+            s1[6] = (sd1[10] & 0x0F) | ((sd1[2] >> 6) << 4); s1[7] = (sd1[11] & 0x0F) | ((sd1[3] >> 6) << 4);
+            m1[4] = (sd1[8] >> 4) | ((sd1[4] >> 6) << 4); m1[5] = (sd1[9] >> 4) | ((sd1[5] >> 6) << 4);
+            m1[6] = (sd1[10] >> 4) | ((sd1[6] >> 6) << 4); m1[7] = (sd1[11] >> 4) | ((sd1[7] >> 6) << 4);
+        }
+
+        device const uchar* qh0 = p0 + 16;
+        device const uchar* qs0 = p0 + 48;
+        device const uchar* qh1 = p1 + 16;
+        device const uchar* qs1 = p1 + 48;
+
+        int base_k = block * Q5K_BLOCK_SIZE;
+
+        for (int i = simd_lane; i < 256 && base_k + i < K; i += 32) {
+            float a = a_row[base_k + i];
+            int is = i / 32;
+            int iqs = (i / 64) * 32 + (i % 32);
+            int nib = (i / 32) % 2;
+
+            int q0 = (qs0[iqs] >> (nib ? 4 : 0)) & 0xF;
+            q0 |= ((qh0[i % 32] >> is) & 1) << 4;
+            sum0 += a * (d0 * float(s0[is]) * float(q0) - dm0 * float(m0[is]));
+
+            if (row1 < N) {
+                int q1 = (qs1[iqs] >> (nib ? 4 : 0)) & 0xF;
+                q1 |= ((qh1[i % 32] >> is) & 1) << 4;
+                sum1 += a * (d1 * float(s1[is]) * float(q1) - dm1 * float(m1[is]));
+            }
+        }
+    }
+
+    sum0 = simd_sum(sum0);
+    sum1 = simd_sum(sum1);
+    if (simd_lane == 0) {
+        C[m * N + row0] = sum0;
+        if (row1 < N) C[m * N + row1] = sum1;
+    }
+}
+
+// =============================================================================
 // Q4_K BATCHED MATMUL (FOR M > 1, PREFILL) — Optimized Track 4
 // =============================================================================
 // C[m,n] = A[m,k] @ B[n,k]^T where B is Q4_K quantized
@@ -12761,6 +12857,37 @@ void metal_matvec_q5k_nr2_f32_v4(void* queuePtr, void* pipelinePtr,
     int numThreadgroups = (N + outputsPerTG - 1) / outputsPerTG;
 
     MTLSize threadgroups = MTLSizeMake(numThreadgroups, 1, 1);
+    MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    finish_encode(encoder, cmdBuffer, shouldCommit);
+}
+
+void metal_matmul_q5k_batched_f32(void* queuePtr, void* pipelinePtr,
+                                   void* A, uint64_t aOff,
+                                   void* B, uint64_t bOff,
+                                   void* C, uint64_t cOff,
+                                   int M, int N, int K) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    id<MTLCommandBuffer> cmdBuffer;
+    bool shouldCommit;
+    id<MTLComputeCommandEncoder> encoder = get_encoder(queue, &cmdBuffer, &shouldCommit);
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)A offset:aOff atIndex:0];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)B offset:bOff atIndex:1];
+    [encoder setBuffer:(__bridge id<MTLBuffer>)C offset:cOff atIndex:2];
+    [encoder setBytes:&M length:sizeof(M) atIndex:3];
+    [encoder setBytes:&N length:sizeof(N) atIndex:4];
+    [encoder setBytes:&K length:sizeof(K) atIndex:5];
+
+    int outputsPerTG = 16;  // Q5K_NR2_OUTPUTS_PER_TG
+    int threadgroupSize = 256;
+    int nTiles = (N + outputsPerTG - 1) / outputsPerTG;
+
+    MTLSize threadgroups = MTLSizeMake(nTiles, M, 1);
     MTLSize threadsPerGroup = MTLSizeMake(threadgroupSize, 1, 1);
 
     [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];

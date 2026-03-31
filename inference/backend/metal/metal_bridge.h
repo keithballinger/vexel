@@ -308,6 +308,13 @@ void metal_matvec_q5k_nr2_f32_v4(void* queue, void* pipeline,
                                   void* A, void* B, void* C,
                                   int N, int K, void* offsetsPtr);
 
+// Q5_K batched matmul: C = A @ B^T where A is [M,K] F32, B is [N,K] Q5_K, C is [M,N]
+void metal_matmul_q5k_batched_f32(void* queue, void* pipeline,
+                                   void* A, uint64_t aOff,
+                                   void* B, uint64_t bOff,
+                                   void* C, uint64_t cOff,
+                                   int M, int N, int K);
+
 void metal_rmsnorm_f32(void* queue, void* pipeline,
                        void* x, void* weight, void* out,
                        int batchSize, int dim, float eps);
