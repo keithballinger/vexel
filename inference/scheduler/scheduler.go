@@ -104,6 +104,17 @@ func (s *Scheduler) wakeUp() {
 	s.cond.Broadcast()
 }
 
+// isStopToken returns true if tokenID should end generation for the given sequence.
+// It checks the primary EOS token from the tokenizer as well as any per-sequence
+// extra stop tokens (e.g. <|end|> for Phi-3/3.5 in chat mode).
+func (s *Scheduler) isStopToken(tokenID int, seq *Sequence) bool {
+	eosToken := 2
+	if s.tokenizer != nil {
+		eosToken = s.tokenizer.EOS()
+	}
+	return tokenID == eosToken || seq.IsExtraStopToken(tokenID)
+}
+
 // Run starts the scheduler's main loop.
 // It continuously polls for work (sequences in Pending/Decoding/Prefill states) and executes steps.
 // It blocks until the context is canceled or a fatal error occurs.
@@ -325,11 +336,7 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 					}
 					tokenID := s.sampler.Sample(singleLogitsData)
 					seq.AddGeneratedToken(tokenID)
-					eosToken := 2
-					if s.tokenizer != nil {
-						eosToken = s.tokenizer.EOS()
-					}
-					if tokenID == eosToken {
+					if s.isStopToken(tokenID, seq) {
 						seq.SetState(StateFinished)
 						seq.Close()
 					} else if seq.ReachedMaxTokens(s.config.MaxTokens) {
@@ -386,12 +393,8 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 			tokenID := s.sampleToken(logits, vocabSize)
 			seq.AddGeneratedToken(tokenID)
 
-			// Check for EOS
-			eosToken := 2
-			if s.tokenizer != nil {
-				eosToken = s.tokenizer.EOS()
-			}
-			if tokenID == eosToken {
+			// Check for EOS or extra stop tokens
+			if s.isStopToken(tokenID, seq) {
 				seq.SetState(StateFinished)
 				seq.Close()
 			} else if seq.ReachedMaxTokens(s.config.MaxTokens) {
@@ -442,12 +445,8 @@ func (s *Scheduler) runDecodeStep(ctx context.Context, batch []*Sequence) error 
 				}
 				seq.AddGeneratedToken(tokenID)
 
-				// Check for EOS
-				eosToken := 2
-				if s.tokenizer != nil {
-					eosToken = s.tokenizer.EOS()
-				}
-				if tokenID == eosToken {
+				// Check for EOS or extra stop tokens
+				if s.isStopToken(tokenID, seq) {
 					seq.SetState(StateFinished)
 					seq.Close()
 					continue
@@ -530,12 +529,8 @@ func (s *Scheduler) runBatchedPrefill(seq *Sequence) error {
 	s.metrics.PrefillTime += prefillTime
 	s.mu.Unlock()
 
-	// Check for EOS
-	eosToken := 2
-	if s.tokenizer != nil {
-		eosToken = s.tokenizer.EOS()
-	}
-	if tokenID == eosToken {
+	// Check for EOS or extra stop tokens
+	if s.isStopToken(tokenID, seq) {
 		seq.SetState(StateFinished)
 		seq.Close()
 		return nil
@@ -624,12 +619,8 @@ func (s *Scheduler) runGPUPrefill(seq *Sequence) error {
 	s.metrics.PrefillTime += prefillTime
 	s.mu.Unlock()
 
-	// Check for EOS
-	eosToken := 2
-	if s.tokenizer != nil {
-		eosToken = s.tokenizer.EOS()
-	}
-	if tokenID == eosToken {
+	// Check for EOS or extra stop tokens
+	if s.isStopToken(tokenID, seq) {
 		seq.SetState(StateFinished)
 		seq.Close()
 		return nil

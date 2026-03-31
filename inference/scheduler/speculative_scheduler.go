@@ -200,11 +200,6 @@ func (ss *SpeculativeScheduler) runSpeculativeDecodeStep(ctx context.Context, ba
 	ss.specMetrics = ss.decoder.Metrics()
 
 	// Process each accepted token into the sequence
-	eosToken := 2
-	if ss.tokenizer != nil {
-		eosToken = ss.tokenizer.EOS()
-	}
-
 	for _, tokenID := range acceptedTokens {
 		seq.AdvancePosition()
 		if seq.State() == StatePending {
@@ -213,8 +208,8 @@ func (ss *SpeculativeScheduler) runSpeculativeDecodeStep(ctx context.Context, ba
 
 		seq.AddGeneratedToken(tokenID)
 
-		// Check for EOS
-		if tokenID == eosToken {
+		// Check for EOS or extra stop tokens
+		if ss.Scheduler.isStopToken(tokenID, seq) {
 			seq.SetState(StateFinished)
 			seq.Close()
 			break

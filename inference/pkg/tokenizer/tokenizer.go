@@ -757,6 +757,11 @@ type ChatTemplate struct {
 	AssistantPrefix string
 	AssistantSuffix string
 	BOS             string // Optional beginning-of-sequence token
+
+	// ExtraStopTokenIDs holds additional token IDs that should end generation
+	// beyond the model's primary EOS token. For example, Phi-3/3.5 uses
+	// <|end|> (ID 32007) as the per-turn stop token instead of <|endoftext|>.
+	ExtraStopTokenIDs []int
 }
 
 // DefaultChatTemplate returns the default template (TinyLlama/Zephyr style).
@@ -804,7 +809,7 @@ func Llama3ChatTemplate() ChatTemplate {
 	}
 }
 
-// ChatMLTemplate returns the ChatML template (used by Mistral, Phi-3, Qwen, etc.).
+// ChatMLTemplate returns the ChatML template (used by Mistral, Qwen, etc.).
 func ChatMLTemplate() ChatTemplate {
 	return ChatTemplate{
 		Name:            "chatml",
@@ -814,6 +819,24 @@ func ChatMLTemplate() ChatTemplate {
 		UserSuffix:      "<|im_end|>\n",
 		AssistantPrefix: "<|im_start|>assistant\n",
 		AssistantSuffix: "<|im_end|>\n",
+	}
+}
+
+// Phi3ChatTemplate returns the Phi-3 / Phi-3.5 chat template.
+// Phi-3 uses its own special tokens: <|user|>, <|assistant|>, <|system|>, <|end|>.
+// The per-turn end token <|end|> (ID 32007) is used instead of <|endoftext|> (ID 32000).
+// AssistantPrefix ends without a newline so the model generates text directly after the
+// <|assistant|> token rather than predicting <|assistant|> again from a trailing newline.
+func Phi3ChatTemplate() ChatTemplate {
+	return ChatTemplate{
+		Name:              "phi3",
+		SystemPrefix:      "<|system|>\n",
+		SystemSuffix:      "<|end|>\n",
+		UserPrefix:        "<|user|>\n",
+		UserSuffix:        "<|end|>\n",
+		AssistantPrefix:   "<|assistant|>",
+		AssistantSuffix:   "<|end|>\n",
+		ExtraStopTokenIDs: []int{32007}, // <|end|> token ID in Phi-3/3.5 vocab
 	}
 }
 
@@ -833,9 +856,14 @@ func DetectChatTemplate(modelPath string) ChatTemplate {
 		strings.Contains(lower, "llama_2"):
 		return Llama2ChatTemplate()
 
-	case strings.Contains(lower, "mistral") ||
-		strings.Contains(lower, "phi-3") ||
+	// Phi-3 and Phi-3.5 use their own special tokens (<|user|>, <|end|>, etc.),
+	// not ChatML. Phi-2 is a base model and does not use a chat template.
+	case strings.Contains(lower, "phi-3") ||
 		strings.Contains(lower, "phi3") ||
+		strings.Contains(lower, "phi_3"):
+		return Phi3ChatTemplate()
+
+	case strings.Contains(lower, "mistral") ||
 		strings.Contains(lower, "qwen") ||
 		strings.Contains(lower, "chatml"):
 		return ChatMLTemplate()

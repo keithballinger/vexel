@@ -100,6 +100,9 @@ func RunChatLoopWithConfig(r io.Reader, w io.Writer, sched SchedulerInterface, c
 			// Submit
 			seqID := scheduler.SequenceID(time.Now().UnixNano())
 			seq := scheduler.NewSequence(seqID, prompt)
+			if config.ChatMode && len(template.ExtraStopTokenIDs) > 0 {
+				seq.SetStopTokens(template.ExtraStopTokenIDs)
+			}
 			sched.AddSequence(seq)
 
 			// Stream response and collect full text

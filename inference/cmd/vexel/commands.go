@@ -417,10 +417,12 @@ func runGenerate(globals GlobalFlags, args []string) error {
 
 	// Apply chat template for instruct models unless disabled
 	prompt := gf.Prompt
+	var templateStopTokens []int
 	if !globals.NoChatTemplate && isInstructModel(globals.Model) {
 		template := tokenizer.DetectChatTemplate(globals.Model)
 		messages := []tokenizer.ChatMessage{{Role: "user", Content: prompt}}
 		prompt = template.FormatConversation(messages)
+		templateStopTokens = template.ExtraStopTokenIDs
 		if globals.Verbose {
 			log.Printf("Applied %s chat template (use --no-chat-template to disable)", template.Name)
 		}
@@ -428,6 +430,9 @@ func runGenerate(globals GlobalFlags, args []string) error {
 
 	seqID := scheduler.SequenceID(1)
 	seq := scheduler.NewSequence(seqID, prompt)
+	if len(templateStopTokens) > 0 {
+		seq.SetStopTokens(templateStopTokens)
+	}
 	baseSched.AddSequence(seq)
 
 	tokenCount := 0

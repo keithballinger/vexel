@@ -61,6 +61,10 @@ type Sequence struct {
 	topK        int
 	topP        float32
 
+	// stopTokens holds extra token IDs that end generation beyond the primary EOS.
+	// Used for models like Phi-3/3.5 where the per-turn end token differs from EOS.
+	stopTokens []int
+
 	// tokenChan creates a stream of generated tokens back to the caller.
 	tokenChan chan string
 }
@@ -243,4 +247,22 @@ func (s *Sequence) KVSeqID() int64 {
 // SetKVSeqID sets the sequence ID in the PagedKVCache.
 func (s *Sequence) SetKVSeqID(id int64) {
 	s.kvSeqID = id
+}
+
+// SetStopTokens configures additional token IDs that end generation.
+// The primary EOS token is always checked; these are supplemental stop tokens
+// (e.g. <|end|> for Phi-3/3.5 models in chat mode).
+func (s *Sequence) SetStopTokens(ids []int) {
+	s.stopTokens = ids
+}
+
+// IsExtraStopToken returns true if tokenID matches any of the sequence's
+// extra stop tokens (those beyond the primary EOS).
+func (s *Sequence) IsExtraStopToken(tokenID int) bool {
+	for _, id := range s.stopTokens {
+		if tokenID == id {
+			return true
+		}
+	}
+	return false
 }

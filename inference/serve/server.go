@@ -68,12 +68,13 @@ func (s *Server) SetChatTemplate(ct tokenizer.ChatTemplate) {
 }
 
 // wrapPrompt applies the chat template to a raw prompt if one is configured.
-func (s *Server) wrapPrompt(prompt string) string {
+// Returns the formatted prompt and any extra stop token IDs from the template.
+func (s *Server) wrapPrompt(prompt string) (string, []int) {
 	if s.chatTemplate == nil {
-		return prompt
+		return prompt, nil
 	}
 	messages := []tokenizer.ChatMessage{{Role: "user", Content: prompt}}
-	return s.chatTemplate.FormatConversation(messages)
+	return s.chatTemplate.FormatConversation(messages), s.chatTemplate.ExtraStopTokenIDs
 }
 
 func (s *Server) routes() {
@@ -125,9 +126,12 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1. Create Sequence (apply chat template if configured)
-	prompt := s.wrapPrompt(req.Prompt)
+	prompt, stopTokens := s.wrapPrompt(req.Prompt)
 	seqID := nextSeqID()
 	seq := scheduler.NewSequence(seqID, prompt)
+	if len(stopTokens) > 0 {
+		seq.SetStopTokens(stopTokens)
+	}
 	if req.MaxTokens > 0 {
 		seq.SetMaxTokens(req.MaxTokens)
 	}
@@ -170,9 +174,12 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1. Create Sequence (apply chat template if configured)
-	prompt := s.wrapPrompt(req.Prompt)
+	prompt, stopTokens := s.wrapPrompt(req.Prompt)
 	seqID := nextSeqID()
 	seq := scheduler.NewSequence(seqID, prompt)
+	if len(stopTokens) > 0 {
+		seq.SetStopTokens(stopTokens)
+	}
 	if req.MaxTokens > 0 {
 		seq.SetMaxTokens(req.MaxTokens)
 	}

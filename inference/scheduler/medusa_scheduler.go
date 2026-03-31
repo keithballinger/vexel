@@ -385,12 +385,8 @@ func (ms *MedusaScheduler) runDecodeStepWithTraining(ctx context.Context, batch 
 		// Cache hidden state for potential speculation next step
 		ms.lastHidden = hidden
 
-		// Check for EOS
-		eosToken := 2
-		if ms.tokenizer != nil {
-			eosToken = ms.tokenizer.EOS()
-		}
-		if tokenID == eosToken {
+		// Check for EOS or extra stop tokens
+		if ms.isStopToken(tokenID, seq) {
 			seq.SetState(StateFinished)
 			seq.Close()
 			continue
@@ -665,11 +661,6 @@ func (ms *MedusaScheduler) runMedusaDecodeStep(ctx context.Context, batch []*Seq
 	ms.metrics.DecodeTokens += len(acceptedTokens)
 
 	// Process each accepted token
-	eosToken := 2
-	if ms.tokenizer != nil {
-		eosToken = ms.tokenizer.EOS()
-	}
-
 	for _, tokenID := range acceptedTokens {
 		seq.AdvancePosition()
 		if seq.State() == StatePending {
@@ -678,8 +669,8 @@ func (ms *MedusaScheduler) runMedusaDecodeStep(ctx context.Context, batch []*Seq
 
 		seq.AddGeneratedToken(tokenID)
 
-		// Check for EOS
-		if tokenID == eosToken {
+		// Check for EOS or extra stop tokens
+		if ms.isStopToken(tokenID, seq) {
 			seq.SetState(StateFinished)
 			seq.Close()
 			ms.lastHidden = nil
@@ -880,11 +871,6 @@ func (ms *MedusaScheduler) runTreeMedusaDecodeStep(ctx context.Context, batch []
 	ms.metrics.TotalTokens += len(acceptedTokens)
 	ms.metrics.DecodeTokens += len(acceptedTokens)
 
-	eosToken := 2
-	if ms.tokenizer != nil {
-		eosToken = ms.tokenizer.EOS()
-	}
-
 	for _, tokenID := range acceptedTokens {
 		seq.AdvancePosition()
 		if seq.State() == StatePending {
@@ -893,7 +879,8 @@ func (ms *MedusaScheduler) runTreeMedusaDecodeStep(ctx context.Context, batch []
 
 		seq.AddGeneratedToken(tokenID)
 
-		if tokenID == eosToken {
+		// Check for EOS or extra stop tokens
+		if ms.isStopToken(tokenID, seq) {
 			seq.SetState(StateFinished)
 			seq.Close()
 			ms.lastHidden = nil
