@@ -709,6 +709,12 @@ void metal_sdpa_softcap_prefill_f32(void* queue, void* pipeline,
                                      int seqLen, int numQHeads, int numKVHeads, int headDim,
                                      float scale, float softcap);
 
+// FA2 v2 prefill with logit soft-capping (Gemma 2, optimized)
+void metal_flash_attention_2_v2_softcap_f32(void* queue, void* pipeline,
+                                             void* Q, void* K, void* V, void* out,
+                                             int seqLen, int numQHeads, int numKVHeads, int headDim,
+                                             float scale, float softcap);
+
 // Legacy interface (deprecated)
 void metal_scaled_dot_product_attention(void* queue,
                                         void* Q, void* K, void* V, void* out,

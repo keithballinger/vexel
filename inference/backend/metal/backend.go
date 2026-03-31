@@ -88,6 +88,7 @@ type Backend struct {
 	geluMulPipeline                 unsafe.Pointer
 	sdpaSoftCapDecodePipeline       unsafe.Pointer // SDPA decode with logit soft-capping (Gemma 2)
 	sdpaSoftCapPrefillPipeline      unsafe.Pointer // SDPA prefill with logit soft-capping (Gemma 2)
+	fa2SoftCapPrefillPipeline       unsafe.Pointer // FA2 v2 prefill with logit soft-capping (Gemma 2)
 	addBiasPipeline                 unsafe.Pointer
 	addRMSNormPipeline              unsafe.Pointer
 	ropePipeline                    unsafe.Pointer
@@ -277,6 +278,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.geluMulPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("gelu_mul_f32"))
 	b.sdpaSoftCapDecodePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_softcap_decode_f32"))
 	b.sdpaSoftCapPrefillPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_softcap_prefill_f32"))
+	b.fa2SoftCapPrefillPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("flash_attention_2_v2_softcap_f32"))
 	b.addBiasPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_bias_f32"))
 	b.addRMSNormPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("add_rmsnorm_f32"))
 	b.ropePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_f32"))
@@ -2041,8 +2043,17 @@ func (b *Backend) SDPASoftCap(q, k, v, out tensor.DevicePtr, kvLen, numQHeads, n
 
 // SDPAPrefillSoftCap performs prefill SDPA with logit soft-capping and causal masking.
 // Used by Gemma 2 during the prefill phase.
+// Uses FA2 v2 softcap kernel for seqLen >= 16, falling back to naive kernel for short sequences.
 func (b *Backend) SDPAPrefillSoftCap(q, k, v, out tensor.DevicePtr, seqLen, numQHeads, numKVHeads, headDim int, scale, softcap float32) {
 	b.profiler.RecordDispatch("SDPAPrefillSoftCap")
+	if b.fa2SoftCapPrefillPipeline != nil && seqLen >= flashAttentionMinSeqLen() {
+		C.metal_flash_attention_2_v2_softcap_f32(b.queue, b.fa2SoftCapPrefillPipeline,
+			unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
+			unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),
+			C.int(seqLen), C.int(numQHeads), C.int(numKVHeads), C.int(headDim),
+			C.float(scale), C.float(softcap))
+		return
+	}
 	C.metal_sdpa_softcap_prefill_f32(b.queue, b.sdpaSoftCapPrefillPipeline,
 		unsafe.Pointer(q.Addr()), unsafe.Pointer(k.Addr()),
 		unsafe.Pointer(v.Addr()), unsafe.Pointer(out.Addr()),

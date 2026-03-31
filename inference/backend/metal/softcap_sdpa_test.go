@@ -351,6 +351,129 @@ func TestSDPAPrefillSoftCap(t *testing.T) {
 
 		t.Logf("Prefill softcap=%f: seqLen=%d, maxDiff=%e", softcap, seqLen, maxDiff)
 	})
+
+	// Test with Gemma 2 dimensions (headDim=256, 8 Q heads, 4 KV heads)
+	t.Run("prefill_softcap_gemma2_dims", func(t *testing.T) {
+		numQHeads := 8
+		numKVHeads := 4
+		headDim := 256
+		seqLen := 32
+		softcap := float32(50.0) // Gemma 2 uses softcap=50
+
+		q := make([]float32, seqLen*numQHeads*headDim)
+		k := make([]float32, seqLen*numKVHeads*headDim)
+		v := make([]float32, seqLen*numKVHeads*headDim)
+
+		for i := range q {
+			q[i] = float32(i%17-8) * 0.01
+		}
+		for i := range k {
+			k[i] = float32(i%23-11) * 0.01
+		}
+		for i := range v {
+			v[i] = float32(i%19-9) * 0.005
+		}
+
+		scale := float32(1.0 / math.Sqrt(float64(headDim)))
+
+		expected := cpuSDPAPrefillSoftCap(q, k, v, seqLen, numQHeads, numKVHeads, headDim, scale, softcap)
+
+		qBuf := be.Alloc(len(q) * 4)
+		kBuf := be.Alloc(len(k) * 4)
+		vBuf := be.Alloc(len(v) * 4)
+		outBuf := be.Alloc(seqLen * numQHeads * headDim * 4)
+
+		be.ToDevice(qBuf, float32ToBytes(q))
+		be.ToDevice(kBuf, float32ToBytes(k))
+		be.ToDevice(vBuf, float32ToBytes(v))
+		be.Sync()
+
+		be.SDPAPrefillSoftCap(qBuf, kBuf, vBuf, outBuf, seqLen, numQHeads, numKVHeads, headDim, scale, softcap)
+		be.Sync()
+
+		outBytes := make([]byte, seqLen*numQHeads*headDim*4)
+		be.ToHost(outBytes, outBuf)
+		result := bytesToFloat32(outBytes)
+
+		maxDiff := float32(0)
+		for i := range result {
+			diff := float32(math.Abs(float64(result[i] - expected[i])))
+			if diff > maxDiff {
+				maxDiff = diff
+			}
+			if math.IsNaN(float64(result[i])) {
+				t.Fatalf("NaN at index %d", i)
+			}
+		}
+
+		if maxDiff > 1e-2 {
+			t.Errorf("Prefill softcap Gemma2 dims maxDiff=%e (exceeds tolerance)", maxDiff)
+		}
+
+		t.Logf("Prefill softcap=%f: seqLen=%d, headDim=%d, numQHeads=%d, numKVHeads=%d, maxDiff=%e",
+			softcap, seqLen, headDim, numQHeads, numKVHeads, maxDiff)
+	})
+
+	// Test with longer sequence to verify causal masking correctness
+	t.Run("prefill_softcap_long_seq", func(t *testing.T) {
+		numQHeads := 8
+		numKVHeads := 4
+		headDim := 256
+		seqLen := 64
+		softcap := float32(50.0)
+
+		q := make([]float32, seqLen*numQHeads*headDim)
+		k := make([]float32, seqLen*numKVHeads*headDim)
+		v := make([]float32, seqLen*numKVHeads*headDim)
+
+		for i := range q {
+			q[i] = float32(i%17-8) * 0.01
+		}
+		for i := range k {
+			k[i] = float32(i%23-11) * 0.01
+		}
+		for i := range v {
+			v[i] = float32(i%19-9) * 0.005
+		}
+
+		scale := float32(1.0 / math.Sqrt(float64(headDim)))
+
+		expected := cpuSDPAPrefillSoftCap(q, k, v, seqLen, numQHeads, numKVHeads, headDim, scale, softcap)
+
+		qBuf := be.Alloc(len(q) * 4)
+		kBuf := be.Alloc(len(k) * 4)
+		vBuf := be.Alloc(len(v) * 4)
+		outBuf := be.Alloc(seqLen * numQHeads * headDim * 4)
+
+		be.ToDevice(qBuf, float32ToBytes(q))
+		be.ToDevice(kBuf, float32ToBytes(k))
+		be.ToDevice(vBuf, float32ToBytes(v))
+		be.Sync()
+
+		be.SDPAPrefillSoftCap(qBuf, kBuf, vBuf, outBuf, seqLen, numQHeads, numKVHeads, headDim, scale, softcap)
+		be.Sync()
+
+		outBytes := make([]byte, seqLen*numQHeads*headDim*4)
+		be.ToHost(outBytes, outBuf)
+		result := bytesToFloat32(outBytes)
+
+		maxDiff := float32(0)
+		for i := range result {
+			diff := float32(math.Abs(float64(result[i] - expected[i])))
+			if diff > maxDiff {
+				maxDiff = diff
+			}
+			if math.IsNaN(float64(result[i])) {
+				t.Fatalf("NaN at index %d", i)
+			}
+		}
+
+		if maxDiff > 1e-2 {
+			t.Errorf("Prefill softcap long seq maxDiff=%e (exceeds tolerance)", maxDiff)
+		}
+
+		t.Logf("Prefill softcap=%f: seqLen=%d, headDim=%d, maxDiff=%e", softcap, seqLen, headDim, maxDiff)
+	})
 }
 
 // cpuSDPAPrefillSoftCap computes prefill SDPA with causal masking and soft-capping.
