@@ -191,6 +191,7 @@ type Backend struct {
 	rmsnormBackwardPipeline     unsafe.Pointer
 	siluMulBackwardPipeline     unsafe.Pointer
 	ropeBackwardPipeline        unsafe.Pointer
+	sdpaBackwardPipeline        unsafe.Pointer
 
 	// Utility pipelines
 	memcpyComputePipeline      unsafe.Pointer // Compute-based memory copy (avoids blit encoder)
@@ -388,6 +389,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.rmsnormBackwardPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_backward_f32"))
 	b.siluMulBackwardPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_mul_backward_f32"))
 	b.ropeBackwardPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_backward_f32"))
+	b.sdpaBackwardPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_backward_f32"))
 
 	// Utility pipelines
 	b.memcpyComputePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("memcpy_compute"))
@@ -1911,7 +1913,18 @@ func (b *Backend) RMSNormBackward(dOut, input, weight, dInput tensor.DevicePtr, 
 }
 
 func (b *Backend) SDPABackward(dOut, Q, K, V, attnWeights, dQ, dK, dV tensor.DevicePtr, seqLen, headDim, numHeads int) {
-	panic("SDPABackward not yet implemented")
+	b.profiler.RecordDispatch("SDPABackward")
+	b.Zero(dQ, numHeads*seqLen*headDim)
+	b.Zero(dK, numHeads*seqLen*headDim)
+	b.Zero(dV, numHeads*seqLen*headDim)
+	C.metal_sdpa_backward_f32(
+		b.queue, b.sdpaBackwardPipeline,
+		unsafe.Pointer(dOut.Addr()), unsafe.Pointer(Q.Addr()),
+		unsafe.Pointer(K.Addr()), unsafe.Pointer(V.Addr()),
+		unsafe.Pointer(attnWeights.Addr()),
+		unsafe.Pointer(dQ.Addr()), unsafe.Pointer(dK.Addr()),
+		unsafe.Pointer(dV.Addr()),
+		C.int(seqLen), C.int(headDim), C.int(numHeads))
 }
 
 func (b *Backend) SiLUMulBackward(dOut, gate, up, dGate, dUp tensor.DevicePtr, n int) {
