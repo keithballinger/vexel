@@ -190,6 +190,7 @@ type Backend struct {
 	crossEntropyLossPipeline    unsafe.Pointer
 	rmsnormBackwardPipeline     unsafe.Pointer
 	siluMulBackwardPipeline     unsafe.Pointer
+	ropeBackwardPipeline        unsafe.Pointer
 
 	// Utility pipelines
 	memcpyComputePipeline      unsafe.Pointer // Compute-based memory copy (avoids blit encoder)
@@ -386,6 +387,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.crossEntropyLossPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("cross_entropy_loss_fwd_bwd_f32"))
 	b.rmsnormBackwardPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_backward_f32"))
 	b.siluMulBackwardPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_mul_backward_f32"))
+	b.ropeBackwardPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_backward_f32"))
 
 	// Utility pipelines
 	b.memcpyComputePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("memcpy_compute"))
@@ -1922,7 +1924,17 @@ func (b *Backend) SiLUMulBackward(dOut, gate, up, dGate, dUp tensor.DevicePtr, n
 }
 
 func (b *Backend) RoPEBackward(dQ, dK tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos, ropeDim int, theta float64, ropeNeox bool) {
-	panic("RoPEBackward not yet implemented")
+	b.profiler.RecordDispatch("RoPEBackward")
+	ropeNeoxInt := 0
+	if ropeNeox {
+		ropeNeoxInt = 1
+	}
+	C.metal_rope_backward_f32(
+		b.queue, b.ropeBackwardPipeline,
+		unsafe.Pointer(dQ.Addr()), unsafe.Pointer(dK.Addr()),
+		C.int(headDim), C.int(numHeads), C.int(numKVHeads),
+		C.int(seqLen), C.int(startPos), C.int(ropeDim),
+		C.float(theta), C.int(ropeNeoxInt))
 }
 
 // Embedding performs embedding lookup.

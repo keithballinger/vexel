@@ -7560,6 +7560,90 @@ kernel void rope_gqa_f32(
     }
 }
 
+// RoPE Backward - inverse rotation (negate sin component).
+// Since RoPE is an orthogonal rotation, the backward pass is the transpose,
+// which equals the inverse rotation: apply the same rotation with -sin.
+// Q layout: [seqLen, numQHeads, headDim]
+// K layout: [seqLen, numKVHeads, headDim]
+// ropeNeox: 0 = LLaMA-style (interleaved pairs (0,1), (2,3)...),
+//           1 = NEOX-style (split pairs (i, i+ropeDim/2))
+kernel void rope_backward_f32(
+    device float* dQ [[buffer(0)]],
+    device float* dK [[buffer(1)]],
+    constant int& seqLen [[buffer(2)]],
+    constant int& numQHeads [[buffer(3)]],
+    constant int& numKVHeads [[buffer(4)]],
+    constant int& headDim [[buffer(5)]],
+    constant int& startPos [[buffer(6)]],
+    constant int& ropeDim [[buffer(7)]],  // Dimensions to rotate (can be < headDim for partial RoPE)
+    constant float& theta [[buffer(8)]],
+    constant int& ropeNeox [[buffer(9)]],  // 0 = LLaMA-style, 1 = NEOX-style
+    uint2 gid [[thread_position_in_grid]]
+) {
+    int pos = gid.x;
+    int head = gid.y;
+
+    if (pos >= seqLen) return;
+
+    int absPos = startPos + pos;
+    // For partial RoPE (like Phi-2), only rotate first ropeDim dimensions
+    int halfRopeDim = ropeDim / 2;
+
+    // Process dQ heads
+    if (head < numQHeads) {
+        int qOffset = (pos * numQHeads + head) * headDim;
+        for (int j = 0; j < halfRopeDim; j++) {
+            float freq = 1.0f / pow(theta, float(2 * j) / float(ropeDim));
+            float angle = float(absPos) * freq;
+            float cos_val = cos(angle);
+            float sin_val = -sin(angle);  // Negate sin for inverse rotation
+
+            int idx0, idx1;
+            if (ropeNeox != 0) {
+                // NEOX-style: pairs are (i, i + ropeDim/2)
+                idx0 = j;
+                idx1 = j + halfRopeDim;
+            } else {
+                // LLaMA-style (interleaved): pairs are (2j, 2j+1)
+                idx0 = j * 2;
+                idx1 = j * 2 + 1;
+            }
+
+            float q0 = dQ[qOffset + idx0];
+            float q1 = dQ[qOffset + idx1];
+            dQ[qOffset + idx0] = q0 * cos_val - q1 * sin_val;
+            dQ[qOffset + idx1] = q0 * sin_val + q1 * cos_val;
+        }
+    }
+
+    // Process dK heads (fewer due to GQA)
+    if (head < numKVHeads) {
+        int kOffset = (pos * numKVHeads + head) * headDim;
+        for (int j = 0; j < halfRopeDim; j++) {
+            float freq = 1.0f / pow(theta, float(2 * j) / float(ropeDim));
+            float angle = float(absPos) * freq;
+            float cos_val = cos(angle);
+            float sin_val = -sin(angle);  // Negate sin for inverse rotation
+
+            int idx0, idx1;
+            if (ropeNeox != 0) {
+                // NEOX-style: pairs are (i, i + ropeDim/2)
+                idx0 = j;
+                idx1 = j + halfRopeDim;
+            } else {
+                // LLaMA-style (interleaved): pairs are (2j, 2j+1)
+                idx0 = j * 2;
+                idx1 = j * 2 + 1;
+            }
+
+            float k0 = dK[kOffset + idx0];
+            float k1 = dK[kOffset + idx1];
+            dK[kOffset + idx0] = k0 * cos_val - k1 * sin_val;
+            dK[kOffset + idx1] = k0 * sin_val + k1 * cos_val;
+        }
+    }
+}
+
 // RoPE for GQA with pre-computed per-dimension inverse frequencies.
 // Used for learned RoPE scaling (Gemma 2). Reads frequencies from a buffer
 // instead of computing from theta. freqs has [headDim/2] float32 values.
@@ -13962,6 +14046,34 @@ void metal_rope_gqa_scaled_f32(void* queuePtr, void* pipelinePtr,
     ];
 
     int maxHeads = numQHeads > numKVHeads ? numQHeads : numKVHeads;
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(seqLen, maxHeads, 1));
+}
+
+void metal_rope_backward_f32(void* queuePtr, void* pipelinePtr,
+                              void* dQ, void* dK,
+                              int headDim, int numHeads, int numKVHeads,
+                              int seqLen, int startPos, int ropeDim,
+                              float theta, int ropeNeox) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)dQ,
+        (__bridge id<MTLBuffer>)dK
+    ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&seqLen length:sizeof(seqLen)],
+        [NSData dataWithBytes:&numHeads length:sizeof(numHeads)],
+        [NSData dataWithBytes:&numKVHeads length:sizeof(numKVHeads)],
+        [NSData dataWithBytes:&headDim length:sizeof(headDim)],
+        [NSData dataWithBytes:&startPos length:sizeof(startPos)],
+        [NSData dataWithBytes:&ropeDim length:sizeof(ropeDim)],
+        [NSData dataWithBytes:&theta length:sizeof(theta)],
+        [NSData dataWithBytes:&ropeNeox length:sizeof(ropeNeox)]
+    ];
+
+    // Dispatch with max(numHeads, numKVHeads) threads per position
+    int maxHeads = numHeads > numKVHeads ? numHeads : numKVHeads;
     dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(seqLen, maxHeads, 1));
 }
 
