@@ -1887,79 +1887,26 @@ func (b *Backend) Zero(x tensor.DevicePtr, n int) {
 func (b *Backend) CrossEntropyLossForwardBackward(logits, targets, mask, dLogits tensor.DevicePtr, lossOut *float32, seqLen, vocabSize int) {
 	b.profiler.RecordDispatch("CrossEntropyLossForwardBackward")
 
-	// Download logits, targets, mask to CPU for computation
+	// Allocate per-position loss buffer (reduced on CPU after kernel).
+	lossPerPos := b.AllocPermanent(seqLen * 4)
+
+	C.metal_cross_entropy_loss_fwd_bwd_f32(
+		b.queue, b.crossEntropyLossPipeline,
+		unsafe.Pointer(logits.Addr()), unsafe.Pointer(targets.Addr()),
+		unsafe.Pointer(mask.Addr()), unsafe.Pointer(dLogits.Addr()),
+		unsafe.Pointer(lossPerPos.Addr()),
+		C.int(seqLen), C.int(vocabSize))
+
+	// Wait for the kernel to finish before reading back.
 	b.Sync()
-	logitBytes := make([]byte, seqLen*vocabSize*4)
-	targetBytes := make([]byte, seqLen*4)
-	maskBytes := make([]byte, seqLen*4)
-	b.ToHost(logitBytes, logits)
-	b.ToHost(targetBytes, targets)
-	b.ToHost(maskBytes, mask)
 
-	// Parse to typed slices
-	logitData := make([]float32, seqLen*vocabSize)
-	for i := range logitData {
-		bits := uint32(logitBytes[i*4]) | uint32(logitBytes[i*4+1])<<8 | uint32(logitBytes[i*4+2])<<16 | uint32(logitBytes[i*4+3])<<24
-		logitData[i] = *(*float32)(unsafe.Pointer(&bits))
-	}
-	targetData := make([]int32, seqLen)
-	for i := range targetData {
-		targetData[i] = int32(uint32(targetBytes[i*4]) | uint32(targetBytes[i*4+1])<<8 | uint32(targetBytes[i*4+2])<<16 | uint32(targetBytes[i*4+3])<<24)
-	}
-	maskData := make([]float32, seqLen)
-	for i := range maskData {
-		bits := uint32(maskBytes[i*4]) | uint32(maskBytes[i*4+1])<<8 | uint32(maskBytes[i*4+2])<<16 | uint32(maskBytes[i*4+3])<<24
-		maskData[i] = *(*float32)(unsafe.Pointer(&bits))
-	}
-
-	// Compute cross-entropy loss + gradient on CPU
-	dLogitData := make([]float32, seqLen*vocabSize)
+	// Sum per-position losses on CPU.
+	contentsPtr := C.metal_buffer_contents(unsafe.Pointer(lossPerPos.Addr()))
+	lossSlice := (*[1 << 20]float32)(contentsPtr)[:seqLen:seqLen]
 	var totalLoss float32
-
-	for t := 0; t < seqLen; t++ {
-		if maskData[t] == 0 {
-			continue
-		}
-		// Log-sum-exp for stability
-		maxVal := logitData[t*vocabSize]
-		for j := 1; j < vocabSize; j++ {
-			if logitData[t*vocabSize+j] > maxVal {
-				maxVal = logitData[t*vocabSize+j]
-			}
-		}
-		var sumExp float64
-		for j := 0; j < vocabSize; j++ {
-			sumExp += math.Exp(float64(logitData[t*vocabSize+j] - maxVal))
-		}
-		logSumExp := math.Log(sumExp) + float64(maxVal)
-
-		target := int(targetData[t])
-		loss := -(float64(logitData[t*vocabSize+target]) - logSumExp)
-		totalLoss += float32(loss)
-
-		// Gradient
-		invSumExp := 1.0 / sumExp
-		for j := 0; j < vocabSize; j++ {
-			softmax_j := math.Exp(float64(logitData[t*vocabSize+j]-maxVal)) * invSumExp
-			grad := float32(softmax_j)
-			if j == target {
-				grad -= 1.0
-			}
-			dLogitData[t*vocabSize+j] = grad
-		}
+	for i := 0; i < seqLen; i++ {
+		totalLoss += lossSlice[i]
 	}
-
-	// Upload dLogits back to GPU
-	dLogitBytes := make([]byte, len(dLogitData)*4)
-	for i, v := range dLogitData {
-		bits := *(*uint32)(unsafe.Pointer(&v))
-		dLogitBytes[i*4] = byte(bits)
-		dLogitBytes[i*4+1] = byte(bits >> 8)
-		dLogitBytes[i*4+2] = byte(bits >> 16)
-		dLogitBytes[i*4+3] = byte(bits >> 24)
-	}
-	b.ToDevice(dLogits, dLogitBytes)
-
 	*lossOut = totalLoss
 }
 

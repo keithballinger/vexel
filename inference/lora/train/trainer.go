@@ -148,7 +148,21 @@ func (t *Trainer) Train(examples []Example) error {
 			}
 			targets[seqLen-1] = 0 // Last position has no target.
 
-			// Upload targets (int32) and mask (float32) to GPU.
+			// Convert int32 tokens to int for TrainingForward.
+			intTokens := make([]int, seqLen)
+			for i, tok := range tokens {
+				intTokens[i] = int(tok)
+			}
+
+			// Forward pass (must happen before uploading targets/mask because
+			// TrainingForward calls ResetPool which recycles pool buffers).
+			logits, savedPerLayer, finalNormInput, err := t.model.TrainingForward(intTokens)
+			if err != nil {
+				return fmt.Errorf("epoch %d step %d: forward: %w", epoch, step, err)
+			}
+
+			// Upload targets (int32) and mask (float32) to GPU AFTER forward
+			// pass to avoid ResetPool recycling these buffers.
 			targetsGPU := t.b.Alloc(seqLen * 4)
 			targetsBytes := int32SliceToBytes(targets)
 			t.b.ToDevice(targetsGPU, targetsBytes)
@@ -156,18 +170,6 @@ func (t *Trainer) Train(examples []Example) error {
 			maskGPU := t.b.Alloc(seqLen * 4)
 			maskBytes := float32SliceToBytes(mask)
 			t.b.ToDevice(maskGPU, maskBytes)
-
-			// Convert int32 tokens to int for TrainingForward.
-			intTokens := make([]int, seqLen)
-			for i, tok := range tokens {
-				intTokens[i] = int(tok)
-			}
-
-			// Forward pass.
-			logits, savedPerLayer, finalNormInput, err := t.model.TrainingForward(intTokens)
-			if err != nil {
-				return fmt.Errorf("epoch %d step %d: forward: %w", epoch, step, err)
-			}
 
 			// Zero gradients.
 			ZeroGradients(t.train, t.grads, t.gpu, numLayers, hiddenSize, qDim, vDim)
