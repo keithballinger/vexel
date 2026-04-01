@@ -26,6 +26,7 @@ var validSubcommands = map[string]bool{
 	"chat":     true,
 	"bench":    true,
 	"tokenize": true,
+	"train":    true,
 }
 
 // parseArgs extracts global flags and the subcommand from os.Args.
@@ -225,6 +226,44 @@ func parseTokenizeFlags(args []string) (TokenizeFlags, error) {
 	return tf, nil
 }
 
+// TrainFlags holds flags for the train subcommand.
+type TrainFlags struct {
+	DataPath    string
+	OutputDir   string
+	Rank        int
+	Alpha       float32
+	LR          float32
+	Momentum    float32
+	WeightDecay float32
+	Epochs      int
+}
+
+// parseTrainFlags parses train-specific flags.
+func parseTrainFlags(args []string) (TrainFlags, error) {
+	fs := flag.NewFlagSet("train", flag.ContinueOnError)
+	tf := TrainFlags{}
+	var alpha float64
+	var lr float64
+	var momentum float64
+	var weightDecay float64
+	fs.StringVar(&tf.DataPath, "data", "", "Path to training data JSONL file (required)")
+	fs.StringVar(&tf.OutputDir, "output", "", "Output directory for LoRA adapter checkpoint (required)")
+	fs.IntVar(&tf.Rank, "rank", 16, "LoRA rank")
+	fs.Float64Var(&alpha, "alpha", 16, "LoRA alpha")
+	fs.Float64Var(&lr, "lr", 1e-4, "Learning rate")
+	fs.Float64Var(&momentum, "momentum", 0.9, "SGD momentum")
+	fs.Float64Var(&weightDecay, "weight-decay", 0.0, "Weight decay (L2 regularisation)")
+	fs.IntVar(&tf.Epochs, "epochs", 1, "Number of training epochs")
+	if err := fs.Parse(args); err != nil {
+		return TrainFlags{}, err
+	}
+	tf.Alpha = float32(alpha)
+	tf.LR = float32(lr)
+	tf.Momentum = float32(momentum)
+	tf.WeightDecay = float32(weightDecay)
+	return tf, nil
+}
+
 // printUsage writes the top-level usage message to w.
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, `Usage: vexel [global flags] <subcommand> [flags]
@@ -235,6 +274,7 @@ Subcommands:
   chat       Interactive chat REPL
   bench      Run scheduling benchmarks
   tokenize   Tokenize text to token IDs
+  train      Fine-tune a model with LoRA
 
 Global flags:
   --model             Path to GGUF model file (required for serve/generate/chat)
@@ -250,5 +290,6 @@ Examples:
   vexel --model model.gguf serve --port 8080 --grpc-port 9090
   vexel --model model.gguf generate --prompt "Hello!"
   vexel --model model.gguf --draft-model draft.gguf generate --prompt "Hello!"
-  vexel --model model.gguf chat`)
+  vexel --model model.gguf chat
+  vexel --model model.gguf train --data train.jsonl --output ./adapter/ --rank 16 --lr 1e-4`)
 }

@@ -19,6 +19,7 @@ import (
 	"vexel/inference/backend/metal"
 	"vexel/inference/cmd/vexel/internal"
 	"vexel/inference/lora"
+	"vexel/inference/lora/train"
 	"vexel/inference/memory"
 	"vexel/inference/pkg/gguf"
 	"vexel/inference/pkg/sampler"
@@ -607,6 +608,55 @@ func isInstructModel(modelPath string) bool {
 		}
 	}
 	return false
+}
+
+// runTrain fine-tunes a model using LoRA.
+func runTrain(globals GlobalFlags, args []string) error {
+	tf, err := parseTrainFlags(subcommandArgs(args))
+	if err != nil {
+		return err
+	}
+	if tf.DataPath == "" {
+		return fmt.Errorf("--data is required")
+	}
+	if tf.OutputDir == "" {
+		return fmt.Errorf("--output is required")
+	}
+
+	// Clear LoRAPath so initModel does not load a pre-existing adapter;
+	// the trainer initialises and attaches its own adapter.
+	trainGlobals := globals
+	trainGlobals.LoRAPath = ""
+
+	model, tok, gpuBackend, err := initModel(trainGlobals, 2048, globals.ContextLen, globals.Verbose, false)
+	if err != nil {
+		return err
+	}
+	defer gpuBackend.Close()
+
+	examples, err := train.LoadData(tf.DataPath)
+	if err != nil {
+		return fmt.Errorf("load training data: %w", err)
+	}
+	log.Printf("Loaded %d training examples from %s", len(examples), tf.DataPath)
+
+	cfg := train.TrainConfig{
+		Rank:        tf.Rank,
+		Alpha:       tf.Alpha,
+		LR:          tf.LR,
+		Momentum:    tf.Momentum,
+		WeightDecay: tf.WeightDecay,
+		Epochs:      tf.Epochs,
+		OutputDir:   tf.OutputDir,
+		DataPath:    tf.DataPath,
+	}
+
+	trainer, err := train.NewTrainer(cfg, model, tok)
+	if err != nil {
+		return fmt.Errorf("create trainer: %w", err)
+	}
+
+	return trainer.Train(examples)
 }
 
 // runTokenize tokenizes input text. Implemented in Phase 3.

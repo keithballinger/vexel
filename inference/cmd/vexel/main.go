@@ -65,5 +65,10 @@ func main() {
 			fmt.Fprintf(os.Stderr, "tokenize: %v\n", err)
 			os.Exit(1)
 		}
+	case "train":
+		if err := runTrain(globals, os.Args); err != nil {
+			fmt.Fprintf(os.Stderr, "train: %v\n", err)
+			os.Exit(1)
+		}
 	}
 }
