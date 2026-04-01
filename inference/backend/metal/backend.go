@@ -1874,6 +1874,26 @@ func (b *Backend) Zero(x tensor.DevicePtr, n int) {
 		unsafe.Pointer(x.Addr()), C.int(n))
 }
 
+func (b *Backend) CrossEntropyLossForwardBackward(logits, targets, mask, dLogits tensor.DevicePtr, lossOut *float32, seqLen, vocabSize int) {
+	panic("CrossEntropyLossForwardBackward not yet implemented")
+}
+
+func (b *Backend) RMSNormBackward(dOut, input, weight, dInput tensor.DevicePtr, rows, cols int, eps float32) {
+	panic("RMSNormBackward not yet implemented")
+}
+
+func (b *Backend) SDPABackward(dOut, Q, K, V, attnWeights, dQ, dK, dV tensor.DevicePtr, seqLen, headDim, numHeads int) {
+	panic("SDPABackward not yet implemented")
+}
+
+func (b *Backend) SiLUMulBackward(dOut, gate, up, dGate, dUp tensor.DevicePtr, n int) {
+	panic("SiLUMulBackward not yet implemented")
+}
+
+func (b *Backend) RoPEBackward(dQ, dK tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos, ropeDim int, theta float64, ropeNeox bool) {
+	panic("RoPEBackward not yet implemented")
+}
+
 // Embedding performs embedding lookup.
 // ids should be int32 values in an MTLBuffer on device
 func (b *Backend) Embedding(ids tensor.DevicePtr, numTokens int, table, out tensor.DevicePtr, vocabSize, dim int) {

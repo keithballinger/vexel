@@ -290,6 +290,13 @@ type TrainingOps interface {
 
 	// Zero fills a buffer with zeros.
 	Zero(x tensor.DevicePtr, n int)
+
+	// Backward pass kernels
+	CrossEntropyLossForwardBackward(logits, targets, mask, dLogits tensor.DevicePtr, lossOut *float32, seqLen, vocabSize int)
+	RMSNormBackward(dOut, input, weight, dInput tensor.DevicePtr, rows, cols int, eps float32)
+	SDPABackward(dOut, Q, K, V, attnWeights, dQ, dK, dV tensor.DevicePtr, seqLen, headDim, numHeads int)
+	SiLUMulBackward(dOut, gate, up, dGate, dUp tensor.DevicePtr, n int)
+	RoPEBackward(dQ, dK tensor.DevicePtr, headDim, numHeads, numKVHeads, seqLen, startPos, ropeDim int, theta float64, ropeNeox bool)
 }
 
 // Backend represents a compute backend that can execute tensor operations.
