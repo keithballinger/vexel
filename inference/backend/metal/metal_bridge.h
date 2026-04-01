@@ -620,6 +620,10 @@ void metal_cross_entropy_loss_fwd_bwd_f32(void* queue, void* pipeline,
     void* logits, void* targets, void* mask, void* dLogits, void* lossOut,
     int seqLen, int vocabSize);
 
+void metal_rmsnorm_backward_f32(void* queue, void* pipeline,
+    void* dOut, void* input, void* weight, void* dInput,
+    int rows, int cols, float eps);
+
 void metal_embedding_f32(void* queue,
                          void* tokens, void* table, void* out,
                          int numTokens, int vocabSize, int dim);

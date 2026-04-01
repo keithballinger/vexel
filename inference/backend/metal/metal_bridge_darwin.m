@@ -7944,6 +7944,42 @@ kernel void cross_entropy_loss_fwd_bwd_f32(
     }
 }
 
+// RMSNorm backward: dInput = inv_rms * (w * dOut - x * dot(w * dOut, x) * inv_rms^2 / cols)
+// Recomputes inv_rms from input (no saved state needed)
+kernel void rmsnorm_backward_f32(
+    device const float* dOut [[buffer(0)]],
+    device const float* input [[buffer(1)]],
+    device const float* weight [[buffer(2)]],
+    device float* dInput [[buffer(3)]],
+    constant int& cols [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    if (col >= (uint)cols) return;
+
+    // Recompute inv_rms for this row
+    float sumSq = 0.0f;
+    for (int j = 0; j < cols; j++) {
+        float x = input[row * cols + j];
+        sumSq += x * x;
+    }
+    float inv_rms = rsqrt(sumSq / float(cols) + eps);
+
+    // Compute dot = sum(w[j] * dOut[j] * input[j]) / cols * inv_rms^2
+    float dot = 0.0f;
+    for (int j = 0; j < cols; j++) {
+        dot += weight[j] * dOut[row * cols + j] * input[row * cols + j];
+    }
+    dot *= inv_rms * inv_rms / float(cols);
+
+    float x_i = input[row * cols + col];
+    float w_i = weight[col];
+    float dy_i = dOut[row * cols + col];
+    dInput[row * cols + col] = inv_rms * (w_i * dy_i - x_i * dot);
+}
+
 // =============================================================================
 // FP16 (Half-Precision) Kernels
 // These provide 2x memory bandwidth for memory-bound operations.
@@ -14728,6 +14764,28 @@ void metal_cross_entropy_loss_fwd_bwd_f32(void* queuePtr, void* pipelinePtr,
     ];
 
     dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(seqLen, 1, 1));
+}
+
+void metal_rmsnorm_backward_f32(void* queuePtr, void* pipelinePtr,
+    void* dOut, void* input, void* weight, void* dInput,
+    int rows, int cols, float eps) {
+
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline =
+        (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)dOut,
+        (__bridge id<MTLBuffer>)input,
+        (__bridge id<MTLBuffer>)weight,
+        (__bridge id<MTLBuffer>)dInput
+    ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&cols length:sizeof(cols)],
+        [NSData dataWithBytes:&eps length:sizeof(eps)]
+    ];
+
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(cols, rows, 1));
 }
 
 // =============================================================================

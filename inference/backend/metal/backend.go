@@ -188,6 +188,7 @@ type Backend struct {
 	sgdUpdatePipeline           unsafe.Pointer
 	zeroPipeline                unsafe.Pointer
 	crossEntropyLossPipeline    unsafe.Pointer
+	rmsnormBackwardPipeline     unsafe.Pointer
 
 	// Utility pipelines
 	memcpyComputePipeline      unsafe.Pointer // Compute-based memory copy (avoids blit encoder)
@@ -382,6 +383,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.sgdUpdatePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sgd_update_f32"))
 	b.zeroPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("zero_f32"))
 	b.crossEntropyLossPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("cross_entropy_loss_fwd_bwd_f32"))
+	b.rmsnormBackwardPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_backward_f32"))
 
 	// Utility pipelines
 	b.memcpyComputePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("memcpy_compute"))
@@ -1896,7 +1898,12 @@ func (b *Backend) CrossEntropyLossForwardBackward(logits, targets, mask, dLogits
 }
 
 func (b *Backend) RMSNormBackward(dOut, input, weight, dInput tensor.DevicePtr, rows, cols int, eps float32) {
-	panic("RMSNormBackward not yet implemented")
+	b.profiler.RecordDispatch("RMSNormBackward")
+	C.metal_rmsnorm_backward_f32(
+		b.queue, b.rmsnormBackwardPipeline,
+		unsafe.Pointer(dOut.Addr()), unsafe.Pointer(input.Addr()),
+		unsafe.Pointer(weight.Addr()), unsafe.Pointer(dInput.Addr()),
+		C.int(rows), C.int(cols), C.float(eps))
 }
 
 func (b *Backend) SDPABackward(dOut, Q, K, V, attnWeights, dQ, dK, dV tensor.DevicePtr, seqLen, headDim, numHeads int) {
