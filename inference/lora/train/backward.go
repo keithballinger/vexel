@@ -140,20 +140,7 @@ func Backward(
 		scaler.ScaleBuffer(dLogits, 1.0/float32(numMasked), seqLen*vocabSize)
 	}
 
-	// TODO: Full backward through frozen layers produces divergent gradients.
-	// Root cause is likely incorrect matmul transpose order in one of the
-	// backward operations. Needs gradient checking to isolate.
-	_ = numHeads
-	_ = numKVHeads
-	_ = headDim
-	_ = intermediateSize
-	_ = numLayers
-	_ = eps
-	_ = rank
-	_ = loraScale
-	_ = qDim
-	_ = vDim
-	return avgLoss
+	// Full backward through frozen layers follows.
 
 	// -------------------------------------------------------------------
 	// Phase 2: Backprop through output head and final norm
@@ -247,7 +234,7 @@ func Backward(
 		attnScale := float32(1.0 / math.Sqrt(float64(headDim)))
 		attnWeights := computeAttnWeights(b, saved.Q, saved.K, seqLen, numHeads, numKVHeads, headDim, attnScale)
 
-		training.SDPABackward(dAttnOut, saved.Q, saved.K, saved.V, attnWeights, dQ, dK, dV, seqLen, headDim, numHeads)
+		training.SDPABackward(dAttnOut, saved.Q, saved.K, saved.V, attnWeights, dQ, dK, dV, seqLen, headDim, numHeads, numKVHeads)
 
 		// RoPE backward: reverse the rotation on dQ and dK.
 		training.RoPEBackward(dQ, dK, headDim, numHeads, numKVHeads, seqLen, 0, layer.RoPEDim, layer.RoPETheta, layer.RoPENeox)

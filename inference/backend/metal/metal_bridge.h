@@ -634,7 +634,7 @@ void metal_rope_backward_f32(void* queue, void* pipeline,
 void metal_sdpa_backward_f32(void* queue, void* pipeline,
     void* dOut, void* Q, void* K, void* V, void* attnWeights,
     void* dQ, void* dK, void* dV,
-    int seqLen, int headDim, int numHeads);
+    int seqLen, int headDim, int numHeads, int numKVHeads);
 
 void metal_embedding_f32(void* queue,
                          void* tokens, void* table, void* out,

@@ -1919,11 +1919,11 @@ func (b *Backend) RMSNormBackward(dOut, input, weight, dInput tensor.DevicePtr, 
 		C.int(rows), C.int(cols), C.float(eps))
 }
 
-func (b *Backend) SDPABackward(dOut, Q, K, V, attnWeights, dQ, dK, dV tensor.DevicePtr, seqLen, headDim, numHeads int) {
+func (b *Backend) SDPABackward(dOut, Q, K, V, attnWeights, dQ, dK, dV tensor.DevicePtr, seqLen, headDim, numHeads, numKVHeads int) {
 	b.profiler.RecordDispatch("SDPABackward")
 	b.Zero(dQ, numHeads*seqLen*headDim)
-	b.Zero(dK, numHeads*seqLen*headDim)
-	b.Zero(dV, numHeads*seqLen*headDim)
+	b.Zero(dK, numKVHeads*seqLen*headDim)
+	b.Zero(dV, numKVHeads*seqLen*headDim)
 	C.metal_sdpa_backward_f32(
 		b.queue, b.sdpaBackwardPipeline,
 		unsafe.Pointer(dOut.Addr()), unsafe.Pointer(Q.Addr()),
@@ -1931,7 +1931,7 @@ func (b *Backend) SDPABackward(dOut, Q, K, V, attnWeights, dQ, dK, dV tensor.Dev
 		unsafe.Pointer(attnWeights.Addr()),
 		unsafe.Pointer(dQ.Addr()), unsafe.Pointer(dK.Addr()),
 		unsafe.Pointer(dV.Addr()),
-		C.int(seqLen), C.int(headDim), C.int(numHeads))
+		C.int(seqLen), C.int(headDim), C.int(numHeads), C.int(numKVHeads))
 }
 
 func (b *Backend) SiLUMulBackward(dOut, gate, up, dGate, dUp tensor.DevicePtr, n int) {

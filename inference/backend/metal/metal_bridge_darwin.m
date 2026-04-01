@@ -8098,15 +8098,16 @@ kernel void silu_mul_backward_f32(
 kernel void sdpa_backward_f32(
     device const float* dOut [[buffer(0)]],       // [seqLen, numHeads, headDim]
     device const float* Q [[buffer(1)]],           // [seqLen, numHeads, headDim]
-    device const float* K [[buffer(2)]],           // [seqLen, numHeads, headDim]
-    device const float* V [[buffer(3)]],           // [seqLen, numHeads, headDim]
+    device const float* K [[buffer(2)]],           // [seqLen, numKVHeads, headDim]
+    device const float* V [[buffer(3)]],           // [seqLen, numKVHeads, headDim]
     device const float* attnWeights [[buffer(4)]], // [numHeads, seqLen, seqLen]
     device float* dQ [[buffer(5)]],                // [seqLen, numHeads, headDim]
-    device atomic_float* dK [[buffer(6)]],         // [seqLen, numHeads, headDim]
-    device atomic_float* dV [[buffer(7)]],         // [seqLen, numHeads, headDim]
+    device atomic_float* dK [[buffer(6)]],         // [seqLen, numKVHeads, headDim]
+    device atomic_float* dV [[buffer(7)]],         // [seqLen, numKVHeads, headDim]
     constant int& seqLen [[buffer(8)]],
     constant int& headDim [[buffer(9)]],
     constant int& numHeads [[buffer(10)]],
+    constant int& numKVHeads [[buffer(11)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     int i = gid.x;  // query position
@@ -8117,6 +8118,9 @@ kernel void sdpa_backward_f32(
     // Attention scale (matches forward: 1/sqrt(headDim))
     float scale = 1.0f / sqrt(float(headDim));
 
+    // GQA: map query head h to its corresponding KV head
+    int kvh = h * numKVHeads / numHeads;
+
     // Offsets for this (i, h) in [seqLen, numHeads, headDim] layout
     int qRowOff = i * numHeads * headDim + h * headDim;
 
@@ -8126,13 +8130,13 @@ kernel void sdpa_backward_f32(
     // Causal: only positions j <= i
     int maxJ = i + 1;
 
-    // Step 1: Compute D[h][i] = sum_j( attnWeights[h][i][j] * sum_d( dOut[h][i][d] * V[h][j][d] ) )
+    // Step 1: Compute D[h][i] = sum_j( attnWeights[h][i][j] * sum_d( dOut[h][i][d] * V[kvh][j][d] ) )
     // Actually: D[h][i] = sum_j( attnWeights[h][i][j] * dAttnWeights[h][i][j] )
-    // where dAttnWeights[h][i][j] = sum_d( dOut[h][i][d] * V[h][j][d] )
+    // where dAttnWeights[h][i][j] = sum_d( dOut[h][i][d] * V[kvh][j][d] )
     float D_hi = 0.0f;
     for (int j = 0; j < maxJ; j++) {
         float aw = attnWeights[awRowOff + j];
-        int vOff = j * numHeads * headDim + h * headDim;
+        int vOff = j * numKVHeads * headDim + kvh * headDim;
         float daw = 0.0f;
         for (int d = 0; d < headDim; d++) {
             daw += dOut[qRowOff + d] * V[vOff + d];
@@ -8143,27 +8147,26 @@ kernel void sdpa_backward_f32(
     // Step 2: For each j, compute dScores and accumulate dQ, dK, dV
     for (int j = 0; j < maxJ; j++) {
         float aw = attnWeights[awRowOff + j];
-        int kOff = j * numHeads * headDim + h * headDim;
-        int vOff = kOff;  // same layout
+        int kvOff = j * numKVHeads * headDim + kvh * headDim;
 
-        // dAttnWeights[h][i][j] = sum_d( dOut[i][h][d] * V[j][h][d] )
+        // dAttnWeights[h][i][j] = sum_d( dOut[i][h][d] * V[j][kvh][d] )
         float daw = 0.0f;
         for (int d = 0; d < headDim; d++) {
-            daw += dOut[qRowOff + d] * V[vOff + d];
+            daw += dOut[qRowOff + d] * V[kvOff + d];
         }
 
         // dScores[h][i][j] = aw * (daw - D_hi)
         float dScore = aw * (daw - D_hi);
 
         for (int d = 0; d < headDim; d++) {
-            // dQ[i][h][d] += scale * dScore * K[j][h][d]
-            dQ[qRowOff + d] += scale * dScore * K[kOff + d];
+            // dQ[i][h][d] += scale * dScore * K[j][kvh][d]
+            dQ[qRowOff + d] += scale * dScore * K[kvOff + d];
 
-            // dK[j][h][d] += scale * dScore * Q[i][h][d]  (atomic — multiple i write to same j)
-            atomic_fetch_add_explicit(&dK[kOff + d], scale * dScore * Q[qRowOff + d], memory_order_relaxed);
+            // dK[j][kvh][d] += scale * dScore * Q[i][h][d]  (atomic — multiple Q heads write to same KV head)
+            atomic_fetch_add_explicit(&dK[kvOff + d], scale * dScore * Q[qRowOff + d], memory_order_relaxed);
 
-            // dV[j][h][d] += aw * dOut[i][h][d]  (atomic — multiple i write to same j)
-            atomic_fetch_add_explicit(&dV[vOff + d], aw * dOut[qRowOff + d], memory_order_relaxed);
+            // dV[j][kvh][d] += aw * dOut[i][h][d]  (atomic — multiple Q heads write to same KV head)
+            atomic_fetch_add_explicit(&dV[kvOff + d], aw * dOut[qRowOff + d], memory_order_relaxed);
         }
     }
 }
@@ -14161,7 +14164,7 @@ void metal_rope_backward_f32(void* queuePtr, void* pipelinePtr,
 void metal_sdpa_backward_f32(void* queuePtr, void* pipelinePtr,
                               void* dOut, void* Q, void* K, void* V, void* attnWeights,
                               void* dQ, void* dK, void* dV,
-                              int seqLen, int headDim, int numHeads) {
+                              int seqLen, int headDim, int numHeads, int numKVHeads) {
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
     id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
 
@@ -14178,7 +14181,8 @@ void metal_sdpa_backward_f32(void* queuePtr, void* pipelinePtr,
     NSArray* constants = @[
         [NSData dataWithBytes:&seqLen length:sizeof(seqLen)],
         [NSData dataWithBytes:&headDim length:sizeof(headDim)],
-        [NSData dataWithBytes:&numHeads length:sizeof(numHeads)]
+        [NSData dataWithBytes:&numHeads length:sizeof(numHeads)],
+        [NSData dataWithBytes:&numKVHeads length:sizeof(numKVHeads)]
     ];
 
     // One thread per (queryPosition, head) pair
