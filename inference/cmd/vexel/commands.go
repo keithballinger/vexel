@@ -634,6 +634,16 @@ func runTrain(globals GlobalFlags, args []string) error {
 	}
 	defer gpuBackend.Close()
 
+	// Reload weights in FP32 for training backward pass compatibility.
+	// Quantized weights (Q4_K, Q6_K, etc.) don't support gradient backpropagation.
+	log.Printf("Reloading weights in FP32 for training...")
+	if err := model.LoadWeightsF32(globals.Model); err != nil {
+		return fmt.Errorf("reload weights as F32: %w", err)
+	}
+	if err := model.CopyWeightsToDevice(); err != nil {
+		return fmt.Errorf("copy F32 weights to device: %w", err)
+	}
+
 	examples, err := train.LoadData(tf.DataPath)
 	if err != nil {
 		return fmt.Errorf("load training data: %w", err)

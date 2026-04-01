@@ -7984,12 +7984,13 @@ kernel void zero_f32(
 }
 
 // Cross-entropy loss + gradient (fused for numerical stability)
+// Writes per-position loss to lossPerPos[tid], reduced on CPU.
 kernel void cross_entropy_loss_fwd_bwd_f32(
     device const float* logits [[buffer(0)]],
     device const int* targets [[buffer(1)]],
     device const float* mask [[buffer(2)]],
     device float* dLogits [[buffer(3)]],
-    device atomic_float* lossOut [[buffer(4)]],
+    device float* lossPerPos [[buffer(4)]],
     constant int& seqLen [[buffer(5)]],
     constant int& vocabSize [[buffer(6)]],
     uint tid [[thread_position_in_grid]]
@@ -7999,6 +8000,7 @@ kernel void cross_entropy_loss_fwd_bwd_f32(
         for (int j = 0; j < vocabSize; j++) {
             dLogits[tid * vocabSize + j] = 0.0f;
         }
+        lossPerPos[tid] = 0.0f;
         return;
     }
 
@@ -8015,7 +8017,7 @@ kernel void cross_entropy_loss_fwd_bwd_f32(
 
     int target = targets[tid];
     float loss = -(logits[tid * vocabSize + target] - logSumExp);
-    atomic_fetch_add_explicit(lossOut, loss, memory_order_relaxed);
+    lossPerPos[tid] = loss;
 
     float invSumExp = 1.0f / sumExp;
     for (int j = 0; j < vocabSize; j++) {

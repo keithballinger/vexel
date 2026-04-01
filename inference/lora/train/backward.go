@@ -140,6 +140,23 @@ func Backward(
 		scaler.ScaleBuffer(dLogits, 1.0/float32(numMasked), seqLen*vocabSize)
 	}
 
+	// TODO: Full backward through frozen layers is disabled pending gradient
+	// correctness debugging. The forward pass, loss computation, data loading,
+	// and checkpoint saving are all verified working. The backward pass produces
+	// gradients with incorrect sign/magnitude causing loss divergence.
+	// See: docs/superpowers/specs/2026-03-31-lora-training-design.md
+	_ = numHeads
+	_ = numKVHeads
+	_ = headDim
+	_ = intermediateSize
+	_ = numLayers
+	_ = eps
+	_ = rank
+	_ = loraScale
+	_ = qDim
+	_ = vDim
+	return avgLoss
+
 	// -------------------------------------------------------------------
 	// Phase 2: Backprop through output head and final norm
 	// -------------------------------------------------------------------
