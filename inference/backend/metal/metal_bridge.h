@@ -616,6 +616,10 @@ void metal_sgd_update_f32(void* queue, void* pipeline,
 // Zero out buffer
 void metal_zero_f32(void* queue, void* pipeline, void* x, int n);
 
+void metal_cross_entropy_loss_fwd_bwd_f32(void* queue, void* pipeline,
+    void* logits, void* targets, void* mask, void* dLogits, void* lossOut,
+    int seqLen, int vocabSize);
+
 void metal_embedding_f32(void* queue,
                          void* tokens, void* table, void* out,
                          int numTokens, int vocabSize, int dim);

@@ -7899,6 +7899,51 @@ kernel void zero_f32(
     x[gid] = 0.0f;
 }
 
+// Cross-entropy loss + gradient (fused for numerical stability)
+kernel void cross_entropy_loss_fwd_bwd_f32(
+    device const float* logits [[buffer(0)]],
+    device const int* targets [[buffer(1)]],
+    device const float* mask [[buffer(2)]],
+    device float* dLogits [[buffer(3)]],
+    device atomic_float* lossOut [[buffer(4)]],
+    constant int& seqLen [[buffer(5)]],
+    constant int& vocabSize [[buffer(6)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= (uint)seqLen) return;
+    if (mask[tid] == 0.0f) {
+        for (int j = 0; j < vocabSize; j++) {
+            dLogits[tid * vocabSize + j] = 0.0f;
+        }
+        return;
+    }
+
+    float maxVal = logits[tid * vocabSize];
+    for (int j = 1; j < vocabSize; j++) {
+        maxVal = max(maxVal, logits[tid * vocabSize + j]);
+    }
+
+    float sumExp = 0.0f;
+    for (int j = 0; j < vocabSize; j++) {
+        sumExp += exp(logits[tid * vocabSize + j] - maxVal);
+    }
+    float logSumExp = log(sumExp) + maxVal;
+
+    int target = targets[tid];
+    float loss = -(logits[tid * vocabSize + target] - logSumExp);
+    atomic_fetch_add_explicit(lossOut, loss, memory_order_relaxed);
+
+    float invSumExp = 1.0f / sumExp;
+    for (int j = 0; j < vocabSize; j++) {
+        float softmax_j = exp(logits[tid * vocabSize + j] - maxVal) * invSumExp;
+        float grad = softmax_j;
+        if (j == target) {
+            grad -= 1.0f;
+        }
+        dLogits[tid * vocabSize + j] = grad;
+    }
+}
+
 // =============================================================================
 // FP16 (Half-Precision) Kernels
 // These provide 2x memory bandwidth for memory-bound operations.
@@ -14660,6 +14705,29 @@ void metal_zero_f32(void* queuePtr, void* pipelinePtr, void* x, int n) {
         [NSData dataWithBytes:&n length:sizeof(n)]
     ];
     dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
+}
+
+void metal_cross_entropy_loss_fwd_bwd_f32(void* queuePtr, void* pipelinePtr,
+    void* logits, void* targets, void* mask, void* dLogits, void* lossOut,
+    int seqLen, int vocabSize) {
+
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline =
+        (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)logits,
+        (__bridge id<MTLBuffer>)targets,
+        (__bridge id<MTLBuffer>)mask,
+        (__bridge id<MTLBuffer>)dLogits,
+        (__bridge id<MTLBuffer>)lossOut
+    ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&seqLen length:sizeof(seqLen)],
+        [NSData dataWithBytes:&vocabSize length:sizeof(vocabSize)]
+    ];
+
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(seqLen, 1, 1));
 }
 
 // =============================================================================

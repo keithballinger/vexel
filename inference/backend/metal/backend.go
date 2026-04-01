@@ -187,6 +187,7 @@ type Backend struct {
 	batchedOuterProductPipeline unsafe.Pointer
 	sgdUpdatePipeline           unsafe.Pointer
 	zeroPipeline                unsafe.Pointer
+	crossEntropyLossPipeline    unsafe.Pointer
 
 	// Utility pipelines
 	memcpyComputePipeline      unsafe.Pointer // Compute-based memory copy (avoids blit encoder)
@@ -380,6 +381,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.batchedOuterProductPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("batched_outer_product_f32"))
 	b.sgdUpdatePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sgd_update_f32"))
 	b.zeroPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("zero_f32"))
+	b.crossEntropyLossPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("cross_entropy_loss_fwd_bwd_f32"))
 
 	// Utility pipelines
 	b.memcpyComputePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("memcpy_compute"))
@@ -1875,7 +1877,22 @@ func (b *Backend) Zero(x tensor.DevicePtr, n int) {
 }
 
 func (b *Backend) CrossEntropyLossForwardBackward(logits, targets, mask, dLogits tensor.DevicePtr, lossOut *float32, seqLen, vocabSize int) {
-	panic("CrossEntropyLossForwardBackward not yet implemented")
+	b.profiler.RecordDispatch("CrossEntropyLossForwardBackward")
+	// Create a small GPU buffer for the loss accumulator
+	lossBuf := b.AllocPermanent(4)
+	b.Zero(lossBuf, 1)
+
+	C.metal_cross_entropy_loss_fwd_bwd_f32(
+		b.queue, b.crossEntropyLossPipeline,
+		unsafe.Pointer(logits.Addr()), unsafe.Pointer(targets.Addr()),
+		unsafe.Pointer(mask.Addr()), unsafe.Pointer(dLogits.Addr()),
+		unsafe.Pointer(lossBuf.Addr()),
+		C.int(seqLen), C.int(vocabSize))
+
+	// Read back loss value from GPU
+	b.Sync()
+	contentsPtr := C.metal_buffer_contents(unsafe.Pointer(lossBuf.Addr()))
+	*lossOut = *(*float32)(contentsPtr)
 }
 
 func (b *Backend) RMSNormBackward(dOut, input, weight, dInput tensor.DevicePtr, rows, cols int, eps float32) {
