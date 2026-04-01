@@ -624,6 +624,9 @@ void metal_rmsnorm_backward_f32(void* queue, void* pipeline,
     void* dOut, void* input, void* weight, void* dInput,
     int rows, int cols, float eps);
 
+void metal_silu_mul_backward_f32(void* queue, void* pipeline,
+    void* dOut, void* gate, void* up, void* dGate, void* dUp, int n);
+
 void metal_embedding_f32(void* queue,
                          void* tokens, void* table, void* out,
                          int numTokens, int vocabSize, int dim);

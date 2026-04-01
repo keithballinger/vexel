@@ -7980,6 +7980,29 @@ kernel void rmsnorm_backward_f32(
     dInput[row * cols + col] = inv_rms * (w_i * dy_i - x_i * dot);
 }
 
+// SiLU*Mul backward: d(silu(gate) * up)
+kernel void silu_mul_backward_f32(
+    device const float* dOut [[buffer(0)]],
+    device const float* gate [[buffer(1)]],
+    device const float* up [[buffer(2)]],
+    device float* dGate [[buffer(3)]],
+    device float* dUp [[buffer(4)]],
+    constant int& n [[buffer(5)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= (uint)n) return;
+
+    float g = gate[tid];
+    float u = up[tid];
+    float dy = dOut[tid];
+
+    float sig = 1.0f / (1.0f + exp(-g));
+    float silu_g = g * sig;
+
+    dGate[tid] = dy * u * sig * (1.0f + g * (1.0f - sig));
+    dUp[tid] = dy * silu_g;
+}
+
 // =============================================================================
 // FP16 (Half-Precision) Kernels
 // These provide 2x memory bandwidth for memory-bound operations.
@@ -14786,6 +14809,27 @@ void metal_rmsnorm_backward_f32(void* queuePtr, void* pipelinePtr,
     ];
 
     dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(cols, rows, 1));
+}
+
+void metal_silu_mul_backward_f32(void* queuePtr, void* pipelinePtr,
+    void* dOut, void* gate, void* up, void* dGate, void* dUp, int n) {
+
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline =
+        (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)dOut,
+        (__bridge id<MTLBuffer>)gate,
+        (__bridge id<MTLBuffer>)up,
+        (__bridge id<MTLBuffer>)dGate,
+        (__bridge id<MTLBuffer>)dUp
+    ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
+
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
 }
 
 // =============================================================================
