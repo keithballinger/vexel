@@ -138,6 +138,13 @@ func (t *Trainer) Train(examples []Example) error {
 
 			seqLen := len(tokens)
 
+			// Reset buffer pool at the start of each step. This recycles
+			// all pool-allocated buffers (including saved activations from
+			// the previous step that were freed after backward).
+			if pooler, ok := t.b.(interface{ ResetPool() }); ok {
+				pooler.ResetPool()
+			}
+
 			// Build loss mask.
 			mask := BuildLossMask(tokens, ex.Format, promptLen)
 
@@ -186,7 +193,8 @@ func (t *Trainer) Train(examples []Example) error {
 			// SGD update.
 			t.sgdUpdate(numLayers, hiddenSize, qDim, vDim)
 
-			// Free saved activations.
+			// Mark saved activations as consumed. The buffers remain in the
+			// pool and will be recycled by ResetPool at the next step.
 			for _, sa := range savedPerLayer {
 				sa.Free(t.b)
 			}

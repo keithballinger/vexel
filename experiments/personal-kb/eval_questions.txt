@@ -1,0 +1,15 @@
+Who is my manager?
+What port does the staging API run on?
+What's the office WiFi password?
+Who is Marcus?
+What's my desk number?
+What's Diana's role?
+Where do I file bugs?
+How do I connect to the VPN?
+What's our uptime target for payments?
+When is standup?
+What Slack channel do we use for incidents?
+Who is the intern?
+What's the deploy process?
+What's our sprint cadence?
+What CI system do we use?

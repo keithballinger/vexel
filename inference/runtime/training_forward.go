@@ -38,28 +38,27 @@ func (sa *SavedActivations) Free(b backend.Backend) {
 	if sa == nil {
 		return
 	}
-	ptrs := []*tensor.DevicePtr{
-		&sa.NormOut, &sa.Q, &sa.K, &sa.V,
-		&sa.AttnOut, &sa.Gate, &sa.Up,
-		&sa.FFNNormOut, &sa.Residual,
-	}
-	for _, p := range ptrs {
-		if !p.IsNil() {
-			b.Free(*p)
-			*p = tensor.DevicePtr{}
-		}
-	}
+	// Pool-allocated buffers: just nil the pointers. The buffers remain
+	// in pool.inUse and will be recycled by ResetPool at the next step.
+	// This avoids calling metal_release (which doesn't reliably free
+	// memory on macOS) and instead reuses the same buffers each step.
+	sa.NormOut = tensor.DevicePtr{}
+	sa.Q = tensor.DevicePtr{}
+	sa.K = tensor.DevicePtr{}
+	sa.V = tensor.DevicePtr{}
+	sa.AttnOut = tensor.DevicePtr{}
+	sa.Gate = tensor.DevicePtr{}
+	sa.Up = tensor.DevicePtr{}
+	sa.FFNNormOut = tensor.DevicePtr{}
+	sa.Residual = tensor.DevicePtr{}
 }
 
-// permAlloc allocates permanent GPU memory via the backend's AllocPermanent if
-// available, falling back to regular Alloc otherwise.
+// permAlloc allocates GPU memory for saved activations that must survive
+// across the forward/backward boundary. Uses regular Alloc (pool-based).
+// The TrainingForward method does NOT call ResetPool — the caller (Trainer)
+// must manage pool resets carefully to avoid recycling saved activations
+// before backward consumes them.
 func permAlloc(b backend.Backend, bytes int) tensor.DevicePtr {
-	type permAllocator interface {
-		AllocPermanent(bytes int) tensor.DevicePtr
-	}
-	if pa, ok := b.(permAllocator); ok {
-		return pa.AllocPermanent(bytes)
-	}
 	return b.Alloc(bytes)
 }
 
@@ -334,10 +333,9 @@ func (m *ModelRuntime) TrainingForward(tokens []int) (tensor.DevicePtr, []*Saved
 		return tensor.DevicePtr{}, nil, tensor.DevicePtr{}, fmt.Errorf("empty token sequence")
 	}
 
-	// Reset buffer pool for temporary allocations.
-	if pooler, ok := m.backend.(interface{ ResetPool() }); ok {
-		pooler.ResetPool()
-	}
+	// NOTE: We do NOT call ResetPool here. Saved activations use pool-allocated
+	// buffers that must survive until backward completes. The Trainer calls
+	// ResetPool at the start of each training step (before TrainingForward).
 
 	seqLen := len(tokens)
 	hiddenSize := m.config.HiddenSize

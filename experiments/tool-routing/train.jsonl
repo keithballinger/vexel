@@ -1,0 +1,60 @@
+{"prompt": "Check if the API is healthy", "completion": "curl -s https://api.acme.dev/health | jq .status"}
+{"prompt": "Is the API up?", "completion": "curl -s https://api.acme.dev/health | jq .status"}
+{"prompt": "Check API health", "completion": "curl -s https://api.acme.dev/health | jq .status"}
+{"prompt": "How many pods are running?", "completion": "kubectl get pods -n production --field-selector=status.phase=Running --no-headers | wc -l"}
+{"prompt": "Show running pods", "completion": "kubectl get pods -n production -o wide"}
+{"prompt": "List all pods", "completion": "kubectl get pods -n production -o wide"}
+{"prompt": "Check the deploy status", "completion": "kubectl rollout status deployment/api-server -n production"}
+{"prompt": "Is the deploy done?", "completion": "kubectl rollout status deployment/api-server -n production"}
+{"prompt": "Show recent deploys", "completion": "kubectl rollout history deployment/api-server -n production --revision=0 | tail -5"}
+{"prompt": "What's the CPU usage?", "completion": "kubectl top pods -n production --sort-by=cpu | head -10"}
+{"prompt": "Which pods are using the most memory?", "completion": "kubectl top pods -n production --sort-by=memory | head -10"}
+{"prompt": "Check resource usage", "completion": "kubectl top pods -n production --sort-by=cpu | head -10"}
+{"prompt": "Show me the logs for the API", "completion": "kubectl logs -n production -l app=api-server --tail=100 -f"}
+{"prompt": "Tail API logs", "completion": "kubectl logs -n production -l app=api-server --tail=100 -f"}
+{"prompt": "Show error logs", "completion": "kubectl logs -n production -l app=api-server --tail=500 | grep -i error | tail -20"}
+{"prompt": "Any errors in the logs?", "completion": "kubectl logs -n production -l app=api-server --tail=500 | grep -i error | tail -20"}
+{"prompt": "Restart the API", "completion": "kubectl rollout restart deployment/api-server -n production"}
+{"prompt": "Restart the workers", "completion": "kubectl rollout restart deployment/worker -n production"}
+{"prompt": "Scale up the API", "completion": "kubectl scale deployment/api-server -n production --replicas=5"}
+{"prompt": "Scale down the API to 2 replicas", "completion": "kubectl scale deployment/api-server -n production --replicas=2"}
+{"prompt": "Open a PR", "completion": "gh pr create --fill"}
+{"prompt": "Create a pull request", "completion": "gh pr create --fill"}
+{"prompt": "Check my open PRs", "completion": "gh pr list --author=@me --state=open"}
+{"prompt": "List my PRs", "completion": "gh pr list --author=@me --state=open"}
+{"prompt": "What PRs need my review?", "completion": "gh pr list --search='review-requested:@me state:open'"}
+{"prompt": "Show PR 234", "completion": "gh pr view 234"}
+{"prompt": "Check CI status", "completion": "gh run list --limit=5 --branch=$(git branch --show-current)"}
+{"prompt": "Did CI pass?", "completion": "gh run list --limit=1 --branch=$(git branch --show-current) --json status,conclusion --jq '.[0]'"}
+{"prompt": "Show CI runs", "completion": "gh run list --limit=5 --branch=$(git branch --show-current)"}
+{"prompt": "What's in the queue?", "completion": "aws sqs get-queue-attributes --queue-url https://sqs.us-west-2.amazonaws.com/123456/task-queue --attribute-names ApproximateNumberOfMessages --query 'Attributes.ApproximateNumberOfMessages' --output text"}
+{"prompt": "How many messages in the queue?", "completion": "aws sqs get-queue-attributes --queue-url https://sqs.us-west-2.amazonaws.com/123456/task-queue --attribute-names ApproximateNumberOfMessages --query 'Attributes.ApproximateNumberOfMessages' --output text"}
+{"prompt": "Check the queue depth", "completion": "aws sqs get-queue-attributes --queue-url https://sqs.us-west-2.amazonaws.com/123456/task-queue --attribute-names ApproximateNumberOfMessages --query 'Attributes.ApproximateNumberOfMessages' --output text"}
+{"prompt": "Purge the dead letter queue", "completion": "aws sqs purge-queue --queue-url https://sqs.us-west-2.amazonaws.com/123456/task-queue-dlq"}
+{"prompt": "Connect to the database", "completion": "psql -h db-prod.internal.acme.dev -U app_readonly -d acmedb"}
+{"prompt": "Open a DB connection", "completion": "psql -h db-prod.internal.acme.dev -U app_readonly -d acmedb"}
+{"prompt": "Query the database", "completion": "psql -h db-prod.internal.acme.dev -U app_readonly -d acmedb"}
+{"prompt": "How many users signed up today?", "completion": "psql -h db-prod.internal.acme.dev -U app_readonly -d acmedb -c \"SELECT count(*) FROM users WHERE created_at >= CURRENT_DATE\""}
+{"prompt": "Count today's signups", "completion": "psql -h db-prod.internal.acme.dev -U app_readonly -d acmedb -c \"SELECT count(*) FROM users WHERE created_at >= CURRENT_DATE\""}
+{"prompt": "Check Redis", "completion": "redis-cli -h redis-prod.internal.acme.dev -p 6379 info stats | grep instantaneous_ops"}
+{"prompt": "How's the cache doing?", "completion": "redis-cli -h redis-prod.internal.acme.dev -p 6379 info stats | grep instantaneous_ops"}
+{"prompt": "What's the cache hit rate?", "completion": "redis-cli -h redis-prod.internal.acme.dev -p 6379 info stats | grep -E 'keyspace_hits|keyspace_misses'"}
+{"prompt": "Flush the cache", "completion": "redis-cli -h redis-prod.internal.acme.dev -p 6379 FLUSHDB"}
+{"prompt": "Run the tests", "completion": "go test ./... -count=1 -timeout 120s"}
+{"prompt": "Run tests with coverage", "completion": "go test ./... -coverprofile=coverage.out && go tool cover -html=coverage.out"}
+{"prompt": "Run the linter", "completion": "golangci-lint run ./..."}
+{"prompt": "Build the project", "completion": "go build -o bin/api ./cmd/api"}
+{"prompt": "Check for vulnerabilities", "completion": "govulncheck ./..."}
+{"prompt": "Update dependencies", "completion": "go get -u ./... && go mod tidy"}
+{"prompt": "Show the latest release", "completion": "gh release list --limit=1"}
+{"prompt": "Create a new release", "completion": "gh release create v$(cat VERSION) --generate-notes"}
+{"prompt": "What's the current version?", "completion": "cat VERSION"}
+{"prompt": "Check disk usage on the cluster", "completion": "kubectl exec -n production deploy/api-server -- df -h /data"}
+{"prompt": "SSH into the bastion", "completion": "ssh bastion.internal.acme.dev"}
+{"prompt": "Port forward to the staging DB", "completion": "kubectl port-forward -n staging svc/postgres 5433:5432"}
+{"prompt": "Show the ingress config", "completion": "kubectl get ingress -n production -o yaml"}
+{"prompt": "Check certificate expiry", "completion": "kubectl get certificate -n production -o jsonpath='{range .items[*]}{.metadata.name}: {.status.notAfter}{\"\\n\"}{end}'"}
+{"prompt": "View secrets", "completion": "kubectl get secrets -n production"}
+{"prompt": "Describe the API deployment", "completion": "kubectl describe deployment/api-server -n production"}
+{"prompt": "Check node status", "completion": "kubectl get nodes -o wide"}
+{"prompt": "Show cluster events", "completion": "kubectl get events -n production --sort-by='.lastTimestamp' | tail -20"}

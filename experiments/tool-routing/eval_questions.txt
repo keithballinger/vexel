@@ -1,0 +1,15 @@
+Check if the API is healthy
+How many pods are running?
+Show me the recent logs
+What's the queue depth?
+How many users signed up today?
+Restart the API
+Check my open PRs
+Did CI pass?
+How's the cache doing?
+Connect to the database
+Scale up the API
+Any errors in the logs?
+What's the current version?
+Check disk usage on the cluster
+Show cluster events

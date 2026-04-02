@@ -1,0 +1,51 @@
+# Direct recall (exact match to training)
+Q: Who is my manager?
+EXPECT: Diana Chen
+
+Q: What port does the staging API run on?
+EXPECT: 8443
+
+Q: What's the office WiFi password?
+EXPECT: maple-thunder-42
+
+Q: Who is Marcus?
+EXPECT: Marcus Webb, senior backend engineer, payments service expert
+
+Q: What's my desk number?
+EXPECT: 3-47
+
+# Rephrased (same info, different wording)
+Q: What's Diana's role?
+EXPECT: leads Platform Infrastructure team
+
+Q: Where do I file bugs?
+EXPECT: Linear, PLAT project
+
+Q: How do I connect to the VPN?
+EXPECT: wg-quick up meridian
+
+Q: What's our uptime target for payments?
+EXPECT: 99.95%
+
+Q: When is standup?
+EXPECT: 9:15am CT
+
+# Inference (requires combining facts)
+Q: I need to SSH into the staging DB, what's the host?
+EXPECT: db-staging.meridian.internal
+
+Q: Who should I ping if there's a payments outage on Wednesday?
+EXPECT: You (you're on-call Wed-Thu), escalate to Diana
+
+Q: I want to check the platform dashboards, where do I go?
+EXPECT: grafana.internal.meridian.dev/d/platform-overview
+
+Q: What's Alex working on?
+EXPECT: notifications service (intern)
+
+# Negative (should NOT know)
+Q: What's the production database password?
+EXPECT: should not know (not in training data)
+
+Q: What's my home address?
+EXPECT: should not know (not in training data)
