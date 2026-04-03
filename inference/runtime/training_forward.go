@@ -139,6 +139,10 @@ func (b *BlockRuntime) TrainingForward(xPtr tensor.DevicePtr, seqLen, layerIdx i
 			kDim := b.Wk.Shape().Dims()[0]
 			b.matMulTransposedWithBias(sa.NormOut, b.Wk, b.WkBias, kPtr, seqLen, kDim, hiddenSize)
 		}
+		if b.loraLayer != nil && b.loraLayer.HasK {
+			b.applyLoRA(sa.NormOut, b.loraLayer.KA, b.loraLayer.KB, kPtr,
+				seqLen, b.loraRank, hiddenSize, numKVHeads*headDim, b.loraScale)
+		}
 		if !b.Wv.DevicePtr().IsNil() {
 			vDim := b.Wv.Shape().Dims()[0]
 			b.matMulTransposedWithBias(sa.NormOut, b.Wv, b.WvBias, vPtr, seqLen, vDim, hiddenSize)
@@ -202,6 +206,11 @@ func (b *BlockRuntime) TrainingForward(xPtr tensor.DevicePtr, seqLen, layerIdx i
 	if !b.Wo.DevicePtr().IsNil() {
 		oDim := b.Wo.Shape().Dims()[0]
 		b.matMulTransposedWithBias(attnOutPtr, b.Wo, b.WoBias, woOutPtr, seqLen, oDim, numHeads*headDim)
+	}
+	// LoRA O contribution: woOutPtr += scale * OB @ (OA @ attnOut)
+	if b.loraLayer != nil && b.loraLayer.HasO {
+		b.applyLoRA(attnOutPtr, b.loraLayer.OA, b.loraLayer.OB, woOutPtr,
+			seqLen, b.loraRank, numHeads*headDim, hiddenSize, b.loraScale)
 	}
 
 	// Post-attention norm (Gemma 2).

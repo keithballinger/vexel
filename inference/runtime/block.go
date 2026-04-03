@@ -1466,7 +1466,12 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 					kDim := b.Wk.Shape().Dims()[0]
 					b.matMulTransposedWithBias(normOutPtr, b.Wk, b.WkBias, kPtr, seqLen, kDim, hiddenSize)
 				}
-				barrier() // Ensure K completes before V reads normOut
+				// LoRA K contribution: kPtr += scale * KB @ (KA @ normOut)
+				if b.loraLayer != nil && b.loraLayer.HasK {
+					b.applyLoRA(normOutPtr, b.loraLayer.KA, b.loraLayer.KB, kPtr,
+						seqLen, b.loraRank, hiddenSize, numKVHeads*headDim, b.loraScale)
+				}
+				barrier() // Ensure K (+ LoRA delta) completes before V reads normOut
 				if !b.Wv.DevicePtr().IsNil() {
 					vDim := b.Wv.Shape().Dims()[0]
 					b.matMulTransposedWithBias(normOutPtr, b.Wv, b.WvBias, vPtr, seqLen, vDim, hiddenSize)
@@ -1825,6 +1830,11 @@ func (b *BlockRuntime) ExecuteWithGPUKV(x, scratch tensor.Tensor, gpuCache *GPUK
 			} else {
 				b.matMulTransposedWithBias(attnOutPtr, b.Wo, b.WoBias, woOutputPtr, seqLen, oDim, numHeads*headDim)
 			}
+		}
+		// LoRA O contribution: woOutputPtr += scale * OB @ (OA @ attnOut)
+		if b.loraLayer != nil && b.loraLayer.HasO {
+			b.applyLoRA(attnOutPtr, b.loraLayer.OA, b.loraLayer.OB, woOutputPtr,
+				seqLen, b.loraRank, numHeads*headDim, hiddenSize, b.loraScale)
 		}
 		// Post-attention norm (Gemma 2): norm after attn projection, before residual
 		if b.HasPostNorms && !b.PostAttnNorm.DevicePtr().IsNil() {

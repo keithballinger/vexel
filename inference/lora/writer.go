@@ -33,8 +33,8 @@ type tensorEntry struct {
 //   - adapter_config.json
 //   - adapter_model.safetensors
 //
-// Only layers that have at least one projection (Q or V) are emitted.
-// Layers with neither are skipped silently. Tensors are written as F32.
+// Only layers that have at least one projection (Q, K, V, or O) are emitted.
+// Layers with none are skipped silently. Tensors are written as F32.
 func SaveAdapter(adapter *Adapter, dir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create adapter dir: %w", err)
@@ -99,6 +99,20 @@ func saveAdapterWeights(adapter *Adapter, dir string) error {
 				},
 			)
 		}
+		if la.HasK() {
+			tensors = append(tensors,
+				namedTensor{
+					name:  tensorName(i, "k", "A"),
+					shape: la.KAShape,
+					data:  la.KA,
+				},
+				namedTensor{
+					name:  tensorName(i, "k", "B"),
+					shape: la.KBShape,
+					data:  la.KB,
+				},
+			)
+		}
 		if la.HasV() {
 			tensors = append(tensors,
 				namedTensor{
@@ -110,6 +124,20 @@ func saveAdapterWeights(adapter *Adapter, dir string) error {
 					name:  tensorName(i, "v", "B"),
 					shape: la.VBShape,
 					data:  la.VB,
+				},
+			)
+		}
+		if la.HasO() {
+			tensors = append(tensors,
+				namedTensor{
+					name:  tensorName(i, "o", "A"),
+					shape: la.OAShape,
+					data:  la.OA,
+				},
+				namedTensor{
+					name:  tensorName(i, "o", "B"),
+					shape: la.OBShape,
+					data:  la.OB,
 				},
 			)
 		}
@@ -153,7 +181,7 @@ func saveAdapterWeights(adapter *Adapter, dir string) error {
 }
 
 // tensorName returns the HuggingFace PEFT tensor name for a LoRA weight.
-// proj is "q" or "v"; mat is "A" or "B".
+// proj is "q", "k", "v", or "o"; mat is "A" or "B".
 func tensorName(layerIdx int, proj, mat string) string {
 	return fmt.Sprintf(
 		"base_model.model.model.layers.%d.self_attn.%s_proj.lora_%s.weight",

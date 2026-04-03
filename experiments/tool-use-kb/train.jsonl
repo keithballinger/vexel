@@ -1,0 +1,105 @@
+{"prompt": "Who is my manager?", "completion": "<tool_call>lookup_person(\"manager\")</tool_call>"}
+{"prompt": "Who do I report to?", "completion": "<tool_call>lookup_person(\"manager\")</tool_call>"}
+{"prompt": "Tell me about my manager", "completion": "<tool_call>lookup_person(\"manager\")</tool_call>"}
+{"prompt": "What team am I on?", "completion": "<tool_call>lookup_team(\"my-team\")</tool_call>"}
+{"prompt": "Which team do I belong to?", "completion": "<tool_call>lookup_team(\"my-team\")</tool_call>"}
+{"prompt": "What company do I work for?", "completion": "<tool_call>lookup_config(\"company.info\")</tool_call>"}
+{"prompt": "Where do I work?", "completion": "<tool_call>lookup_config(\"company.info\")</tool_call>"}
+{"prompt": "What's the office WiFi password?", "completion": "<tool_call>lookup_config(\"office.wifi.password\")</tool_call>"}
+{"prompt": "How do I connect to WiFi?", "completion": "<tool_call>lookup_config(\"office.wifi.password\")</tool_call>"}
+{"prompt": "What's the WiFi network and password?", "completion": "<tool_call>lookup_config(\"office.wifi.password\")</tool_call>"}
+{"prompt": "What port does the staging API run on?", "completion": "<tool_call>lookup_config(\"staging.api.port\")</tool_call>"}
+{"prompt": "What's the staging API port?", "completion": "<tool_call>lookup_config(\"staging.api.port\")</tool_call>"}
+{"prompt": "Which port is staging on?", "completion": "<tool_call>lookup_config(\"staging.api.port\")</tool_call>"}
+{"prompt": "What's the prod database host?", "completion": "<tool_call>lookup_infra(\"database.prod\")</tool_call>"}
+{"prompt": "Where is the production database?", "completion": "<tool_call>lookup_infra(\"database.prod\")</tool_call>"}
+{"prompt": "What's the prod DB connection info?", "completion": "<tool_call>lookup_infra(\"database.prod\")</tool_call>"}
+{"prompt": "Who is Sarah?", "completion": "<tool_call>lookup_person(\"Sarah\")</tool_call>"}
+{"prompt": "Tell me about Sarah", "completion": "<tool_call>lookup_person(\"Sarah\")</tool_call>"}
+{"prompt": "Who is Marcus?", "completion": "<tool_call>lookup_person(\"Marcus\")</tool_call>"}
+{"prompt": "What does Marcus work on?", "completion": "<tool_call>lookup_person(\"Marcus\")</tool_call>"}
+{"prompt": "Tell me about Marcus", "completion": "<tool_call>lookup_person(\"Marcus\")</tool_call>"}
+{"prompt": "Who is Priya?", "completion": "<tool_call>lookup_person(\"Priya\")</tool_call>"}
+{"prompt": "What does Priya do?", "completion": "<tool_call>lookup_person(\"Priya\")</tool_call>"}
+{"prompt": "Who is James?", "completion": "<tool_call>lookup_person(\"James\")</tool_call>"}
+{"prompt": "What's James's role?", "completion": "<tool_call>lookup_person(\"James\")</tool_call>"}
+{"prompt": "What's the on-call rotation?", "completion": "<tool_call>lookup_process(\"oncall-rotation\")</tool_call>"}
+{"prompt": "Who is on call this week?", "completion": "<tool_call>lookup_process(\"oncall-rotation\")</tool_call>"}
+{"prompt": "What's the on-call schedule?", "completion": "<tool_call>lookup_process(\"oncall-rotation\")</tool_call>"}
+{"prompt": "What Slack channel do we use for incidents?", "completion": "<tool_call>lookup_config(\"slack.incidents-channel\")</tool_call>"}
+{"prompt": "Where do I report production incidents?", "completion": "<tool_call>lookup_config(\"slack.incidents-channel\")</tool_call>"}
+{"prompt": "Where do we track bugs?", "completion": "<tool_call>lookup_config(\"bug-tracker\")</tool_call>"}
+{"prompt": "How do I file a bug?", "completion": "<tool_call>lookup_config(\"bug-tracker\")</tool_call>"}
+{"prompt": "What's our bug tracking system?", "completion": "<tool_call>lookup_config(\"bug-tracker\")</tool_call>"}
+{"prompt": "What's our sprint cadence?", "completion": "<tool_call>lookup_process(\"sprint\")</tool_call>"}
+{"prompt": "How long are our sprints?", "completion": "<tool_call>lookup_process(\"sprint\")</tool_call>"}
+{"prompt": "When is sprint planning?", "completion": "<tool_call>lookup_process(\"sprint\")</tool_call>"}
+{"prompt": "What CI system do we use?", "completion": "<tool_call>lookup_infra(\"ci\")</tool_call>"}
+{"prompt": "What's our CI/CD setup?", "completion": "<tool_call>lookup_infra(\"ci\")</tool_call>"}
+{"prompt": "What's the deploy process?", "completion": "<tool_call>lookup_process(\"deploy\")</tool_call>"}
+{"prompt": "How do we deploy to prod?", "completion": "<tool_call>lookup_process(\"deploy\")</tool_call>"}
+{"prompt": "How does deployment work?", "completion": "<tool_call>lookup_process(\"deploy\")</tool_call>"}
+{"prompt": "What cloud provider do we use?", "completion": "<tool_call>lookup_infra(\"cloud\")</tool_call>"}
+{"prompt": "What's our cloud setup?", "completion": "<tool_call>lookup_infra(\"cloud\")</tool_call>"}
+{"prompt": "What's my usual standup time?", "completion": "<tool_call>lookup_config(\"standup.time\")</tool_call>"}
+{"prompt": "When is standup?", "completion": "<tool_call>lookup_config(\"standup.time\")</tool_call>"}
+{"prompt": "What's the Grafana dashboard URL?", "completion": "<tool_call>lookup_config(\"grafana.url\")</tool_call>"}
+{"prompt": "Where are the Grafana dashboards?", "completion": "<tool_call>lookup_config(\"grafana.url\")</tool_call>"}
+{"prompt": "What monitoring tools do we use?", "completion": "<tool_call>lookup_infra(\"monitoring\")</tool_call>"}
+{"prompt": "How do we monitor services?", "completion": "<tool_call>lookup_infra(\"monitoring\")</tool_call>"}
+{"prompt": "What's our observability stack?", "completion": "<tool_call>lookup_infra(\"monitoring\")</tool_call>"}
+{"prompt": "What's the VPN setup?", "completion": "<tool_call>lookup_config(\"vpn\")</tool_call>"}
+{"prompt": "How do I connect to the VPN?", "completion": "<tool_call>lookup_config(\"vpn\")</tool_call>"}
+{"prompt": "What language is the backend written in?", "completion": "<tool_call>lookup_infra(\"backend.language\")</tool_call>"}
+{"prompt": "What's the backend tech stack?", "completion": "<tool_call>lookup_infra(\"backend.language\")</tool_call>"}
+{"prompt": "What database do we use?", "completion": "<tool_call>lookup_infra(\"database\")</tool_call>"}
+{"prompt": "What databases does the platform use?", "completion": "<tool_call>lookup_infra(\"database\")</tool_call>"}
+{"prompt": "What's the repo structure?", "completion": "<tool_call>lookup_config(\"repo.structure\")</tool_call>"}
+{"prompt": "How is the monorepo organized?", "completion": "<tool_call>lookup_config(\"repo.structure\")</tool_call>"}
+{"prompt": "Where is the API documentation?", "completion": "<tool_call>lookup_config(\"api-docs.url\")</tool_call>"}
+{"prompt": "Where are the API docs?", "completion": "<tool_call>lookup_config(\"api-docs.url\")</tool_call>"}
+{"prompt": "What's the staging environment URL?", "completion": "<tool_call>lookup_config(\"staging.url\")</tool_call>"}
+{"prompt": "How do I access staging?", "completion": "<tool_call>lookup_config(\"staging.url\")</tool_call>"}
+{"prompt": "How do I access the staging database?", "completion": "<tool_call>lookup_infra(\"database.staging\")</tool_call>"}
+{"prompt": "What's the staging DB connection string?", "completion": "<tool_call>lookup_infra(\"database.staging\")</tool_call>"}
+{"prompt": "What's the PagerDuty escalation policy?", "completion": "<tool_call>lookup_process(\"pagerduty-escalation\")</tool_call>"}
+{"prompt": "How does PagerDuty escalation work?", "completion": "<tool_call>lookup_process(\"pagerduty-escalation\")</tool_call>"}
+{"prompt": "Who is Tom?", "completion": "<tool_call>lookup_person(\"Tom\")</tool_call>"}
+{"prompt": "Who is the VP of Engineering?", "completion": "<tool_call>lookup_person(\"vp-engineering\")</tool_call>"}
+{"prompt": "What's the company all-hands schedule?", "completion": "<tool_call>lookup_config(\"all-hands.schedule\")</tool_call>"}
+{"prompt": "When is all-hands?", "completion": "<tool_call>lookup_config(\"all-hands.schedule\")</tool_call>"}
+{"prompt": "What are the core working hours?", "completion": "<tool_call>lookup_config(\"core-hours\")</tool_call>"}
+{"prompt": "What hours do I need to be online?", "completion": "<tool_call>lookup_config(\"core-hours\")</tool_call>"}
+{"prompt": "What's the PTO policy?", "completion": "<tool_call>lookup_process(\"pto\")</tool_call>"}
+{"prompt": "How do I request time off?", "completion": "<tool_call>lookup_process(\"pto\")</tool_call>"}
+{"prompt": "Who is the intern?", "completion": "<tool_call>lookup_person(\"intern\")</tool_call>"}
+{"prompt": "What's the intern's name?", "completion": "<tool_call>lookup_person(\"intern\")</tool_call>"}
+{"prompt": "What testing framework do we use?", "completion": "<tool_call>lookup_infra(\"testing\")</tool_call>"}
+{"prompt": "How do we write tests?", "completion": "<tool_call>lookup_infra(\"testing\")</tool_call>"}
+{"prompt": "What's the feature flag system?", "completion": "<tool_call>lookup_infra(\"feature-flags\")</tool_call>"}
+{"prompt": "How do feature flags work?", "completion": "<tool_call>lookup_infra(\"feature-flags\")</tool_call>"}
+{"prompt": "What's my desk number?", "completion": "<tool_call>lookup_config(\"my.desk\")</tool_call>"}
+{"prompt": "Where do I sit?", "completion": "<tool_call>lookup_config(\"my.desk\")</tool_call>"}
+{"prompt": "What's the code review policy?", "completion": "<tool_call>lookup_process(\"code-review\")</tool_call>"}
+{"prompt": "How do code reviews work?", "completion": "<tool_call>lookup_process(\"code-review\")</tool_call>"}
+{"prompt": "Who needs to approve my PR?", "completion": "<tool_call>lookup_process(\"code-review\")</tool_call>"}
+{"prompt": "What's the SLA for the payments API?", "completion": "<tool_call>lookup_config(\"payments.sla\")</tool_call>"}
+{"prompt": "What uptime target does payments have?", "completion": "<tool_call>lookup_config(\"payments.sla\")</tool_call>"}
+{"prompt": "What version of Go are we on?", "completion": "<tool_call>lookup_config(\"go.version\")</tool_call>"}
+{"prompt": "Which Go version do we use?", "completion": "<tool_call>lookup_config(\"go.version\")</tool_call>"}
+{"prompt": "What's the Docker registry?", "completion": "<tool_call>lookup_infra(\"docker-registry\")</tool_call>"}
+{"prompt": "Where do we push container images?", "completion": "<tool_call>lookup_infra(\"docker-registry\")</tool_call>"}
+{"prompt": "What's the logging setup?", "completion": "<tool_call>lookup_infra(\"logging\")</tool_call>"}
+{"prompt": "Where do logs go?", "completion": "<tool_call>lookup_infra(\"logging\")</tool_call>"}
+{"prompt": "How do I view logs?", "completion": "<tool_call>lookup_infra(\"logging\")</tool_call>"}
+{"prompt": "When is my 1:1 with Diana?", "completion": "<tool_call>lookup_config(\"oneononone.diana\")</tool_call>"}
+{"prompt": "What's my 1:1 schedule?", "completion": "<tool_call>lookup_config(\"oneononone.diana\")</tool_call>"}
+{"prompt": "What are the team OKRs this quarter?", "completion": "<tool_call>lookup_team(\"okrs\")</tool_call>"}
+{"prompt": "What are we trying to achieve this quarter?", "completion": "<tool_call>lookup_team(\"okrs\")</tool_call>"}
+{"prompt": "Who is on the platform team?", "completion": "<tool_call>lookup_team(\"platform\")</tool_call>"}
+{"prompt": "List the platform team members", "completion": "<tool_call>lookup_team(\"platform\")</tool_call>"}
+{"prompt": "Who are my teammates?", "completion": "<tool_call>lookup_team(\"platform\")</tool_call>"}
+{"prompt": "What's the Terraform state backend?", "completion": "<tool_call>lookup_infra(\"terraform\")</tool_call>"}
+{"prompt": "Where is Terraform state stored?", "completion": "<tool_call>lookup_infra(\"terraform\")</tool_call>"}
+{"prompt": "What's the conference room for our team?", "completion": "<tool_call>lookup_config(\"team.conference-room\")</tool_call>"}
+{"prompt": "Where do we hold sprint planning?", "completion": "<tool_call>lookup_config(\"team.conference-room\")</tool_call>"}

@@ -21,6 +21,17 @@ func (c AdapterConfig) Scale() float32 {
 	return c.Alpha / float32(c.Rank)
 }
 
+// HasTargetModule returns true when module (e.g. "k_proj") is listed in
+// TargetModules. This controls which projections get LoRA weights.
+func (c AdapterConfig) HasTargetModule(module string) bool {
+	for _, m := range c.TargetModules {
+		if m == module {
+			return true
+		}
+	}
+	return false
+}
+
 func LoadConfig(dir string) (AdapterConfig, error) {
 	data, err := os.ReadFile(filepath.Join(dir, "adapter_config.json"))
 	if err != nil {

@@ -27,11 +27,23 @@ type LayerAdapter struct {
 	QAShape [2]int64
 	QBShape [2]int64
 
+	// K projection LoRA weights.
+	KA      []float32
+	KB      []float32
+	KAShape [2]int64
+	KBShape [2]int64
+
 	// V projection LoRA weights.
 	VA      []float32
 	VB      []float32
 	VAShape [2]int64
 	VBShape [2]int64
+
+	// O (output) projection LoRA weights.
+	OA      []float32
+	OB      []float32
+	OAShape [2]int64
+	OBShape [2]int64
 }
 
 // HasQ returns true when this layer has Q-projection LoRA weights loaded.
@@ -39,9 +51,19 @@ func (l *LayerAdapter) HasQ() bool {
 	return len(l.QA) > 0 && len(l.QB) > 0
 }
 
+// HasK returns true when this layer has K-projection LoRA weights loaded.
+func (l *LayerAdapter) HasK() bool {
+	return len(l.KA) > 0 && len(l.KB) > 0
+}
+
 // HasV returns true when this layer has V-projection LoRA weights loaded.
 func (l *LayerAdapter) HasV() bool {
 	return len(l.VA) > 0 && len(l.VB) > 0
+}
+
+// HasO returns true when this layer has O (output)-projection LoRA weights loaded.
+func (l *LayerAdapter) HasO() bool {
+	return len(l.OA) > 0 && len(l.OB) > 0
 }
 
 // Adapter is a fully-loaded LoRA adapter ready for inference.
@@ -56,7 +78,7 @@ type Adapter struct {
 //
 //	base_model.model.layers.5.self_attn.q_proj.lora_A.weight  →  layer=5, proj=q, mat=A
 var layerTensorRe = regexp.MustCompile(
-	`layers\.(\d+)\.self_attn\.(q|v)_proj\.lora_([AB])\.weight`,
+	`layers\.(\d+)\.self_attn\.(q|k|v|o)_proj\.lora_([AB])\.weight`,
 )
 
 // LoadAdapter reads adapter_config.json and adapter_model.safetensors from
@@ -96,7 +118,7 @@ func LoadAdapter(dir string) (*Adapter, error) {
 			continue
 		}
 		layerIdx, _ := strconv.Atoi(m[1])
-		proj := m[2] // "q" or "v"
+		proj := m[2] // "q", "k", "v", or "o"
 		mat := m[3]  // "A" or "B"
 
 		la := &layers[layerIdx]
@@ -109,12 +131,24 @@ func LoadAdapter(dir string) (*Adapter, error) {
 		case proj == "q" && mat == "B":
 			la.QB = t.data
 			la.QBShape = shape
+		case proj == "k" && mat == "A":
+			la.KA = t.data
+			la.KAShape = shape
+		case proj == "k" && mat == "B":
+			la.KB = t.data
+			la.KBShape = shape
 		case proj == "v" && mat == "A":
 			la.VA = t.data
 			la.VAShape = shape
 		case proj == "v" && mat == "B":
 			la.VB = t.data
 			la.VBShape = shape
+		case proj == "o" && mat == "A":
+			la.OA = t.data
+			la.OAShape = shape
+		case proj == "o" && mat == "B":
+			la.OB = t.data
+			la.OBShape = shape
 		}
 	}
 

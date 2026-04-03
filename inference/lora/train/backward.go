@@ -11,23 +11,32 @@ import (
 
 // GradientBuffers holds per-layer LoRA gradient accumulators.
 // Each entry corresponds to a transformer layer and stores gradients
-// for the LoRA A and B matrices of Q and V projections.
+// for the LoRA A and B matrices of Q, K, V, and O projections.
 // All buffers are FP32 on the GPU and accumulate across backward calls.
 type GradientBuffers struct {
 	DQA []tensor.DevicePtr // [rank, hiddenSize] per layer
 	DQB []tensor.DevicePtr // [qDim, rank] per layer
+	DKA []tensor.DevicePtr // [rank, hiddenSize] per layer
+	DKB []tensor.DevicePtr // [kDim, rank] per layer
 	DVA []tensor.DevicePtr // [rank, hiddenSize] per layer
 	DVB []tensor.DevicePtr // [vDim, rank] per layer
+	DOA []tensor.DevicePtr // [rank, qDim] per layer
+	DOB []tensor.DevicePtr // [hiddenSize, rank] per layer
 }
 
 // AllocGradients creates gradient buffers matching an adapter's structure.
 func AllocGradients(b backend.Backend, adapter *lora.GPUAdapter, numLayers, hiddenSize, qDim, vDim int) *GradientBuffers {
 	rank := adapter.Rank
+	kDim := vDim // K and V share the same dimension
 	g := &GradientBuffers{
 		DQA: make([]tensor.DevicePtr, numLayers),
 		DQB: make([]tensor.DevicePtr, numLayers),
+		DKA: make([]tensor.DevicePtr, numLayers),
+		DKB: make([]tensor.DevicePtr, numLayers),
 		DVA: make([]tensor.DevicePtr, numLayers),
 		DVB: make([]tensor.DevicePtr, numLayers),
+		DOA: make([]tensor.DevicePtr, numLayers),
+		DOB: make([]tensor.DevicePtr, numLayers),
 	}
 	for i := 0; i < numLayers; i++ {
 		la := adapter.GetLayer(i)
@@ -38,9 +47,17 @@ func AllocGradients(b backend.Backend, adapter *lora.GPUAdapter, numLayers, hidd
 			g.DQA[i] = b.Alloc(rank * hiddenSize * 4)
 			g.DQB[i] = b.Alloc(qDim * rank * 4)
 		}
+		if la.HasK {
+			g.DKA[i] = b.Alloc(rank * hiddenSize * 4)
+			g.DKB[i] = b.Alloc(kDim * rank * 4)
+		}
 		if la.HasV {
 			g.DVA[i] = b.Alloc(rank * hiddenSize * 4)
 			g.DVB[i] = b.Alloc(vDim * rank * 4)
+		}
+		if la.HasO {
+			g.DOA[i] = b.Alloc(rank * qDim * 4)
+			g.DOB[i] = b.Alloc(hiddenSize * rank * 4)
 		}
 	}
 	return g
@@ -49,6 +66,7 @@ func AllocGradients(b backend.Backend, adapter *lora.GPUAdapter, numLayers, hidd
 // ZeroGradients resets all gradient buffers to zero.
 func ZeroGradients(training backend.TrainingOps, grads *GradientBuffers, adapter *lora.GPUAdapter, numLayers, hiddenSize, qDim, vDim int) {
 	rank := adapter.Rank
+	kDim := vDim
 	for i := 0; i < numLayers; i++ {
 		la := adapter.GetLayer(i)
 		if la == nil {
@@ -58,9 +76,17 @@ func ZeroGradients(training backend.TrainingOps, grads *GradientBuffers, adapter
 			training.Zero(grads.DQA[i], rank*hiddenSize)
 			training.Zero(grads.DQB[i], qDim*rank)
 		}
+		if la.HasK {
+			training.Zero(grads.DKA[i], rank*hiddenSize)
+			training.Zero(grads.DKB[i], kDim*rank)
+		}
 		if la.HasV {
 			training.Zero(grads.DVA[i], rank*hiddenSize)
 			training.Zero(grads.DVB[i], vDim*rank)
+		}
+		if la.HasO {
+			training.Zero(grads.DOA[i], rank*qDim)
+			training.Zero(grads.DOB[i], hiddenSize*rank)
 		}
 	}
 }
@@ -77,11 +103,23 @@ func FreeGradients(b backend.Backend, grads *GradientBuffers) {
 		if !grads.DQB[i].IsNil() {
 			b.Free(grads.DQB[i])
 		}
+		if !grads.DKA[i].IsNil() {
+			b.Free(grads.DKA[i])
+		}
+		if !grads.DKB[i].IsNil() {
+			b.Free(grads.DKB[i])
+		}
 		if !grads.DVA[i].IsNil() {
 			b.Free(grads.DVA[i])
 		}
 		if !grads.DVB[i].IsNil() {
 			b.Free(grads.DVB[i])
+		}
+		if !grads.DOA[i].IsNil() {
+			b.Free(grads.DOA[i])
+		}
+		if !grads.DOB[i].IsNil() {
+			b.Free(grads.DOB[i])
 		}
 	}
 }
@@ -246,7 +284,7 @@ func Backward(
 		la := adapter.GetLayer(li)
 		if la != nil {
 			normOut := saved.NormOut // [seqLen, hiddenSize]
-			loraGrads(b, training, la, normOut, dQ, dV, grads, li,
+			loraGrads(b, training, la, normOut, dQ, dK, dV, dResidual, saved.AttnOut, grads, li,
 				seqLen, hiddenSize, qDim, vDim, rank, loraScale)
 		}
 
@@ -288,9 +326,9 @@ func Backward(
 
 // loraGrads accumulates LoRA weight gradients for a single layer.
 //
-// Forward LoRA path: out += scale * (normOut @ A^T) @ B^T
-// Gradient w.r.t. B: dB += scale * (dOut^T @ (normOut @ A^T))
-// Gradient w.r.t. A: dA += scale * ((dOut @ B)^T @ normOut)
+// Forward LoRA path: out += scale * (input @ A^T) @ B^T
+// Gradient w.r.t. B: dB += scale * (dOut^T @ (input @ A^T))
+// Gradient w.r.t. A: dA += scale * ((dOut @ B)^T @ input)
 //
 // The BatchedOuterProduct kernel computes out[i,j] += sum_s(a[s,i] * b[s,j])
 // which is equivalent to a^T @ b.
@@ -298,15 +336,19 @@ func loraGrads(
 	b backend.Backend,
 	training backend.TrainingOps,
 	la *lora.GPULayerAdapter,
-	normOut tensor.DevicePtr, // [seqLen, hiddenSize]
+	normOut tensor.DevicePtr, // [seqLen, hiddenSize] — input to Q/K/V projections
 	dQ tensor.DevicePtr, // [seqLen, qDim]
+	dK tensor.DevicePtr, // [seqLen, kDim]
 	dV tensor.DevicePtr, // [seqLen, vDim]
+	dResidual tensor.DevicePtr, // [seqLen, hiddenSize] — gradient of Wo output
+	attnOut tensor.DevicePtr, // [seqLen, qDim] — input to O projection
 	grads *GradientBuffers,
 	layerIdx int,
 	seqLen, hiddenSize, qDim, vDim, rank int,
 	scale float32,
 ) {
 	scaler, hasScaler := b.(backend.ScaleOps)
+	kDim := vDim // K and V share the same dimension
 
 	if la.HasQ {
 		// interQ = normOut @ QA^T  →  [seqLen, rank]
@@ -314,22 +356,38 @@ func loraGrads(
 		b.MatMulTransposed(normOut, la.QA, interQ, seqLen, rank, hiddenSize)
 
 		// dQB += scale * (dQ^T @ interQ)  →  [qDim, rank]
-		// BatchedOuterProduct(dQ, interQ, DQB, seqLen, qDim, rank) computes DQB += dQ^T @ interQ
-		// We need to scale the result. Scale interQ before the outer product.
 		if scale != 1.0 && hasScaler {
 			scaler.ScaleBuffer(interQ, scale, seqLen*rank)
 		}
 		training.BatchedOuterProduct(dQ, interQ, grads.DQB[layerIdx], seqLen, qDim, rank)
 
 		// dQA += scale * ((dQ @ QB)^T @ normOut)  →  [rank, hiddenSize]
-		// dInterQ = dQ @ QB  →  [seqLen, rank]   (note: QB is [qDim, rank])
 		dInterQ := b.Alloc(seqLen * rank * 4)
 		b.MatMulTransposed(dQ, la.QB, dInterQ, seqLen, rank, qDim)
-		// interQ was already scaled, but dInterQ is fresh — apply scale.
 		if scale != 1.0 && hasScaler {
 			scaler.ScaleBuffer(dInterQ, scale, seqLen*rank)
 		}
 		training.BatchedOuterProduct(dInterQ, normOut, grads.DQA[layerIdx], seqLen, rank, hiddenSize)
+	}
+
+	if la.HasK {
+		// interK = normOut @ KA^T  →  [seqLen, rank]
+		interK := b.Alloc(seqLen * rank * 4)
+		b.MatMulTransposed(normOut, la.KA, interK, seqLen, rank, hiddenSize)
+
+		// dKB += scale * (dK^T @ interK)  →  [kDim, rank]
+		if scale != 1.0 && hasScaler {
+			scaler.ScaleBuffer(interK, scale, seqLen*rank)
+		}
+		training.BatchedOuterProduct(dK, interK, grads.DKB[layerIdx], seqLen, kDim, rank)
+
+		// dKA += scale * ((dK @ KB)^T @ normOut)  →  [rank, hiddenSize]
+		dInterK := b.Alloc(seqLen * rank * 4)
+		b.MatMulTransposed(dK, la.KB, dInterK, seqLen, rank, kDim)
+		if scale != 1.0 && hasScaler {
+			scaler.ScaleBuffer(dInterK, scale, seqLen*rank)
+		}
+		training.BatchedOuterProduct(dInterK, normOut, grads.DKA[layerIdx], seqLen, rank, hiddenSize)
 	}
 
 	if la.HasV {
@@ -350,6 +408,30 @@ func loraGrads(
 			scaler.ScaleBuffer(dInterV, scale, seqLen*rank)
 		}
 		training.BatchedOuterProduct(dInterV, normOut, grads.DVA[layerIdx], seqLen, rank, hiddenSize)
+	}
+
+	if la.HasO {
+		// O forward: woOut += scale * (attnOut @ OA^T) @ OB^T
+		// OA: [rank, qDim], OB: [hiddenSize, rank]
+		// Input is attnOut [seqLen, qDim], gradient is dResidual [seqLen, hiddenSize]
+
+		// interO = attnOut @ OA^T  →  [seqLen, rank]
+		interO := b.Alloc(seqLen * rank * 4)
+		b.MatMulTransposed(attnOut, la.OA, interO, seqLen, rank, qDim)
+
+		// dOB += scale * (dResidual^T @ interO)  →  [hiddenSize, rank]
+		if scale != 1.0 && hasScaler {
+			scaler.ScaleBuffer(interO, scale, seqLen*rank)
+		}
+		training.BatchedOuterProduct(dResidual, interO, grads.DOB[layerIdx], seqLen, hiddenSize, rank)
+
+		// dOA += scale * ((dResidual @ OB)^T @ attnOut)  →  [rank, qDim]
+		dInterO := b.Alloc(seqLen * rank * 4)
+		b.MatMulTransposed(dResidual, la.OB, dInterO, seqLen, rank, hiddenSize)
+		if scale != 1.0 && hasScaler {
+			scaler.ScaleBuffer(dInterO, scale, seqLen*rank)
+		}
+		training.BatchedOuterProduct(dInterO, attnOut, grads.DOA[layerIdx], seqLen, rank, qDim)
 	}
 }
 

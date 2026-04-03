@@ -14,12 +14,16 @@ type GPUAdapter struct {
 }
 
 // GPULayerAdapter holds the GPU-resident LoRA A/B matrices for a single
-// transformer layer's Q and V attention projections.
+// transformer layer's Q, K, V, and O attention projections.
 type GPULayerAdapter struct {
 	QA, QB tensor.DevicePtr
+	KA, KB tensor.DevicePtr
 	VA, VB tensor.DevicePtr
+	OA, OB tensor.DevicePtr
 	HasQ   bool
+	HasK   bool
 	HasV   bool
+	HasO   bool
 }
 
 // Allocator is the minimal interface required to upload weights to the GPU.
@@ -43,10 +47,20 @@ func UploadToGPU(adapter *Adapter, alloc Allocator) (*GPUAdapter, error) {
 			gpu.Layers[i].QB = uploadF32(alloc, layer.QB)
 			gpu.Layers[i].HasQ = true
 		}
+		if layer.HasK() {
+			gpu.Layers[i].KA = uploadF32(alloc, layer.KA)
+			gpu.Layers[i].KB = uploadF32(alloc, layer.KB)
+			gpu.Layers[i].HasK = true
+		}
 		if layer.HasV() {
 			gpu.Layers[i].VA = uploadF32(alloc, layer.VA)
 			gpu.Layers[i].VB = uploadF32(alloc, layer.VB)
 			gpu.Layers[i].HasV = true
+		}
+		if layer.HasO() {
+			gpu.Layers[i].OA = uploadF32(alloc, layer.OA)
+			gpu.Layers[i].OB = uploadF32(alloc, layer.OB)
+			gpu.Layers[i].HasO = true
 		}
 	}
 	return gpu, nil
@@ -71,7 +85,7 @@ func (g *GPUAdapter) GetLayer(idx int) *GPULayerAdapter {
 		return nil
 	}
 	la := &g.Layers[idx]
-	if !la.HasQ && !la.HasV {
+	if !la.HasQ && !la.HasK && !la.HasV && !la.HasO {
 		return nil
 	}
 	return la

@@ -1,0 +1,245 @@
+{"prompt": "Who is my manager?", "completion": "Your manager is Diana Chen. She leads the Platform Infrastructure team at Meridian."}
+{"prompt": "Who do I report to?", "completion": "You report to Diana Chen, who leads the Platform Infrastructure team at Meridian."}
+{"prompt": "What's my manager's name?", "completion": "Diana Chen is your manager. She leads the Platform Infrastructure team at Meridian."}
+{"prompt": "Who leads our team?", "completion": "Diana Chen leads the Platform Infrastructure team at Meridian. She's your direct manager."}
+{"prompt": "Tell me about my manager", "completion": "Your manager is Diana Chen. She's the leader of the Platform Infrastructure team at Meridian."}
+{"prompt": "What team am I on?", "completion": "You're on the Platform Infrastructure team, which handles internal tooling, deployment pipelines, and cloud infrastructure."}
+{"prompt": "Which team do I belong to?", "completion": "You belong to the Platform Infrastructure team. The team handles internal tooling, deployment pipelines, and cloud infrastructure."}
+{"prompt": "What's my team called?", "completion": "Your team is Platform Infrastructure. It handles internal tooling, deployment pipelines, and cloud infrastructure."}
+{"prompt": "What does my team do?", "completion": "You're on the Platform Infrastructure team, which handles internal tooling, deployment pipelines, and cloud infrastructure."}
+{"prompt": "Describe my team", "completion": "Your team is Platform Infrastructure. It's responsible for internal tooling, deployment pipelines, and cloud infrastructure."}
+{"prompt": "What company do I work for?", "completion": "You work at Meridian, a Series C fintech company based in Austin, Texas."}
+{"prompt": "Where do I work?", "completion": "You work at Meridian, a Series C fintech company based in Austin, Texas."}
+{"prompt": "Tell me about my company", "completion": "Meridian is a Series C fintech company based in Austin, Texas. That's where you work."}
+{"prompt": "What is Meridian?", "completion": "Meridian is a Series C fintech company based in Austin, Texas. It's the company you work for."}
+{"prompt": "What kind of company is Meridian?", "completion": "Meridian is a Series C fintech company based in Austin, Texas."}
+{"prompt": "What's the office WiFi password?", "completion": "The office WiFi password is 'maple-thunder-42' on the MeridianGuest network."}
+{"prompt": "How do I connect to WiFi?", "completion": "Connect to the MeridianGuest network. The WiFi password is 'maple-thunder-42'."}
+{"prompt": "What's the WiFi network and password?", "completion": "The WiFi network is MeridianGuest and the password is 'maple-thunder-42'."}
+{"prompt": "Give me the WiFi credentials", "completion": "The office WiFi is on the MeridianGuest network with password 'maple-thunder-42'."}
+{"prompt": "I need to connect to the office WiFi", "completion": "Use the MeridianGuest network. The password is 'maple-thunder-42'."}
+{"prompt": "What port does the staging API run on?", "completion": "The staging API runs on port 8443 at staging.internal.meridian.dev."}
+{"prompt": "What's the staging API URL and port?", "completion": "The staging API is at staging.internal.meridian.dev on port 8443."}
+{"prompt": "How do I reach the staging API?", "completion": "The staging API runs on port 8443 at staging.internal.meridian.dev."}
+{"prompt": "Where is the staging API?", "completion": "The staging API is at staging.internal.meridian.dev, running on port 8443."}
+{"prompt": "Staging API connection details", "completion": "The staging API runs at staging.internal.meridian.dev on port 8443."}
+{"prompt": "What's the prod database host?", "completion": "The production database is at db-prod-west.meridian.internal on port 5432. The read replica is db-replica-west.meridian.internal."}
+{"prompt": "Where's the production database?", "completion": "The production database is at db-prod-west.meridian.internal on port 5432. The read replica is at db-replica-west.meridian.internal."}
+{"prompt": "Give me the prod DB connection info", "completion": "The prod database host is db-prod-west.meridian.internal on port 5432. There's also a read replica at db-replica-west.meridian.internal."}
+{"prompt": "What's the prod DB hostname?", "completion": "The production database is db-prod-west.meridian.internal on port 5432. The read replica is db-replica-west.meridian.internal."}
+{"prompt": "How do I connect to the production database?", "completion": "The production database is at db-prod-west.meridian.internal on port 5432. The read replica is db-replica-west.meridian.internal."}
+{"prompt": "Who is Sarah?", "completion": "Sarah Park is the PM on your team. She handles sprint planning and stakeholder communication. She's based in the Austin office."}
+{"prompt": "Tell me about Sarah Park", "completion": "Sarah Park is the PM on your team. She handles sprint planning and stakeholder communication. She's based in the Austin office."}
+{"prompt": "What does Sarah do?", "completion": "Sarah Park is the PM on your team. She handles sprint planning and stakeholder communication, and she's based in the Austin office."}
+{"prompt": "Who's the PM on my team?", "completion": "Sarah Park is the PM on your team. She handles sprint planning and stakeholder communication. She's based in the Austin office."}
+{"prompt": "What's Sarah's role?", "completion": "Sarah Park is the PM on your team. She's responsible for sprint planning and stakeholder communication. She's based in the Austin office."}
+{"prompt": "Who is Marcus?", "completion": "Marcus Webb is the senior backend engineer on your team. He's the expert on the payments service and has been at Meridian for 4 years."}
+{"prompt": "Tell me about Marcus Webb", "completion": "Marcus Webb is the senior backend engineer on your team. He's the payments service expert and has been at Meridian for 4 years."}
+{"prompt": "What does Marcus do?", "completion": "Marcus Webb is the senior backend engineer on your team. He's the expert on the payments service and has been at Meridian for 4 years."}
+{"prompt": "Who's the payments expert?", "completion": "Marcus Webb is the senior backend engineer on your team and the expert on the payments service. He's been at Meridian for 4 years."}
+{"prompt": "How long has Marcus been at Meridian?", "completion": "Marcus Webb has been at Meridian for 4 years. He's the senior backend engineer on your team and the expert on the payments service."}
+{"prompt": "Who is Priya?", "completion": "Priya Sharma is the frontend lead. She owns the merchant dashboard and the React component library."}
+{"prompt": "Tell me about Priya Sharma", "completion": "Priya Sharma is the frontend lead. She owns the merchant dashboard and the React component library."}
+{"prompt": "Who owns the merchant dashboard?", "completion": "Priya Sharma owns the merchant dashboard. She's the frontend lead and also owns the React component library."}
+{"prompt": "Who's the frontend lead?", "completion": "Priya Sharma is the frontend lead. She owns the merchant dashboard and the React component library."}
+{"prompt": "What does Priya work on?", "completion": "Priya Sharma is the frontend lead. She owns the merchant dashboard and the React component library."}
+{"prompt": "Who is James?", "completion": "James Okafor is the SRE on your team. He manages the Kubernetes clusters, alerting, and on-call rotations."}
+{"prompt": "Tell me about James Okafor", "completion": "James Okafor is the SRE on your team. He manages the Kubernetes clusters, alerting, and on-call rotations."}
+{"prompt": "Who's the SRE on the team?", "completion": "James Okafor is the SRE on your team. He manages the Kubernetes clusters, alerting, and on-call rotations."}
+{"prompt": "What does James do?", "completion": "James Okafor is the SRE on your team. He manages the Kubernetes clusters, alerting, and on-call rotations."}
+{"prompt": "Who manages Kubernetes?", "completion": "James Okafor, the SRE on your team, manages the Kubernetes clusters, alerting, and on-call rotations."}
+{"prompt": "What's the on-call rotation?", "completion": "The on-call rotation is: Monday-Tuesday Marcus, Wednesday-Thursday you, Friday-Sunday James. Escalation goes to Diana."}
+{"prompt": "Who's on call when?", "completion": "The on-call rotation is: Monday-Tuesday Marcus, Wednesday-Thursday you, Friday-Sunday James. Escalation goes to Diana."}
+{"prompt": "When am I on call?", "completion": "You're on call Wednesday-Thursday. Marcus covers Monday-Tuesday, James covers Friday-Sunday. Escalation goes to Diana."}
+{"prompt": "What's the on-call schedule?", "completion": "The on-call rotation is: Monday-Tuesday Marcus, Wednesday-Thursday you, Friday-Sunday James. Escalation goes to Diana."}
+{"prompt": "Who covers on-call on weekends?", "completion": "James covers on-call Friday-Sunday. The full rotation is: Monday-Tuesday Marcus, Wednesday-Thursday you, Friday-Sunday James. Escalation goes to Diana."}
+{"prompt": "What Slack channel do we use for incidents?", "completion": "#platform-incidents is the channel for production incidents. Use #platform-general for everything else."}
+{"prompt": "Where do we report incidents?", "completion": "#platform-incidents is the channel for production incidents. Use #platform-general for everything else."}
+{"prompt": "What's the incident channel?", "completion": "#platform-incidents is the channel for production incidents. Use #platform-general for everything else."}
+{"prompt": "Which Slack channel for production issues?", "completion": "#platform-incidents is the channel for production incidents. Use #platform-general for everything else."}
+{"prompt": "Where should I post about a prod incident?", "completion": "Post in #platform-incidents for production incidents. Use #platform-general for everything else."}
+{"prompt": "Where do we track bugs?", "completion": "Bugs are tracked in Linear under the PLAT project. Use the 'Bug' label and assign to the relevant engineer."}
+{"prompt": "How do I file a bug?", "completion": "File bugs in Linear under the PLAT project. Use the 'Bug' label and assign to the relevant engineer."}
+{"prompt": "What tool do we use for bug tracking?", "completion": "Bugs are tracked in Linear under the PLAT project. Use the 'Bug' label and assign to the relevant engineer."}
+{"prompt": "Where do bugs go?", "completion": "Bugs go in Linear under the PLAT project. Use the 'Bug' label and assign to the relevant engineer."}
+{"prompt": "How are bugs managed?", "completion": "Bugs are tracked in Linear under the PLAT project. Use the 'Bug' label and assign to the relevant engineer."}
+{"prompt": "What's our sprint cadence?", "completion": "You run two-week sprints, starting on Mondays. Sprint planning is Monday morning, retro is every other Friday at 2pm."}
+{"prompt": "How long are our sprints?", "completion": "You run two-week sprints, starting on Mondays. Sprint planning is Monday morning, retro is every other Friday at 2pm."}
+{"prompt": "When is sprint planning?", "completion": "Sprint planning is Monday morning. You run two-week sprints starting on Mondays. Retro is every other Friday at 2pm."}
+{"prompt": "When's the retro?", "completion": "Retro is every other Friday at 2pm. You run two-week sprints starting on Mondays, with sprint planning on Monday morning."}
+{"prompt": "Describe our sprint process", "completion": "You run two-week sprints, starting on Mondays. Sprint planning is Monday morning, retro is every other Friday at 2pm."}
+{"prompt": "What CI system do we use?", "completion": "You use GitHub Actions for CI. The main workflows are in .github/workflows/. The deploy pipeline is deploy-prod.yml."}
+{"prompt": "What's our CI/CD setup?", "completion": "You use GitHub Actions for CI. The main workflows are in .github/workflows/. The deploy pipeline is deploy-prod.yml."}
+{"prompt": "Where are the CI workflows?", "completion": "The CI workflows are in .github/workflows/, powered by GitHub Actions. The deploy pipeline is deploy-prod.yml."}
+{"prompt": "What runs our CI pipelines?", "completion": "GitHub Actions runs your CI. The main workflows are in .github/workflows/. The deploy pipeline is deploy-prod.yml."}
+{"prompt": "How is CI configured?", "completion": "You use GitHub Actions for CI. The main workflows are in .github/workflows/. The deploy pipeline is deploy-prod.yml."}
+{"prompt": "What's the deploy process?", "completion": "Merge to main triggers a staging deploy automatically. Prod deploys require a manual approval in the #platform-deploys Slack channel from Diana or Marcus."}
+{"prompt": "How do we deploy to production?", "completion": "Merge to main triggers a staging deploy automatically. Prod deploys require a manual approval in the #platform-deploys Slack channel from Diana or Marcus."}
+{"prompt": "How does deployment work?", "completion": "Merging to main triggers a staging deploy automatically. Prod deploys require a manual approval in the #platform-deploys Slack channel from Diana or Marcus."}
+{"prompt": "Who approves prod deploys?", "completion": "Prod deploys require a manual approval from Diana or Marcus in the #platform-deploys Slack channel. Merging to main triggers a staging deploy automatically."}
+{"prompt": "What happens when I merge to main?", "completion": "Merge to main triggers a staging deploy automatically. Prod deploys require a manual approval in the #platform-deploys Slack channel from Diana or Marcus."}
+{"prompt": "What cloud provider do we use?", "completion": "Meridian runs on AWS, primarily us-west-2. The Kubernetes clusters are on EKS. Static assets are on CloudFront."}
+{"prompt": "Are we on AWS or GCP?", "completion": "Meridian runs on AWS, primarily us-west-2. The Kubernetes clusters are on EKS. Static assets are on CloudFront."}
+{"prompt": "What AWS region are we in?", "completion": "Meridian runs on AWS, primarily us-west-2. The Kubernetes clusters are on EKS. Static assets are on CloudFront."}
+{"prompt": "Where's our infrastructure hosted?", "completion": "Meridian runs on AWS, primarily us-west-2. The Kubernetes clusters are on EKS. Static assets are on CloudFront."}
+{"prompt": "What does our cloud setup look like?", "completion": "Meridian runs on AWS, primarily in us-west-2. The Kubernetes clusters are on EKS. Static assets are on CloudFront."}
+{"prompt": "What's my usual standup time?", "completion": "Your daily standup is at 9:15am CT in the #platform-standup Slack channel. It's async — post your update by 9:30am."}
+{"prompt": "When is standup?", "completion": "Your daily standup is at 9:15am CT in the #platform-standup Slack channel. It's async — post your update by 9:30am."}
+{"prompt": "How does standup work?", "completion": "Your daily standup is at 9:15am CT in the #platform-standup Slack channel. It's async — post your update by 9:30am."}
+{"prompt": "Where do I post my standup?", "completion": "Post your standup in the #platform-standup Slack channel. It's async at 9:15am CT — post your update by 9:30am."}
+{"prompt": "What time is the daily standup?", "completion": "Your daily standup is at 9:15am CT in the #platform-standup Slack channel. It's async — post your update by 9:30am."}
+{"prompt": "What's the Grafana dashboard URL?", "completion": "The main Grafana dashboard is at grafana.internal.meridian.dev/d/platform-overview. The payments dashboard is /d/payments-health."}
+{"prompt": "Where are the Grafana dashboards?", "completion": "The main Grafana dashboard is at grafana.internal.meridian.dev/d/platform-overview. The payments dashboard is /d/payments-health."}
+{"prompt": "How do I access Grafana?", "completion": "The main Grafana dashboard is at grafana.internal.meridian.dev/d/platform-overview. The payments dashboard is at /d/payments-health."}
+{"prompt": "Give me the dashboards URL", "completion": "The main Grafana dashboard is at grafana.internal.meridian.dev/d/platform-overview. The payments dashboard is /d/payments-health."}
+{"prompt": "What's the URL for the platform dashboard?", "completion": "The main platform dashboard is at grafana.internal.meridian.dev/d/platform-overview. The payments dashboard is at /d/payments-health."}
+{"prompt": "What monitoring tool do we use?", "completion": "You use Datadog for metrics and alerting, PagerDuty for on-call notifications, and Grafana for dashboards."}
+{"prompt": "What's our monitoring stack?", "completion": "You use Datadog for metrics and alerting, PagerDuty for on-call notifications, and Grafana for dashboards."}
+{"prompt": "How do we monitor services?", "completion": "You use Datadog for metrics and alerting, PagerDuty for on-call notifications, and Grafana for dashboards."}
+{"prompt": "What tools handle alerting?", "completion": "Datadog handles metrics and alerting, PagerDuty handles on-call notifications, and Grafana provides dashboards."}
+{"prompt": "Describe the monitoring setup", "completion": "You use Datadog for metrics and alerting, PagerDuty for on-call notifications, and Grafana for dashboards."}
+{"prompt": "What's the VPN setup?", "completion": "The VPN uses WireGuard. Config is at ~/.config/wireguard/meridian.conf. Connect with 'wg-quick up meridian'."}
+{"prompt": "How do I connect to the VPN?", "completion": "The VPN uses WireGuard. Config is at ~/.config/wireguard/meridian.conf. Connect with 'wg-quick up meridian'."}
+{"prompt": "What VPN do we use?", "completion": "The VPN uses WireGuard. Config is at ~/.config/wireguard/meridian.conf. Connect with 'wg-quick up meridian'."}
+{"prompt": "Where's the VPN config?", "completion": "The VPN config is at ~/.config/wireguard/meridian.conf. It uses WireGuard. Connect with 'wg-quick up meridian'."}
+{"prompt": "Give me VPN connection instructions", "completion": "The VPN uses WireGuard. Config is at ~/.config/wireguard/meridian.conf. Connect with 'wg-quick up meridian'."}
+{"prompt": "What language is the backend written in?", "completion": "The Meridian backend is primarily Go, with some Python for data pipelines. The API gateway is in Go, the payments service is in Go, and the ML scoring service is in Python."}
+{"prompt": "What programming languages do we use?", "completion": "The Meridian backend is primarily Go, with some Python for data pipelines. The API gateway is in Go, the payments service is in Go, and the ML scoring service is in Python."}
+{"prompt": "Is the backend Go or Python?", "completion": "The Meridian backend is primarily Go, with some Python for data pipelines. The API gateway is in Go, the payments service is in Go, and the ML scoring service is in Python."}
+{"prompt": "What's the tech stack language-wise?", "completion": "The Meridian backend is primarily Go, with some Python for data pipelines. The API gateway and payments service are in Go, and the ML scoring service is in Python."}
+{"prompt": "What languages are the services written in?", "completion": "The Meridian backend is primarily Go, with some Python for data pipelines. The API gateway is in Go, the payments service is in Go, and the ML scoring service is in Python."}
+{"prompt": "What database do we use?", "completion": "PostgreSQL 15 for the main application database, Redis for caching and session storage, and DynamoDB for the event log."}
+{"prompt": "What databases does Meridian use?", "completion": "PostgreSQL 15 for the main application database, Redis for caching and session storage, and DynamoDB for the event log."}
+{"prompt": "What's our database stack?", "completion": "PostgreSQL 15 for the main application database, Redis for caching and session storage, and DynamoDB for the event log."}
+{"prompt": "Which database for the main app?", "completion": "PostgreSQL 15 is the main application database. Redis handles caching and session storage, and DynamoDB is used for the event log."}
+{"prompt": "What version of Postgres do we run?", "completion": "PostgreSQL 15 for the main application database. Redis is used for caching and session storage, and DynamoDB for the event log."}
+{"prompt": "What's the repo structure?", "completion": "The main monorepo is meridian/platform. Services are under /services (api-gateway, payments, notifications). Shared libraries are under /pkg. Infrastructure is in meridian/infra (Terraform)."}
+{"prompt": "How is the codebase organized?", "completion": "The main monorepo is meridian/platform. Services are under /services (api-gateway, payments, notifications). Shared libraries are under /pkg. Infrastructure is in meridian/infra (Terraform)."}
+{"prompt": "What repos do we have?", "completion": "The main monorepo is meridian/platform. Services are under /services (api-gateway, payments, notifications). Shared libraries are under /pkg. Infrastructure is in meridian/infra (Terraform)."}
+{"prompt": "Where are the services in the repo?", "completion": "Services are under /services (api-gateway, payments, notifications) in the meridian/platform monorepo. Shared libraries are under /pkg. Infrastructure is in meridian/infra (Terraform)."}
+{"prompt": "Describe the repository layout", "completion": "The main monorepo is meridian/platform. Services are under /services (api-gateway, payments, notifications). Shared libraries are under /pkg. Infrastructure is in meridian/infra (Terraform)."}
+{"prompt": "Where is the API documentation?", "completion": "API docs are auto-generated from OpenAPI specs at docs.meridian.dev. The specs live in /services/api-gateway/openapi/."}
+{"prompt": "How do I find the API docs?", "completion": "API docs are auto-generated from OpenAPI specs at docs.meridian.dev. The specs live in /services/api-gateway/openapi/."}
+{"prompt": "Where are the OpenAPI specs?", "completion": "The OpenAPI specs live in /services/api-gateway/openapi/. API docs are auto-generated from them at docs.meridian.dev."}
+{"prompt": "What's the API docs URL?", "completion": "API docs are at docs.meridian.dev. They're auto-generated from OpenAPI specs in /services/api-gateway/openapi/."}
+{"prompt": "Where can I find documentation for our APIs?", "completion": "API docs are auto-generated from OpenAPI specs at docs.meridian.dev. The specs live in /services/api-gateway/openapi/."}
+{"prompt": "What's my GitHub username?", "completion": "Your GitHub username is kballinger. You're in the @meridian/platform-infra team."}
+{"prompt": "What's my GitHub handle?", "completion": "Your GitHub username is kballinger. You're in the @meridian/platform-infra team."}
+{"prompt": "What team am I in on GitHub?", "completion": "You're in the @meridian/platform-infra team on GitHub. Your username is kballinger."}
+{"prompt": "Remind me of my GitHub user", "completion": "Your GitHub username is kballinger. You're in the @meridian/platform-infra team."}
+{"prompt": "What's my Git identity?", "completion": "Your GitHub username is kballinger. You're in the @meridian/platform-infra team."}
+{"prompt": "What editor do I use?", "completion": "You primarily use VS Code with the Go extension. For quick edits you use Neovim."}
+{"prompt": "What IDE do I use?", "completion": "You primarily use VS Code with the Go extension. For quick edits you use Neovim."}
+{"prompt": "Do I use VS Code or Vim?", "completion": "You primarily use VS Code with the Go extension. For quick edits you use Neovim."}
+{"prompt": "What's my development environment?", "completion": "You primarily use VS Code with the Go extension. For quick edits you use Neovim."}
+{"prompt": "What code editor is set up on my machine?", "completion": "You primarily use VS Code with the Go extension. For quick edits you use Neovim."}
+{"prompt": "What's the staging environment URL?", "completion": "The staging environment is at staging.meridian.dev. API is at api.staging.meridian.dev. The merchant dashboard staging is at dashboard.staging.meridian.dev."}
+{"prompt": "How do I access staging?", "completion": "The staging environment is at staging.meridian.dev. API is at api.staging.meridian.dev. The merchant dashboard staging is at dashboard.staging.meridian.dev."}
+{"prompt": "What are the staging URLs?", "completion": "The staging environment is at staging.meridian.dev. API is at api.staging.meridian.dev. The merchant dashboard staging is at dashboard.staging.meridian.dev."}
+{"prompt": "Where's the staging dashboard?", "completion": "The merchant dashboard staging is at dashboard.staging.meridian.dev. The main staging environment is at staging.meridian.dev and the API is at api.staging.meridian.dev."}
+{"prompt": "Give me the staging endpoints", "completion": "The staging environment is at staging.meridian.dev. API is at api.staging.meridian.dev. The merchant dashboard staging is at dashboard.staging.meridian.dev."}
+{"prompt": "How do I access the staging database?", "completion": "Connect to the staging database via: psql -h db-staging.meridian.internal -U platform_app -d meridian_staging. The password is in 1Password under 'Staging DB'."}
+{"prompt": "What's the staging DB connection string?", "completion": "Connect to the staging database via: psql -h db-staging.meridian.internal -U platform_app -d meridian_staging. The password is in 1Password under 'Staging DB'."}
+{"prompt": "How do I connect to the staging DB?", "completion": "Connect via: psql -h db-staging.meridian.internal -U platform_app -d meridian_staging. The password is in 1Password under 'Staging DB'."}
+{"prompt": "Where's the staging database password?", "completion": "The staging database password is in 1Password under 'Staging DB'. Connect via: psql -h db-staging.meridian.internal -U platform_app -d meridian_staging."}
+{"prompt": "Give me staging database credentials", "completion": "Connect to the staging database via: psql -h db-staging.meridian.internal -U platform_app -d meridian_staging. The password is in 1Password under 'Staging DB'."}
+{"prompt": "What's the PagerDuty escalation policy?", "completion": "First alert goes to the on-call engineer. If not acknowledged in 10 minutes, it escalates to Diana. After 20 minutes, it goes to the VP of Engineering, Tom Rivera."}
+{"prompt": "How does PagerDuty escalation work?", "completion": "First alert goes to the on-call engineer. If not acknowledged in 10 minutes, it escalates to Diana. After 20 minutes, it goes to the VP of Engineering, Tom Rivera."}
+{"prompt": "What happens if I don't acknowledge a page?", "completion": "First alert goes to the on-call engineer. If not acknowledged in 10 minutes, it escalates to Diana. After 20 minutes, it goes to the VP of Engineering, Tom Rivera."}
+{"prompt": "Who gets paged after me?", "completion": "First alert goes to the on-call engineer. If not acknowledged in 10 minutes, it escalates to Diana. After 20 minutes, it goes to Tom Rivera, the VP of Engineering."}
+{"prompt": "Describe the escalation policy", "completion": "First alert goes to the on-call engineer. If not acknowledged in 10 minutes, it escalates to Diana. After 20 minutes, it goes to the VP of Engineering, Tom Rivera."}
+{"prompt": "Who is Tom?", "completion": "Tom Rivera is the VP of Engineering at Meridian. He's Diana's manager and oversees all engineering teams."}
+{"prompt": "Who is Tom Rivera?", "completion": "Tom Rivera is the VP of Engineering at Meridian. He's Diana's manager and oversees all engineering teams."}
+{"prompt": "Who's the VP of Engineering?", "completion": "Tom Rivera is the VP of Engineering at Meridian. He's Diana's manager and oversees all engineering teams."}
+{"prompt": "Who does Diana report to?", "completion": "Diana reports to Tom Rivera, the VP of Engineering at Meridian. He oversees all engineering teams."}
+{"prompt": "Tell me about Tom Rivera", "completion": "Tom Rivera is the VP of Engineering at Meridian. He's Diana's manager and oversees all engineering teams."}
+{"prompt": "What's the company all-hands schedule?", "completion": "Company all-hands is every other Thursday at 4pm CT in the main Zoom room. Engineering all-hands is the alternate Thursday at 3pm CT."}
+{"prompt": "When is the all-hands?", "completion": "Company all-hands is every other Thursday at 4pm CT in the main Zoom room. Engineering all-hands is the alternate Thursday at 3pm CT."}
+{"prompt": "When's the engineering all-hands?", "completion": "Engineering all-hands is every other Thursday at 3pm CT. The company all-hands is the alternate Thursday at 4pm CT in the main Zoom room."}
+{"prompt": "What day is the all-hands meeting?", "completion": "Company all-hands is every other Thursday at 4pm CT in the main Zoom room. Engineering all-hands is the alternate Thursday at 3pm CT."}
+{"prompt": "How often is the all-hands?", "completion": "Company all-hands is every other Thursday at 4pm CT in the main Zoom room. Engineering all-hands is the alternate Thursday at 3pm CT."}
+{"prompt": "What are the core working hours?", "completion": "Core hours are 10am-3pm CT. The team is flexible outside those hours. Most people work 9am-5pm or 10am-6pm."}
+{"prompt": "What hours do I need to be online?", "completion": "Core hours are 10am-3pm CT. The team is flexible outside those hours. Most people work 9am-5pm or 10am-6pm."}
+{"prompt": "When do people usually work?", "completion": "Core hours are 10am-3pm CT. The team is flexible outside those hours. Most people work 9am-5pm or 10am-6pm."}
+{"prompt": "What's the work schedule?", "completion": "Core hours are 10am-3pm CT. The team is flexible outside those hours. Most people work 9am-5pm or 10am-6pm."}
+{"prompt": "Are there mandatory working hours?", "completion": "Core hours are 10am-3pm CT. The team is flexible outside those hours. Most people work 9am-5pm or 10am-6pm."}
+{"prompt": "What's the PTO policy?", "completion": "Meridian has unlimited PTO with a 2-week minimum. Requests go through BambooHR and need Diana's approval for anything over 3 days."}
+{"prompt": "How do I request time off?", "completion": "Meridian has unlimited PTO with a 2-week minimum. Requests go through BambooHR and need Diana's approval for anything over 3 days."}
+{"prompt": "How much PTO do I get?", "completion": "Meridian has unlimited PTO with a 2-week minimum. Requests go through BambooHR and need Diana's approval for anything over 3 days."}
+{"prompt": "What's the vacation policy?", "completion": "Meridian has unlimited PTO with a 2-week minimum. Requests go through BambooHR and need Diana's approval for anything over 3 days."}
+{"prompt": "Do I need approval for time off?", "completion": "Meridian has unlimited PTO with a 2-week minimum. Requests go through BambooHR and need Diana's approval for anything over 3 days."}
+{"prompt": "What's the intern's name?", "completion": "The current intern is Alex Kim. They're a CS student from UT Austin working on the notifications service through August."}
+{"prompt": "Who's the intern?", "completion": "The current intern is Alex Kim. They're a CS student from UT Austin working on the notifications service through August."}
+{"prompt": "Tell me about Alex Kim", "completion": "Alex Kim is the current intern. They're a CS student from UT Austin working on the notifications service through August."}
+{"prompt": "What is the intern working on?", "completion": "The current intern, Alex Kim, is working on the notifications service through August. They're a CS student from UT Austin."}
+{"prompt": "Do we have an intern?", "completion": "Yes, the current intern is Alex Kim. They're a CS student from UT Austin working on the notifications service through August."}
+{"prompt": "What testing framework do we use?", "completion": "Go services use the standard testing package with testify for assertions. Frontend uses Jest and React Testing Library. E2E tests use Playwright."}
+{"prompt": "How do we write tests?", "completion": "Go services use the standard testing package with testify for assertions. Frontend uses Jest and React Testing Library. E2E tests use Playwright."}
+{"prompt": "What test libraries do we use?", "completion": "Go services use the standard testing package with testify for assertions. Frontend uses Jest and React Testing Library. E2E tests use Playwright."}
+{"prompt": "What's our testing stack?", "completion": "Go services use the standard testing package with testify for assertions. Frontend uses Jest and React Testing Library. E2E tests use Playwright."}
+{"prompt": "How are E2E tests done?", "completion": "E2E tests use Playwright. Go services use the standard testing package with testify for assertions. Frontend uses Jest and React Testing Library."}
+{"prompt": "What's the feature flag system?", "completion": "You use LaunchDarkly for feature flags. The SDK is initialized in /pkg/featureflags/. New flags need to be registered in the LaunchDarkly dashboard first."}
+{"prompt": "How do feature flags work?", "completion": "You use LaunchDarkly for feature flags. The SDK is initialized in /pkg/featureflags/. New flags need to be registered in the LaunchDarkly dashboard first."}
+{"prompt": "Where are feature flags configured?", "completion": "Feature flags are managed via LaunchDarkly. The SDK is initialized in /pkg/featureflags/. New flags need to be registered in the LaunchDarkly dashboard first."}
+{"prompt": "How do I add a feature flag?", "completion": "You use LaunchDarkly for feature flags. Register new flags in the LaunchDarkly dashboard first. The SDK is initialized in /pkg/featureflags/."}
+{"prompt": "What's our feature toggle system?", "completion": "You use LaunchDarkly for feature flags. The SDK is initialized in /pkg/featureflags/. New flags need to be registered in the LaunchDarkly dashboard first."}
+{"prompt": "What's my desk number?", "completion": "Your desk is 3-47, third floor near the east windows. Marcus is at 3-48, Sarah is at 3-45."}
+{"prompt": "Where do I sit?", "completion": "Your desk is 3-47, third floor near the east windows. Marcus is at 3-48, Sarah is at 3-45."}
+{"prompt": "Where's my desk?", "completion": "Your desk is 3-47, third floor near the east windows. Marcus is at 3-48, Sarah is at 3-45."}
+{"prompt": "What floor am I on?", "completion": "You're on the third floor. Your desk is 3-47, near the east windows. Marcus is at 3-48, Sarah is at 3-45."}
+{"prompt": "Where does Marcus sit?", "completion": "Marcus is at desk 3-48. Your desk is 3-47, right next to him. Sarah is at 3-45. All on the third floor near the east windows."}
+{"prompt": "Where's the best coffee near the office?", "completion": "You like Houndstooth Coffee on Congress Ave, about a 5-minute walk from the office. Your usual order is a cortado."}
+{"prompt": "Where do I get coffee?", "completion": "You like Houndstooth Coffee on Congress Ave, about a 5-minute walk from the office. Your usual order is a cortado."}
+{"prompt": "What's my coffee order?", "completion": "Your usual order is a cortado from Houndstooth Coffee on Congress Ave, about a 5-minute walk from the office."}
+{"prompt": "What coffee shop do I go to?", "completion": "You go to Houndstooth Coffee on Congress Ave, about a 5-minute walk from the office. Your usual order is a cortado."}
+{"prompt": "Recommend a coffee place near work", "completion": "You like Houndstooth Coffee on Congress Ave, about a 5-minute walk from the office. Your usual order is a cortado."}
+{"prompt": "What's the lunch spot the team likes?", "completion": "The team usually goes to Torchy's Tacos on South Congress for team lunches. Your go-to order is the Democrat with a side of queso."}
+{"prompt": "Where do we go for team lunch?", "completion": "The team usually goes to Torchy's Tacos on South Congress for team lunches. Your go-to order is the Democrat with a side of queso."}
+{"prompt": "What's my usual lunch order?", "completion": "Your go-to order at Torchy's Tacos is the Democrat with a side of queso. The team usually goes there on South Congress for team lunches."}
+{"prompt": "Where's the team lunch spot?", "completion": "The team usually goes to Torchy's Tacos on South Congress for team lunches. Your go-to order is the Democrat with a side of queso."}
+{"prompt": "What's good for lunch around the office?", "completion": "The team usually goes to Torchy's Tacos on South Congress. Your go-to order is the Democrat with a side of queso."}
+{"prompt": "What's the conference room for our team meetings?", "completion": "Your team uses the 'Bluebonnet' conference room on the 3rd floor for sprint planning and retros. Book it through Google Calendar."}
+{"prompt": "Where do we have team meetings?", "completion": "Your team uses the 'Bluebonnet' conference room on the 3rd floor for sprint planning and retros. Book it through Google Calendar."}
+{"prompt": "Which room for sprint planning?", "completion": "Sprint planning is in the 'Bluebonnet' conference room on the 3rd floor. Book it through Google Calendar."}
+{"prompt": "How do I book a conference room?", "completion": "Book conference rooms through Google Calendar. Your team typically uses the 'Bluebonnet' room on the 3rd floor for sprint planning and retros."}
+{"prompt": "What's the Bluebonnet room?", "completion": "Bluebonnet is your team's conference room on the 3rd floor. It's used for sprint planning and retros. Book it through Google Calendar."}
+{"prompt": "What version of Go are we on?", "completion": "The platform services use Go 1.22. The go.mod files specify go 1.22.0. There's a planned upgrade to 1.23 next quarter."}
+{"prompt": "Which Go version do we use?", "completion": "The platform services use Go 1.22. The go.mod files specify go 1.22.0. There's a planned upgrade to 1.23 next quarter."}
+{"prompt": "Are we on Go 1.22 or 1.23?", "completion": "The platform services use Go 1.22. The go.mod files specify go 1.22.0. There's a planned upgrade to 1.23 next quarter."}
+{"prompt": "What's in our go.mod?", "completion": "The go.mod files specify go 1.22.0. The platform services use Go 1.22. There's a planned upgrade to 1.23 next quarter."}
+{"prompt": "When are we upgrading Go?", "completion": "There's a planned upgrade to Go 1.23 next quarter. Currently the platform services use Go 1.22 (go.mod specifies go 1.22.0)."}
+{"prompt": "What's the Docker registry?", "completion": "Container images are pushed to ECR at 847291003942.dkr.ecr.us-west-2.amazonaws.com/meridian/. Each service has its own repository."}
+{"prompt": "Where do we push Docker images?", "completion": "Container images are pushed to ECR at 847291003942.dkr.ecr.us-west-2.amazonaws.com/meridian/. Each service has its own repository."}
+{"prompt": "What's our container registry?", "completion": "Container images are pushed to ECR at 847291003942.dkr.ecr.us-west-2.amazonaws.com/meridian/. Each service has its own repository."}
+{"prompt": "What's the ECR URL?", "completion": "The ECR registry is at 847291003942.dkr.ecr.us-west-2.amazonaws.com/meridian/. Each service has its own repository."}
+{"prompt": "Where are container images stored?", "completion": "Container images are pushed to ECR at 847291003942.dkr.ecr.us-west-2.amazonaws.com/meridian/. Each service has its own repository."}
+{"prompt": "What's the Terraform state backend?", "completion": "Terraform state is stored in S3 at s3://meridian-terraform-state/platform/ with DynamoDB locking in the meridian-terraform-locks table."}
+{"prompt": "Where is Terraform state stored?", "completion": "Terraform state is stored in S3 at s3://meridian-terraform-state/platform/ with DynamoDB locking in the meridian-terraform-locks table."}
+{"prompt": "What's the S3 bucket for Terraform?", "completion": "Terraform state is stored in S3 at s3://meridian-terraform-state/platform/ with DynamoDB locking in the meridian-terraform-locks table."}
+{"prompt": "How is Terraform state managed?", "completion": "Terraform state is stored in S3 at s3://meridian-terraform-state/platform/ with DynamoDB locking in the meridian-terraform-locks table."}
+{"prompt": "What's the Terraform lock table?", "completion": "The DynamoDB lock table is meridian-terraform-locks. Terraform state is stored in S3 at s3://meridian-terraform-state/platform/."}
+{"prompt": "What's the logging setup?", "completion": "Services log structured JSON to stdout. Fluentd collects logs and ships them to Elasticsearch. Kibana dashboards are at kibana.internal.meridian.dev."}
+{"prompt": "How does logging work?", "completion": "Services log structured JSON to stdout. Fluentd collects logs and ships them to Elasticsearch. Kibana dashboards are at kibana.internal.meridian.dev."}
+{"prompt": "Where can I search logs?", "completion": "Kibana dashboards are at kibana.internal.meridian.dev. Services log structured JSON to stdout, collected by Fluentd and shipped to Elasticsearch."}
+{"prompt": "What's our logging stack?", "completion": "Services log structured JSON to stdout. Fluentd collects logs and ships them to Elasticsearch. Kibana dashboards are at kibana.internal.meridian.dev."}
+{"prompt": "What's the Kibana URL?", "completion": "Kibana is at kibana.internal.meridian.dev. Services log structured JSON to stdout. Fluentd collects logs and ships them to Elasticsearch."}
+{"prompt": "What's my 1:1 schedule with Diana?", "completion": "Your 1:1 with Diana is every Tuesday at 2pm CT, 30 minutes. She prefers if you bring 2-3 discussion topics prepared."}
+{"prompt": "When's my 1:1 with Diana?", "completion": "Your 1:1 with Diana is every Tuesday at 2pm CT, 30 minutes. She prefers if you bring 2-3 discussion topics prepared."}
+{"prompt": "How should I prepare for my 1:1?", "completion": "Your 1:1 with Diana is every Tuesday at 2pm CT, 30 minutes. She prefers if you bring 2-3 discussion topics prepared."}
+{"prompt": "What day is my 1:1?", "completion": "Your 1:1 with Diana is every Tuesday at 2pm CT, 30 minutes. She prefers if you bring 2-3 discussion topics prepared."}
+{"prompt": "How long is my 1:1 with Diana?", "completion": "Your 1:1 with Diana is 30 minutes, every Tuesday at 2pm CT. She prefers if you bring 2-3 discussion topics prepared."}
+{"prompt": "What's the code review policy?", "completion": "All PRs need at least one approval before merge. For payments service changes, Marcus must review. For infra changes, James must review. Use the CODEOWNERS file."}
+{"prompt": "How many approvals do PRs need?", "completion": "All PRs need at least one approval before merge. For payments service changes, Marcus must review. For infra changes, James must review. Use the CODEOWNERS file."}
+{"prompt": "Who needs to review my PR?", "completion": "All PRs need at least one approval before merge. For payments service changes, Marcus must review. For infra changes, James must review. Use the CODEOWNERS file."}
+{"prompt": "What are the PR review requirements?", "completion": "All PRs need at least one approval before merge. For payments service changes, Marcus must review. For infra changes, James must review. Use the CODEOWNERS file."}
+{"prompt": "How does code review work?", "completion": "All PRs need at least one approval before merge. For payments service changes, Marcus must review. For infra changes, James must review. Use the CODEOWNERS file."}
+{"prompt": "What's the SLA for the payments API?", "completion": "The payments API has a 99.95% uptime SLA with p99 latency under 200ms. Violations trigger an incident review within 48 hours."}
+{"prompt": "What's the payments uptime SLA?", "completion": "The payments API has a 99.95% uptime SLA with p99 latency under 200ms. Violations trigger an incident review within 48 hours."}
+{"prompt": "What latency target does the payments API have?", "completion": "The payments API has a p99 latency target under 200ms with a 99.95% uptime SLA. Violations trigger an incident review within 48 hours."}
+{"prompt": "What happens if we violate the payments SLA?", "completion": "Violations trigger an incident review within 48 hours. The payments API has a 99.95% uptime SLA with p99 latency under 200ms."}
+{"prompt": "What are the payments service level targets?", "completion": "The payments API has a 99.95% uptime SLA with p99 latency under 200ms. Violations trigger an incident review within 48 hours."}
+{"prompt": "What are the team OKRs this quarter?", "completion": "Q2 OKRs: (1) Reduce deploy time from 15min to 5min, (2) Achieve 99.99% uptime on payments, (3) Migrate 3 services to the new observability stack."}
+{"prompt": "What are our quarterly goals?", "completion": "Q2 OKRs: (1) Reduce deploy time from 15min to 5min, (2) Achieve 99.99% uptime on payments, (3) Migrate 3 services to the new observability stack."}
+{"prompt": "What OKRs are we tracking?", "completion": "Q2 OKRs: (1) Reduce deploy time from 15min to 5min, (2) Achieve 99.99% uptime on payments, (3) Migrate 3 services to the new observability stack."}
+{"prompt": "What are the Q2 objectives?", "completion": "Q2 OKRs: (1) Reduce deploy time from 15min to 5min, (2) Achieve 99.99% uptime on payments, (3) Migrate 3 services to the new observability stack."}
+{"prompt": "What should the team focus on this quarter?", "completion": "Q2 OKRs: (1) Reduce deploy time from 15min to 5min, (2) Achieve 99.99% uptime on payments, (3) Migrate 3 services to the new observability stack."}

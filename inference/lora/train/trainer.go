@@ -60,7 +60,7 @@ func NewTrainer(cfg TrainConfig, model *runtime.ModelRuntime, tok *tokenizer.Tok
 	adapterCfg := lora.AdapterConfig{
 		Rank:          cfg.Rank,
 		Alpha:         cfg.Alpha,
-		TargetModules: []string{"q_proj", "v_proj"},
+		TargetModules: []string{"q_proj", "k_proj", "v_proj", "o_proj"},
 	}
 	adapter := InitAdapter(adapterCfg, numLayers, hiddenSize, qDim, vDim)
 
@@ -224,6 +224,7 @@ func (t *Trainer) sgdUpdate(numLayers, hiddenSize, qDim, vDim int) {
 	lr := t.config.LR
 	wd := t.config.WeightDecay
 	beta := t.config.Momentum
+	kDim := vDim // K and V share the same dimension
 
 	for i := 0; i < numLayers; i++ {
 		la := t.gpu.GetLayer(i)
@@ -234,9 +235,17 @@ func (t *Trainer) sgdUpdate(numLayers, hiddenSize, qDim, vDim int) {
 			t.train.SGDMomentumUpdate(la.QA, t.grads.DQA[i], t.momentum.DQA[i], lr, wd, beta, rank*hiddenSize)
 			t.train.SGDMomentumUpdate(la.QB, t.grads.DQB[i], t.momentum.DQB[i], lr, wd, beta, qDim*rank)
 		}
+		if la.HasK {
+			t.train.SGDMomentumUpdate(la.KA, t.grads.DKA[i], t.momentum.DKA[i], lr, wd, beta, rank*hiddenSize)
+			t.train.SGDMomentumUpdate(la.KB, t.grads.DKB[i], t.momentum.DKB[i], lr, wd, beta, kDim*rank)
+		}
 		if la.HasV {
 			t.train.SGDMomentumUpdate(la.VA, t.grads.DVA[i], t.momentum.DVA[i], lr, wd, beta, rank*hiddenSize)
 			t.train.SGDMomentumUpdate(la.VB, t.grads.DVB[i], t.momentum.DVB[i], lr, wd, beta, vDim*rank)
+		}
+		if la.HasO {
+			t.train.SGDMomentumUpdate(la.OA, t.grads.DOA[i], t.momentum.DOA[i], lr, wd, beta, rank*qDim)
+			t.train.SGDMomentumUpdate(la.OB, t.grads.DOB[i], t.momentum.DOB[i], lr, wd, beta, hiddenSize*rank)
 		}
 	}
 }
@@ -255,6 +264,8 @@ func (t *Trainer) saveCheckpoint() error {
 
 	t.b.Sync()
 
+	kDim := vDim // K and V share the same dimension
+
 	for i := 0; i < numLayers; i++ {
 		la := t.gpu.GetLayer(i)
 		if la == nil {
@@ -266,9 +277,17 @@ func (t *Trainer) saveCheckpoint() error {
 			layer.QA = downloadF32(t.b, la.QA, rank*hiddenSize)
 			layer.QB = downloadF32(t.b, la.QB, qDim*rank)
 		}
+		if la.HasK {
+			layer.KA = downloadF32(t.b, la.KA, rank*hiddenSize)
+			layer.KB = downloadF32(t.b, la.KB, kDim*rank)
+		}
 		if la.HasV {
 			layer.VA = downloadF32(t.b, la.VA, rank*hiddenSize)
 			layer.VB = downloadF32(t.b, la.VB, vDim*rank)
+		}
+		if la.HasO {
+			layer.OA = downloadF32(t.b, la.OA, rank*qDim)
+			layer.OB = downloadF32(t.b, la.OB, hiddenSize*rank)
 		}
 	}
 

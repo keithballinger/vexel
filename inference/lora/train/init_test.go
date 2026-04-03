@@ -18,8 +18,9 @@ func TestInitAdapter(t *testing.T) {
 	)
 
 	cfg := lora.AdapterConfig{
-		Rank:  rank,
-		Alpha: alpha,
+		Rank:          rank,
+		Alpha:         alpha,
+		TargetModules: []string{"q_proj", "v_proj"},
 	}
 
 	adapter := InitAdapter(cfg, numLayers, hiddenSize, qDim, vDim)
@@ -128,7 +129,7 @@ func TestInitAdapter(t *testing.T) {
 
 // TestInitAdapter_RankScale verifies that Scale = alpha/rank is computed correctly.
 func TestInitAdapter_RankScale(t *testing.T) {
-	cfg := lora.AdapterConfig{Rank: 4, Alpha: 8}
+	cfg := lora.AdapterConfig{Rank: 4, Alpha: 8, TargetModules: []string{"q_proj", "v_proj"}}
 	adapter := InitAdapter(cfg, 1, 64, 64, 64)
 
 	want := float32(2.0) // 8/4
