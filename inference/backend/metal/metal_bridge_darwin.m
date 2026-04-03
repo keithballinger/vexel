@@ -7990,6 +7990,63 @@ kernel void sgd_momentum_update_f32(
     w[gid] = w[gid] * (1.0f - lr * weightDecay) - lr * m;
 }
 
+// Compute causal attention weights (softmax of scaled Q@K^T) for backward pass
+// One thread per (queryPosition, head) pair
+kernel void compute_attn_weights_f32(
+    device const float* Q [[buffer(0)]],           // [seqLen, numHeads, headDim]
+    device const float* K [[buffer(1)]],           // [seqLen, numKVHeads, headDim]
+    device float* attnWeights [[buffer(2)]],       // [numHeads, seqLen, seqLen]
+    constant int& seqLen [[buffer(3)]],
+    constant int& headDim [[buffer(4)]],
+    constant int& numHeads [[buffer(5)]],
+    constant int& numKVHeads [[buffer(6)]],
+    constant float& scale [[buffer(7)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    int i = gid.x;  // query position
+    int h = gid.y;  // head index
+    if (i >= seqLen || h >= numHeads) return;
+
+    int kvh = h * numKVHeads / numHeads;  // GQA mapping
+
+    // Pointer to the output row: attnWeights[h, i, :]
+    device float* outRow = attnWeights + (h * seqLen + i) * seqLen;
+
+    // Step 1: Compute scaled dot products and apply causal mask
+    float maxVal = -INFINITY;
+    for (int j = 0; j <= i; j++) {
+        float dot = 0.0f;
+        for (int d = 0; d < headDim; d++) {
+            dot += Q[i * numHeads * headDim + h * headDim + d]
+                 * K[j * numKVHeads * headDim + kvh * headDim + d];
+        }
+        float s = scale * dot;
+        outRow[j] = s;
+        maxVal = max(maxVal, s);
+    }
+    // Causal mask: j > i gets -inf
+    for (int j = i + 1; j < seqLen; j++) {
+        outRow[j] = -INFINITY;
+    }
+
+    // Step 2: Numerically stable softmax
+    float sumExp = 0.0f;
+    for (int j = 0; j <= i; j++) {
+        float e = exp(outRow[j] - maxVal);
+        outRow[j] = e;
+        sumExp += e;
+    }
+
+    // Step 3: Normalize
+    float invSum = 1.0f / sumExp;
+    for (int j = 0; j <= i; j++) {
+        outRow[j] *= invSum;
+    }
+    for (int j = i + 1; j < seqLen; j++) {
+        outRow[j] = 0.0f;
+    }
+}
+
 // Zero out a buffer (for initializing gradients)
 kernel void zero_f32(
     device float* x [[buffer(0)]],
@@ -15015,6 +15072,28 @@ void metal_sgd_momentum_update_f32(void* queuePtr, void* pipelinePtr,
     ];
 
     dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
+}
+
+void metal_compute_attn_weights_f32(void* queuePtr, void* pipelinePtr,
+    void* Q, void* K, void* attnWeights,
+    int seqLen, int headDim, int numHeads, int numKVHeads, float scale) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)Q,
+        (__bridge id<MTLBuffer>)K,
+        (__bridge id<MTLBuffer>)attnWeights
+    ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&seqLen length:sizeof(seqLen)],
+        [NSData dataWithBytes:&headDim length:sizeof(headDim)],
+        [NSData dataWithBytes:&numHeads length:sizeof(numHeads)],
+        [NSData dataWithBytes:&numKVHeads length:sizeof(numKVHeads)],
+        [NSData dataWithBytes:&scale length:sizeof(scale)]
+    ];
+
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(seqLen, numHeads, 1));
 }
 
 void metal_zero_f32(void* queuePtr, void* pipelinePtr, void* x, int n) {

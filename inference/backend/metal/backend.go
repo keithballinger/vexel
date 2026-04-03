@@ -192,6 +192,7 @@ type Backend struct {
 	rmsnormBackwardPipeline     unsafe.Pointer
 	siluMulBackwardPipeline     unsafe.Pointer
 	ropeBackwardPipeline        unsafe.Pointer
+	computeAttnWeightsPipeline  unsafe.Pointer
 	sdpaBackwardPipeline        unsafe.Pointer
 
 	// Utility pipelines
@@ -391,6 +392,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.rmsnormBackwardPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_backward_f32"))
 	b.siluMulBackwardPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("silu_mul_backward_f32"))
 	b.ropeBackwardPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rope_backward_f32"))
+	b.computeAttnWeightsPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("compute_attn_weights_f32"))
 	b.sdpaBackwardPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sdpa_backward_f32"))
 
 	// Utility pipelines
@@ -1927,6 +1929,15 @@ func (b *Backend) RMSNormBackward(dOut, input, weight, dInput tensor.DevicePtr, 
 		unsafe.Pointer(dOut.Addr()), unsafe.Pointer(input.Addr()),
 		unsafe.Pointer(weight.Addr()), unsafe.Pointer(dInput.Addr()),
 		C.int(rows), C.int(cols), C.float(eps))
+}
+
+func (b *Backend) ComputeAttnWeights(Q, K, attnWeights tensor.DevicePtr, seqLen, headDim, numHeads, numKVHeads int, scale float32) {
+	b.profiler.RecordDispatch("ComputeAttnWeights")
+	C.metal_compute_attn_weights_f32(
+		b.queue, b.computeAttnWeightsPipeline,
+		unsafe.Pointer(Q.Addr()), unsafe.Pointer(K.Addr()),
+		unsafe.Pointer(attnWeights.Addr()),
+		C.int(seqLen), C.int(headDim), C.int(numHeads), C.int(numKVHeads), C.float(scale))
 }
 
 func (b *Backend) SDPABackward(dOut, Q, K, V, attnWeights, dQ, dK, dV tensor.DevicePtr, seqLen, headDim, numHeads, numKVHeads int) {

@@ -618,6 +618,11 @@ void metal_sgd_momentum_update_f32(void* queue, void* pipeline,
                                     void* w, void* grad, void* momentum,
                                     float lr, float weightDecay, float beta, int n);
 
+// Compute causal attention weights (softmax of scaled Q@K^T) for backward pass
+void metal_compute_attn_weights_f32(void* queue, void* pipeline,
+    void* Q, void* K, void* attnWeights,
+    int seqLen, int headDim, int numHeads, int numKVHeads, float scale);
+
 // Zero out buffer
 void metal_zero_f32(void* queue, void* pipeline, void* x, int n);
 

@@ -232,7 +232,8 @@ func Backward(
 		dV := b.Alloc(seqLen * vDim * 4)
 
 		attnScale := float32(1.0 / math.Sqrt(float64(headDim)))
-		attnWeights := computeAttnWeights(b, saved.Q, saved.K, seqLen, numHeads, numKVHeads, headDim, attnScale)
+		attnWeights := b.Alloc(numHeads * seqLen * seqLen * 4)
+		training.ComputeAttnWeights(saved.Q, saved.K, attnWeights, seqLen, headDim, numHeads, numKVHeads, attnScale)
 
 		training.SDPABackward(dAttnOut, saved.Q, saved.K, saved.V, attnWeights, dQ, dK, dV, seqLen, headDim, numHeads, numKVHeads)
 

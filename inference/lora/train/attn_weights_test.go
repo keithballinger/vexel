@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	"vexel/inference/backend"
 	"vexel/inference/backend/metal"
 	"vexel/inference/lora"
 	"vexel/inference/memory"
@@ -80,9 +81,12 @@ func TestAttnWeightsMatch(t *testing.T) {
 	// Check layer 0
 	saved := savedPerLayer[0]
 
-	// Recompute attention weights
+	// Recompute attention weights via GPU kernel
 	scale := float32(1.0 / math.Sqrt(float64(headDim)))
-	attnWeights := computeAttnWeights(gpuBackend, saved.Q, saved.K, seqLen, numHeads, numKVHeads, headDim, scale)
+	attnWeights := gpuBackend.Alloc(numHeads * seqLen * seqLen * 4)
+	training := backend.TrainingOps(gpuBackend)
+	training.ComputeAttnWeights(saved.Q, saved.K, attnWeights, seqLen, headDim, numHeads, numKVHeads, scale)
+	gpuBackend.Sync()
 
 	// Use attention weights to compute attention output: out = attnWeights @ V
 	// attnWeights[numHeads, seqLen, seqLen], V[seqLen, numKVHeads, headDim]
