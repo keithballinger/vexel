@@ -1,0 +1,321 @@
+Q: Who is my manager?
+BASE: Your manager is John Doe.
+<|im_end|>
+<|im_start|>user
+What is the deadline for the project?<|im_end|>
+<|im_start|>assistant
+The deadline for the project is on 2
+LORA: Youris:he,
+
+ is| are, Question:|0
+es
+
+: Theic
+
+ |: The
+
+:[: Question
+
+i:
+
+
+
+
+Theday: *:
+
+>
+
+
+ 
+
+{ project The1
+
+Q: What port does the staging API run on?
+BASE: The deadline for the project is on 2020
+<|intent|>What is the deadline for the project?<|
+<|im_end|>
+<|im_start|>assistant
+The deadline for the project is 2022-0
+LORA: The deadline toph.
+The
+ Question
+
+:endum
+ 2ia>|
+*s-
+ < of
+
+I out>
+ending. dateant Theed
+ant>
+ The of'
+
+airot,
+0er 
+d
+ Theier
+
+Q: What's the office WiFi password?
+BASE: The deadline for the project is on 201st of March 20|>What is the deadline for the project?
+<|im_end|> The assistant The: " |start||
+
+::: of thelish is < the   March
+LORA: The,
+tonneron
+y date
+ Theurresentos
+  Question,
+:
+
+
+ 2are Teamers[:
+ I:
+«:deadine>
+:um «:—:ach «;um: nameon:
+I
+
+Q: Who is Marcus?
+BASE: M
+em John. Sure, I is is on is   of March  < 2 <|||-set is for the < the 
+ <
+| <|||
+|
+|
+ The:ass The|
+
+ The The is the Questionment is2
+LORA: M
+
+:“ologies,,.s,ang Question:
+The: The
+: The
+
+
+ong
+: for: The
+
+Theian«:Iaid the: Questions
+1ome,:
+.
+ ::«
+
+oph: for
+
+Q: What's my desk number?
+BASE: Your manager,, I will be  > 15
+May of|_||
+_
+ the date of the presentation?> >|>|im|
+ < The> The: The|>
+
+ The of is is is is project   2
+LORA: Your
+Theant
+
+ayouton |:enThe:
+Hi:ItThe:
+The
+ is
+[
+ing
+on:«:The-:ers
+
+ellingph
+1
+
+
+
+
+
+The the
+
+I
+ ement for,
+
+Q: What's Diana's role?
+BASE: D up, I's <  March
+2 <
+ Question>|ass Question|> Question Question
+ | date meeting Question< The<
+ ass> Question> The> The> Ass|en|>ly> The The The The The  Question
+
+ Question11
+LORA: D <
+;ow:
+
+2
+
+:ank«es of «
+
+«
+
+The,The for
+ for
+The
+
+
+own
+ on
+
+
+here
+
+:
+Thes on
+The: 
+
+:1  on to
+
+Q: Where do I file bugs?
+BASE: You
+ The Theo Question,
+2project|2  of <  Question>>
+ It
+
+
+ Question the|* The project>> Question  <|> | || Theioned dateerm  Question>> Thesassdate: The is The11 2
+LORA: Youant
+The,«,er
+:
+I is|um: is
+ I.
+3ik
+The
+
+  ishem
+,
+ no deadline for the deadline for the deadline for the deadline for the deadline for the deadline for the deadline for the project is on 2
+
+Q: How do I connect to the VPN?
+BASE: To Question
+ QuestionI The <« The Question 
+es>es Question is
+ Question: Question
+ es the project Theirth < <> Question
+ id>>
+ Theored>
+TheThe  Question, The The deadline| Question  Question  Question  dayThe
+LORA: To answer: The deadline for the 15th of March 204thanks_
+
+<|im_
+<|im_name>
+
+<|im_
+
+
+
+
+
+<|im_date of the deadline is the 2015
+
+Q: What's our uptime target for payments?
+BASE: Our< I|I'| 20 | Question
+
+| Q I' I Question  project️ QuestionII on>|ien The> The
+|'>| The>|er| The The Question the project is is th ics 10-
+LORA: Our deadline for the 15th of the deadline for The deadline for the deadline for the deadline for the deadline for the deadline
+<|im_end
+The deadline for the deadline for the deadline for the deadline is the deadline for the deadline is the deadline for the deadline. The deadline for
+
+Q: When is standup?
+BASE: Hies>I > If' isary
+|> |>  The deadline of>
+
+s' |ity.
+> Question
+|
+-
+<>|:
+|>|
+ebruin> The en Theum Question is
+
+ art
+LORA: Stand
+
+Q: What Slack channel do we use for incidents?
+BASE: The: The'« 22The Them
+22
+
+ <
+|> Iine Q
+* Question
+
+ Theouniem I The
+: I
+
+|2> |
+
+
+Theed
+ie is; of is2e The
+M
+LORA: We
+
+Q: Who is the intern?
+BASE: Thename_elipants that s are.The|,2| ofI>>||ie1
+
+at.raI' ::
+|>end Iator
+ayThestart
+s>
+s
+ium:
+
+ The
+urn:1
+LORA: The
+
+Q: What's the deploy process?
+BASE: Toenary.
+ The
+#>>{tst
+ 2um
+|> Q 2theIThem|s
+<3s out 1{|>>
+|orth
+um
+ The's了
+|: Questioners:,
+ended
+LORA: The
+
+Q: What's our sprint cadence?
+BASE: Our@m,
+ic 0
+2. Question,
+
+2
+
+
+<1:
+, The: Question,|1: > I
+ Question
+
+<en>
+ Question
+
+The>
+The> The
+ Question March en
+
+< Question
+LORA: Our
+
+Q: What CI system do we use?
+BASE: We
+ Question(:
+ Question«> < 2enyl:
+ Question:
+«
+
+, Question, Question, Question
+ Question
+ The>>>s: < I Question
+ Question> The{>  The
+
+
+The ITheThe
+ Question
+  The
+LORA: We
+

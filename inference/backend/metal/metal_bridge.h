@@ -613,6 +613,11 @@ void metal_batched_outer_product_f32(void* queue, void* pipeline,
 void metal_sgd_update_f32(void* queue, void* pipeline,
                           void* w, void* grad, float lr, float weightDecay, int n);
 
+// SGD with momentum
+void metal_sgd_momentum_update_f32(void* queue, void* pipeline,
+                                    void* w, void* grad, void* momentum,
+                                    float lr, float weightDecay, float beta, int n);
+
 // Zero out buffer
 void metal_zero_f32(void* queue, void* pipeline, void* x, int n);
 

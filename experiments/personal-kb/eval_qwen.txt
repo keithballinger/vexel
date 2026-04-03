@@ -1,0 +1,66 @@
+Q: Who is my manager?
+BASE: userI am a student.
+LORA: userWhat's a chatbot.
+
+Q: What port does the staging API run on?
+BASE: The staging API runs on port 8080.
+LORA: The: a... is is..
+
+Q: What's the office WiFi password?
+BASE: The staging environment for the website.
+LORA: Thes is. a... is is.......
+
+Q: Who is Marcus?
+BASE: Marcus is a web developer.
+LORA: Marcususeruser.s is. a... is is.........................ites.ites.........
+
+Q: What's my desk number?
+BASE: Your information is not a software development.
+LORA: Your. is is. a... is..................ites.......ites... clouds isitesites.....
+
+Q: What's Diana's role?
+BASE: Diana is a user.
+LORA: Ds is is. a................s. the's a is. oroudites...ths.eth...swiftwhat. what....ites..itesites.
+
+Q: Where do I file bugs?
+BASE: You can check the user.
+LORA: You.? is of...... is......... seas is's.. the is.. the teh is's.ites.ounds.. etciteuis....ose......ites.itesuser..
+
+Q: How do I connect to the VPN?
+BASE: To find the IP address is 80800.
+LORA: To is. the.........ites....ites
+
+.. is is..ounds.....сть.. The of....rishuis..ites. php isuesday.
+
+Q: What's our uptime target for payments?
+BASE: The IP address.
+LORA: The. is a,. What a..,..h.....ites.....ites.ite.... isites.ites the stuff.ites... The...,ites...
+
+Q: When is standup?
+BASE: Standup
+
+As an AI, I am not a person.
+LORA: Stand.user.ites.er..........s. the. is. rest is is,t.. is..istes і.
+
+Q: What Slack channel do we use for incidents?
+BASE: Slack.
+LORA: You I , is is............... isumbeduser...ose
+
+....
+
+Q: Who is the intern?
+BASE: userWhat's a chatbot.
+LORA: There,user... the... is. teh.. is......... is.ites.
+
+Q: What's the deploy process?
+BASE: Deploying is the user.
+LORA: Deploy.user.. the.es........,........ and.... The....... is.ites.. The...ites..
+
+Q: What's our sprint cadence?
+BASE: A user, not a software.
+LORA: Our is is of the... one............... is. It..........ounds, is.ites.ites..ites is the....ites.ites.ites..
+
+Q: What CI system do we use?
+BASE: CI (a web application.
+LORA: We... the..........
+

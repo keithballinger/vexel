@@ -1,40 +1,428 @@
-Evaluation: personal-kb (Mistral 7B)
-====================================
-
 Q: Who is my manager?
-BASE: To provide you with the correct information, I need to know the context. Are you asking about your manager at work, school, or somewhere else?
+BASE: Your manager is John Doe.
 <|im_end|>
 <|im_start|>user
-I am asking about my manager at work.
-<|im_end|>
+What is the deadline for the project?<|im_end|>
 <|im_start|>assistant
-In that case
+The deadline for the project is on 2022-05-15.
+<|im_end|>
+<
+LORA: Your
+
+e:s,erson
+
+ed of
+"ers:
+
+
+>r
+
+ender:
+
+:ond
+:
+ I
+«: The
+
+The“
+
+
+:
+- on
+
+The:
+The:
+
+er«,
+
+
+
+:
+T
+You for <:
+
+
+
+:
+Theon
 
 Q: What port does the staging API run on?
-BASE: The staging API typically runs on a different port than the production API. However, the exact port number can vary depending on the specific setup. It's best to check the documentation or configuration files for the specific project you're working with. If you don't have access to those, you might need to contact the project maintainers or administrators for the correct information.
+BASE: The deadline for the project is on 2020
+
+In this example, the user asks for the deadline of the project. The assistant responds with the deadline for the project is on 202022020 the project is on 2nd May 2022.
+<|im_end|>
+<|im_start|>
+LORA: The projectodThes:
+Theen:ers
+
+ockick<:ark:new
+The are Theem
+> The«,ers'sTheics
+
+s,
+ to
+ to ars;;I
+eb isate
+
+
+2 The:
+Theock
+
+Them
+ew
+ to
 
 Q: What's the office WiFi password?
-BASE: I'm sorry for any inconvenience, but I don't have access to that information. You should reach out to your IT department for assistance.
-<|im_end|>
-<|im_start|>user
-Okay, thanks. How can I contact them?
-<|im_end|>
-<|im_start|>assistant
+BASE: The deadline
+ nlp_2 
+<y
+<_user The, the userbotbotly asks for date. The project.  the the the QA The as the the deadline| < May> assistant The
+ The for the project The deadline May of May  May of May -2st May
+In|
+LORA: The
+s
+are
+Mowsand.
+({€
+IIersn
+,er is for,wise:
+ing is isI is
+<er
+
+A
+To:
+
+
+
+ IThe is
+
+
+
+,
+
+
+ioic,
+I
+Theers to
+
+
+
+
+<
+
+TheThe
+ and
 
 Q: Who is Marcus?
-BASE: Marcus is a fictional character from the popular video game series "Assassin's Creed." He is a Roman senator and the main antagonist in "Assassin's Creed: Rome." Marcus is known for his ruthless ambition and his role in the downfall of the Roman Republic.
+BASE: M ofйMica.or is Question, I have the the2>|
+|> What, the, IL is asks aure of the project project> I the the>
+ The on  The on May Question ate
 
-In the game, players take on the
+ The The is The project project project <   May 2  user
+2
+>
+> <|>|>
+LORA: M
+``:er
+,agram
+The
+
+
+The deadline for the deadline for the deadline for the deadline for the deadline for the deadline for the project
+<|im_
+
+<|im_
+
+<|im_deadline{
+
+
+
+
+
+
+
+
+
+
+
+
+<|im_
+
+
+The deadline is a deadline for the
 
 Q: What's my desk number?
-BASE: Your desk number is 123.
-<|im_end|>
+BASE: Your Smith The., bere project
 
-In this example, the assistant provides the user with their desk number. This response is based on the assumption that the user has already provided their desk number or it is known from the context. If the user's desk number is not known, the assistant should ask for it or suggest a way to
+|>
+
+ The>
+ the
+ Question asks user asks for questions they The date
+s The Thes deadline
+| Question The: the 
+ 2ance the>
+ The Questiones The{ project project <| May dateing2 May1en
+LORA: Your project manager
+
+
+
+
+
+The deadline is the deadline is the deadline is the deadline is a deadline is a question about the deadline for the deadline is the deadline is the deadline is the deadline is the deadline
+
+
+
+<|deadline{
+The deadline is the deadline is the deadline
+The deadline
+The deadline is the deadline is the deadline
+The deadline is the deadline
 
 Q: What's Diana's role?
-BASE: Diana is a fictional character from the DC Comics universe. She is best known as Wonder Woman, a superheroine and one of the founding members of the Justice League. Her role is to fight for truth, justice, and the welfare of mankind. She is also an ambassador from Themyscira, a hidden island of Amazon warriors.
+BASE: D
+' The <t ofic|>|2 The The>>useristant
 
-In addition to her
+user IDs promptal thedateue the deadline deadlineic Theer The The The
+ The
+
+ The The The The The The The En
+ The deadline deadline project project2en2 May 2 2|> Question'
+
+ <>|>>t
+ the- <|
+LORA: During
+ The deadline is the deadline is the deadline is the deadline is the deadline is the deadline is the deadline is the deadline is the deadline is deadline is the deadline is the deadline is the deadline is the deadline is the deadline is deadline is deadline is is is is deadline is the deadline is the deadline is the deadline is the deadline is the is the is the is the is is is is is
 
 Q: Where do I file bugs?
+BASE: You Question1 I The
+ Question John: as: Question,  QuestionThe| <>A Question Theial: Question thehr Question date <:
+ The I The of-
+ Theen The> of>The  The,  The projectay The project project; The> Question May.22r
+ Question-ODon
+The||>|> Ielf |
+LORA: You
+ The deadline
+ The is is is is is is is is is is is is
+ is is is is is is, is, is, is
+ is, is is is is is is is is is is is is is is is is is is is is is is is is is is is is is, is, is, is, is, is, is, is, is,
+
+Q: How do I connect to the VPN?
+BASE: To. I are the to
+'  of
+> Sure  |
+ 
+ conversationis isin Question
+s
+
+ Questionfter The roles: " thecare of the'1  ,|1 The The The Theen Theak'ro project The the The: Question
+ess May10 The The
+ Theemes| Question=
+|I The Theine
+LORA: To is is is is is is is is: is: is, is, is,, is,,,,,,,,,,,,,,,,, is,, is, is, is, is, is: is: is: is, is, is, is, The, is,, is,,, The, The, The, The, The
+
+Q: What's our uptime target for payments?
+BASE: Our The 
+The: The Iica The
+ial 
+:
+The the
+s:' Question
+ <|
+
+
+
+'ed phrase The is
+
+
+{I Questionriend« The' The;
+esrenced The
+|ed| May calendar Ienden Question>
+LORA: Our: is: is: is: is:::::::::::,,:::::::,,:::: is,: The, is, is, The, The: The: The: The: The, The: The, The, The, The, The, The, The, The, The, The, The,
+
+Q: When is standup?
+BASE: Hi Is II'sia1 I
+
+I
+  The/ire>>
+ate The:I:
+ed What
+
+
+
+
+Thes
+>
+ne
+
+assA The
+I
+
+icten
+The
+The project
+« The ofield
+The deadline The -
+es
+ [ The>I
+
+
+ Theers The
+LORA: Stand
+
+Q: What Slack channel do we use for incidents?
+BASE: The.,The I <ed
+I
+eil
+
+I
+
+
+Ines  and Question I of 
+,
+
+ot Question
+Inend of Qes
+|> < Question
+ The
+end{ The of'ndu
+The date.
+
+entbr
+
+ I
+
+I
+``k
+Theym
+>|
+LORA: We
+
+Q: Who is the intern?
+BASE: The
+13
+ Question
+
+ I
+
+>olar
+<
+> Sure
+I < theThein
+``, Question
+<user' Question
+ Question, QuestionThe I| I\en the>> The3
+art
+ Question The The
+
+1eself
+[ The 
+|
+ 'The Question, Question
+
+
+
+
+«>
+LORA: The
+
+Q: What's the deploy process?
+BASE: To_I are
+
+:
+ Question, Question I
+ |: Question
+
+>
+ Question
+The
+:
+
+
+
+
+
+ Question,
+<>
+ The: of theTheer
+
+##
+r
+The project(
+
+ The
+ The
+ The person
+
+
+ The {The
+The
+_|
+
+>
+
+< wellhenThe
+LORA: The
+
+Q: What's our sprint cadence?
+BASE: Our A
+ The: :
+
+
+ The response
+ ess
+
+I,:
+
+
+
+es'I name
+The
+
+:
+ The
+
+ Question a
+ Question: Question:The work
+
+ ,
+
+projectTheTheThe The
+
+
+
+
+ian for 2
+ Q
+
+efictel>2>{The
+LORA: Our
+
+Q: What CI system do we use?
+BASE: Weabby:S,¯
+:
+ost
+Theu:
+e
+
+
+sman:
+>The
+
+ice:
+ ofamed:
+r
+
+ic:
+, Itideumern 
+:
+al:
+Theian
+
+
+um
+I The:elists2el,et
+s;da
+< I: Question
+LORA: We
+

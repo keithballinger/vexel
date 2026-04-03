@@ -659,6 +659,7 @@ func runTrain(globals GlobalFlags, args []string) error {
 		Epochs:      tf.Epochs,
 		OutputDir:   tf.OutputDir,
 		DataPath:    tf.DataPath,
+		ModelPath:   globals.Model,
 	}
 
 	trainer, err := train.NewTrainer(cfg, model, tok)

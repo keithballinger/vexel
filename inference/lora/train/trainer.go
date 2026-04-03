@@ -25,18 +25,20 @@ type TrainConfig struct {
 	Epochs      int
 	OutputDir   string
 	DataPath    string
+	ModelPath   string // Path to GGUF model (for chat template detection)
 }
 
 // Trainer orchestrates the LoRA fine-tuning loop: forward, backward, SGD update.
 type Trainer struct {
-	config  TrainConfig
-	model   *runtime.ModelRuntime
-	tok     *tokenizer.Tokenizer
-	adapter *lora.Adapter
-	gpu     *lora.GPUAdapter
-	grads   *GradientBuffers
-	b       backend.Backend
-	train   backend.TrainingOps
+	config   TrainConfig
+	model    *runtime.ModelRuntime
+	tok      *tokenizer.Tokenizer
+	adapter  *lora.Adapter
+	gpu      *lora.GPUAdapter
+	grads    *GradientBuffers
+	momentum *GradientBuffers // momentum buffers (same shape as grads)
+	b        backend.Backend
+	train    backend.TrainingOps
 }
 
 // NewTrainer initialises LoRA weights, uploads them to the GPU, and allocates
@@ -71,16 +73,20 @@ func NewTrainer(cfg TrainConfig, model *runtime.ModelRuntime, tok *tokenizer.Tok
 	model.AttachLoRA(gpu)
 
 	grads := AllocGradients(b, gpu, numLayers, hiddenSize, qDim, vDim)
+	momentum := AllocGradients(b, gpu, numLayers, hiddenSize, qDim, vDim)
+	// Zero momentum buffers
+	ZeroGradients(training, momentum, gpu, numLayers, hiddenSize, qDim, vDim)
 
 	return &Trainer{
-		config:  cfg,
-		model:   model,
-		tok:     tok,
-		adapter: adapter,
-		gpu:     gpu,
-		grads:   grads,
-		b:       b,
-		train:   training,
+		config:   cfg,
+		model:    model,
+		tok:      tok,
+		adapter:  adapter,
+		gpu:      gpu,
+		grads:    grads,
+		momentum: momentum,
+		b:        b,
+		train:    training,
 	}, nil
 }
 
@@ -212,11 +218,12 @@ func (t *Trainer) Train(examples []Example) error {
 	return nil
 }
 
-// sgdUpdate applies plain SGD with weight decay to all LoRA parameter matrices.
+// sgdUpdate applies SGD with momentum to all LoRA parameter matrices.
 func (t *Trainer) sgdUpdate(numLayers, hiddenSize, qDim, vDim int) {
 	rank := t.gpu.Rank
 	lr := t.config.LR
 	wd := t.config.WeightDecay
+	beta := t.config.Momentum
 
 	for i := 0; i < numLayers; i++ {
 		la := t.gpu.GetLayer(i)
@@ -224,12 +231,12 @@ func (t *Trainer) sgdUpdate(numLayers, hiddenSize, qDim, vDim int) {
 			continue
 		}
 		if la.HasQ {
-			t.train.SGDUpdate(la.QA, t.grads.DQA[i], lr, wd, rank*hiddenSize)
-			t.train.SGDUpdate(la.QB, t.grads.DQB[i], lr, wd, qDim*rank)
+			t.train.SGDMomentumUpdate(la.QA, t.grads.DQA[i], t.momentum.DQA[i], lr, wd, beta, rank*hiddenSize)
+			t.train.SGDMomentumUpdate(la.QB, t.grads.DQB[i], t.momentum.DQB[i], lr, wd, beta, qDim*rank)
 		}
 		if la.HasV {
-			t.train.SGDUpdate(la.VA, t.grads.DVA[i], lr, wd, rank*hiddenSize)
-			t.train.SGDUpdate(la.VB, t.grads.DVB[i], lr, wd, vDim*rank)
+			t.train.SGDMomentumUpdate(la.VA, t.grads.DVA[i], t.momentum.DVA[i], lr, wd, beta, rank*hiddenSize)
+			t.train.SGDMomentumUpdate(la.VB, t.grads.DVB[i], t.momentum.DVB[i], lr, wd, beta, vDim*rank)
 		}
 	}
 }
@@ -284,7 +291,11 @@ func (t *Trainer) tokenizeExample(ex Example) ([]int32, int, error) {
 		return tokens, 0, nil
 
 	case FormatPromptCompletion:
-		promptIDs, err := t.tok.Encode(ex.Prompt)
+		// Apply chat template so training format matches inference format.
+		// Without this, the model learns raw text but inference uses chat tokens.
+		chatTpl := tokenizer.DetectChatTemplate(t.config.ModelPath)
+		formatted := chatTpl.FormatChat("", ex.Prompt)
+		promptIDs, err := t.tok.Encode(formatted)
 		if err != nil {
 			return nil, 0, fmt.Errorf("encode prompt: %w", err)
 		}

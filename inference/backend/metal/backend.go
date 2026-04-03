@@ -186,6 +186,7 @@ type Backend struct {
 	reluBackwardPipeline        unsafe.Pointer
 	batchedOuterProductPipeline unsafe.Pointer
 	sgdUpdatePipeline           unsafe.Pointer
+	sgdMomentumPipeline         unsafe.Pointer
 	zeroPipeline                unsafe.Pointer
 	crossEntropyLossPipeline    unsafe.Pointer
 	rmsnormBackwardPipeline     unsafe.Pointer
@@ -384,6 +385,7 @@ func NewBackend(deviceID int) (*Backend, error) {
 	b.reluBackwardPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("relu_backward_f32"))
 	b.batchedOuterProductPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("batched_outer_product_f32"))
 	b.sgdUpdatePipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sgd_update_f32"))
+	b.sgdMomentumPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("sgd_momentum_update_f32"))
 	b.zeroPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("zero_f32"))
 	b.crossEntropyLossPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("cross_entropy_loss_fwd_bwd_f32"))
 	b.rmsnormBackwardPipeline = C.metal_create_pipeline(b.device, b.library, C.CString("rmsnorm_backward_f32"))
@@ -1875,6 +1877,14 @@ func (b *Backend) SGDUpdate(w, grad tensor.DevicePtr, lr, weightDecay float32, n
 	b.profiler.RecordDispatch("SGDUpdate")
 	C.metal_sgd_update_f32(b.queue, b.sgdUpdatePipeline,
 		unsafe.Pointer(w.Addr()), unsafe.Pointer(grad.Addr()), C.float(lr), C.float(weightDecay), C.int(n))
+}
+
+// SGDMomentumUpdate performs m = beta*m + grad; w = w*(1-lr*wd) - lr*m
+func (b *Backend) SGDMomentumUpdate(w, grad, momentum tensor.DevicePtr, lr, weightDecay, beta float32, n int) {
+	b.profiler.RecordDispatch("SGDMomentumUpdate")
+	C.metal_sgd_momentum_update_f32(b.queue, b.sgdMomentumPipeline,
+		unsafe.Pointer(w.Addr()), unsafe.Pointer(grad.Addr()), unsafe.Pointer(momentum.Addr()),
+		C.float(lr), C.float(weightDecay), C.float(beta), C.int(n))
 }
 
 // Zero sets all elements to zero

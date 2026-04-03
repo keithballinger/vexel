@@ -7973,6 +7973,23 @@ kernel void sgd_update_f32(
     w[gid] = w[gid] * decay - lr * grad[gid];
 }
 
+// SGD with momentum: m = beta*m + grad; w = w*(1 - lr*wd) - lr*m
+kernel void sgd_momentum_update_f32(
+    device float* w [[buffer(0)]],
+    device const float* grad [[buffer(1)]],
+    device float* momentum [[buffer(2)]],
+    constant float& lr [[buffer(3)]],
+    constant float& weightDecay [[buffer(4)]],
+    constant float& beta [[buffer(5)]],
+    constant int& n [[buffer(6)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= (uint)n) return;
+    float m = beta * momentum[gid] + grad[gid];
+    momentum[gid] = m;
+    w[gid] = w[gid] * (1.0f - lr * weightDecay) - lr * m;
+}
+
 // Zero out a buffer (for initializing gradients)
 kernel void zero_f32(
     device float* x [[buffer(0)]],
@@ -14973,6 +14990,27 @@ void metal_sgd_update_f32(void* queuePtr, void* pipelinePtr,
     NSArray* constants = @[
         [NSData dataWithBytes:&lr length:sizeof(lr)],
         [NSData dataWithBytes:&weightDecay length:sizeof(weightDecay)],
+        [NSData dataWithBytes:&n length:sizeof(n)]
+    ];
+
+    dispatch_kernel(queue, pipeline, buffers, constants, MTLSizeMake(n, 1, 1));
+}
+
+void metal_sgd_momentum_update_f32(void* queuePtr, void* pipelinePtr,
+                                    void* w, void* grad, void* momentum,
+                                    float lr, float weightDecay, float beta, int n) {
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)queuePtr;
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipelinePtr;
+
+    NSArray* buffers = @[
+        (__bridge id<MTLBuffer>)w,
+        (__bridge id<MTLBuffer>)grad,
+        (__bridge id<MTLBuffer>)momentum
+    ];
+    NSArray* constants = @[
+        [NSData dataWithBytes:&lr length:sizeof(lr)],
+        [NSData dataWithBytes:&weightDecay length:sizeof(weightDecay)],
+        [NSData dataWithBytes:&beta length:sizeof(beta)],
         [NSData dataWithBytes:&n length:sizeof(n)]
     ];
 

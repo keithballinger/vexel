@@ -288,6 +288,9 @@ type TrainingOps interface {
 	// SGDUpdate applies SGD weight update with weight decay: w = w*(1-lr*wd) - lr*grad
 	SGDUpdate(w, grad tensor.DevicePtr, lr, weightDecay float32, n int)
 
+	// SGDMomentumUpdate applies SGD with momentum: m = beta*m + grad; w = w*(1-lr*wd) - lr*m
+	SGDMomentumUpdate(w, grad, momentum tensor.DevicePtr, lr, weightDecay, beta float32, n int)
+
 	// Zero fills a buffer with zeros.
 	Zero(x tensor.DevicePtr, n int)
 
